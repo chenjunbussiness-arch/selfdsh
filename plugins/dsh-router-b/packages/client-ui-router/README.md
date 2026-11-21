@@ -87,7 +87,7 @@ node scripts/serve-preview.mjs                                 # http://127.0.0.
    worker 的清单与当前步骤、以及 `reported` / `verified` **确实在不同泳道且不串味**；
 5. 灌一份模拟的 `todos` 投影，断言卡片改读投影（`4/7` 覆盖了任务自带的 `3/7`）。
 
-**没做的验证**：没有把这个包装进 `C:\Users\<user>\.dsh` 的 profile 里跑真机
+**没做的验证**：没有把这个包装进 `C:\Users\<你>\.dsh` 的 profile 里跑真机
 （该目录明确不许动、也不许重启正在跑的应用）。所以「装进真实 profile 后 AppFrame 里长什么样」
 未验证；已验证的是「bundle 的 loader 契约 + 注册路径 + 组件首屏渲染」。
 

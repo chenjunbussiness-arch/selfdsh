@@ -3,7 +3,7 @@
 - 审计角色：W1（只读；未修改、未删除、未重启任何服务）
 - 审计时间：2026-11-20 15:17–15:30（Asia/Shanghai）
 - 主机：本机（`/` 为 ext4），DSH 版本 `0.2.2-rc.5`（`dsh --version` 输出）
-- 在跑进程：`node .../@deepseek-ai/dsh/lib/bin.js --profile web --no-open --host 127.0.0.1 --port 42443 --trusted-host 192.0.2.10:8443`（PID 432879），由 systemd 单元 `dsh-web.service` 拉起；另有 `dsh-web-gate.service`（127.0.0.1:42444 → 42443）
+- 在跑进程：`node .../@deepseek-ai/dsh/lib/bin.js --profile web --no-open --host 127.0.0.1 --port 42443 --trusted-host <服务器IP>:8443`（PID 432879），由 systemd 单元 `dsh-web.service` 拉起；另有 `dsh-web-gate.service`（127.0.0.1:42444 → 42443）
 - 密钥处理：本报告中出现的 `DEEPSEEK_API_KEY`、`KIRO_API_KEY`、`GEMINI_GATEWAY_KEY` 都只是**字段名**；没有打印任何值。`.credentials.yaml` 只解析了结构，未输出值。
 
 > 结论先行：本机的「运行时配置」几乎全部集中在两处 —— **profile 覆盖层** `/root/.dsh/profiles/web/cordis.patch.yml`（模型 provider / 权限 / 品牌 / 子代理上限）与 **bundle 补丁** `/srv/workspace/deepseek-harness/dsh-router-b/cordis.patch.yml`（分区根目录 / 并发 / 验收）。这两份文件都**不被 git 记录到环境外**，换机必须逐项重做；`/root/.dsh/router` 里只有 `tiers.json` 值得带，`board.json` 可选，其余（`snapshot.json`、`seams.json`、`*.tmp-*`、`*.bak-*`）都是可再生的。
@@ -238,7 +238,7 @@ $DSH_HOME/.credentials.yaml        (provider-managed, written by set/unset)
 | `/root/.dsh/vpn/profiles.json` + `vpn/secrets/` | `git` VPN 的 host/端口/账号/密码 |
 | `/root/.dsh/storages/workspace.json` | 3 个 workspace 的 `path` 全是 `/srv/workspace/...` |
 | `/root/.dsh/sessions/…`（328 个） | 会话的 cwd/路径元数据指向 `/srv/workspace/...`；换路径后旧会话仍在，但里面的绝对路径引用会失效 |
-| `/etc/systemd/system/dsh-web.service`、`dsh-web-gate.service` | `ExecStart` 的 dsh 绝对路径、`--profile web`、端口 42443、`--trusted-host 192.0.2.10:8443`、`ExecStartPre=/usr/local/bin/dsh-fix-zod` |
+| `/etc/systemd/system/dsh-web.service`、`dsh-web-gate.service` | `ExecStart` 的 dsh 绝对路径、`--profile web`、端口 42443、`--trusted-host <服务器IP>:8443`、`ExecStartPre=/usr/local/bin/dsh-fix-zod` |
 | `/srv/workspace/deepseek-harness/dsh-vpn/cordis.patch.yml:28` | `localProbePort: 42443` 写死 Web 端口，换端口要同步改 |
 
 ---

@@ -3,6 +3,9 @@
 # password, so the page URL never changes again.
 set -uo pipefail
 
+# 对外访问用的域名或 IP（nginx server_name，须与 DSH --trusted-host 一致）。不写进仓库，运行前 export。
+SERVER_NAME="${DSH_SERVER_NAME:?先 export DSH_SERVER_NAME=<你的域名或IP>}"
+
 echo "===== 1. 安装 gate 脚本 ====="
 install -m 0755 /tmp/dsh-web-gate.mjs /usr/local/bin/dsh-web-gate.mjs
 ls -l /usr/local/bin/dsh-web-gate.mjs
@@ -45,7 +48,7 @@ map $http_upgrade $connection_upgrade {
 
 server {
     listen 8443 ssl;
-    server_name 192.0.2.10;
+    server_name __SERVER_NAME__;
 
     ssl_certificate     /etc/nginx/tls/dsh.crt;
     ssl_certificate_key /etc/nginx/tls/dsh.key;
@@ -77,6 +80,7 @@ server {
     }
 }
 CONF
+sed -i "s#__SERVER_NAME__#${SERVER_NAME}#" /etc/nginx/sites-available/dsh-web
 nginx -t 2>&1 | tail -2
 systemctl reload nginx
 

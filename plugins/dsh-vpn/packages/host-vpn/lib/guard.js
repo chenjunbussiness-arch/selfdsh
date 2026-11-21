@@ -43,7 +43,7 @@ export function parseRouteTable(text) {
  * DHCP renewals change `metric` and `proto` without moving traffic, so only
  * `via` and `dev` are compared.
  * @param text - `ip -4 route show default` output.
- * @returns e.g. `via 192.0.2.30 dev eth0`, or an empty string when there is no default route.
+ * @returns e.g. `via 10.240.15.253 dev eth0`, or an empty string when there is no default route.
  */
 export function defaultRouteKey(text) {
     const entry = parseRouteTable(text).find(route => route.isDefault);

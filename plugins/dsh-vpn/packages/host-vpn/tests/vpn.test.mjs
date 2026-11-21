@@ -41,9 +41,9 @@ async function until(check, ms = 5000) {
 }
 
 const ROUTES = [
-  'default via 192.0.2.30 dev eth0 proto dhcp src 192.0.2.35 metric 100',
-  '198.18.16.0/20 dev eth0 proto kernel scope link src 192.0.2.35 metric 100',
-  '192.0.2.30 dev eth0 proto dhcp scope link src 192.0.2.35 metric 100',
+  'default via 10.240.15.253 dev eth0 proto dhcp src 10.240.2.35 metric 100',
+  '10.240.0.0/20 dev eth0 proto kernel scope link src 10.240.2.35 metric 100',
+  '10.240.15.253 dev eth0 proto dhcp scope link src 10.240.2.35 metric 100',
 ].join('\n')
 
 /** A fake `ip`/system layer. `defaultRoute` can be changed mid-test. */
@@ -214,17 +214,17 @@ test('store: a profile without a secret cannot be created', async () => {
 
 test('guard: targets that would capture the gateway, this server or the probe are refused', () => {
   const table = parseRouteTable(ROUTES)
-  assert.equal(defaultRouteKey(ROUTES), 'via 192.0.2.30 dev eth0')
+  assert.equal(defaultRouteKey(ROUTES), 'via 10.240.15.253 dev eth0')
   const extra = [{ label: 'the watchdog probe address', address: '223.5.5.5' }]
   const protect = protectedAddresses(table, extra)
   assert.equal(checkTargets(table, v4Targets(['10.20.0.0/16']), protect), undefined)
-  assert.match(checkTargets(table, v4Targets(['192.0.2.30/32']), protect), /default gateway/)
-  assert.match(checkTargets(table, v4Targets(['192.0.2.35/32']), protect), /own address/)
+  assert.match(checkTargets(table, v4Targets(['10.240.15.253/32']), protect), /default gateway/)
+  assert.match(checkTargets(table, v4Targets(['10.240.2.35/32']), protect), /own address/)
   assert.match(checkTargets(table, v4Targets(['223.5.5.0/24']), protect), /probe/)
   assert.match(checkTargets(table, v4Targets(['127.0.0.0/8']), protect), /loopback/)
   // The connected /20 is more specific than a /16 target, so a wider route cannot take it over.
-  assert.equal(checkTargets(table, v4Targets(['198.18.0.0/16']), protect), undefined)
-  assert.match(checkTargets(table, v4Targets(['198.18.18.0/24']), protect), /default gateway|own address/)
+  assert.equal(checkTargets(table, v4Targets(['10.240.0.0/16']), protect), undefined)
+  assert.match(checkTargets(table, v4Targets(['10.240.2.0/24']), protect), /default gateway|own address/)
 })
 
 // --- openfortivpn plans & log parsing --------------------------------------
@@ -373,7 +373,7 @@ test('watchdog: losing the local DSH port or the public probe trips it', async (
 
 test('manager: refuses a profile whose targets would capture the gateway', async () => {
   const h = await harness()
-  const profile = await addProfile(h, { targets: ['192.0.2.30/32'] })
+  const profile = await addProfile(h, { targets: ['10.240.15.253/32'] })
   await h.manager.connect(profile.id)
   assert.equal(h.manager.state, 'failed')
   assert.match((await h.manager.statusDocument()).error, /would capture the default gateway/)

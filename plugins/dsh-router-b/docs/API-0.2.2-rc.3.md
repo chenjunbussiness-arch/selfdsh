@@ -9,9 +9,9 @@
 | 事实 | 值 | 证据 |
 |---|---|---|
 | 运行版 CLI 包 | `@deepseek-ai/dsh-desktop-runtime@0.2.2-rc.3`，依赖 `@deepseek-ai/dsh@0.2.2-rc.3` | `…\app.asar\dsh\package.json:4,13` |
-| 安装目录 | `C:\Users\<user>\AppData\Local\Programs\DeepSeek Harness\resources\app.asar\dsh` | `$env:DSH_INSTALL_DIR` |
-| 当前 profile | `desktop`，`DSH_PROFILE_DIR=C:\Users\<user>\.dsh\profiles\desktop` | 环境变量 |
-| profile 已装 bundles | `@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`、`dshmarket`、`dsh-computer-use-win` | `C:\Users\<user>\.dsh\profiles\desktop\package.json:13-18` |
+| 安装目录 | `C:\Users\<你>\AppData\Local\Programs\DeepSeek Harness\resources\app.asar\dsh` | `$env:DSH_INSTALL_DIR` |
+| 当前 profile | `desktop`，`DSH_PROFILE_DIR=C:\Users\<你>\.dsh\profiles\desktop` | 环境变量 |
+| profile 已装 bundles | `@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`、`dshmarket`、`dsh-computer-use-win` | `C:\Users\<你>\.dsh\profiles\desktop\package.json:13-18` |
 | 打包内容 | 338 个 `@deepseek-ai/*` 包，**且每个包带 `src/*.ts` 原始源码**（连同 `lib/index.js` 打包产物） | 目录枚举 |
 
 下文的证据前缀简写：
@@ -532,7 +532,7 @@ CLI 模板（最小 host-only bundle，`DOC(host-plugin.md:9-27)`）：
 
 1. **插件管理器（推荐，用户路径）**：`plugin_manager` `action: install_bundle`，`target` = 包目录绝对路径。它负责 `package.json` 写入、依赖安装、bundle 选择。
    证据：`DOC(plugin-development.md:3-5`、`DOC(host-plugin.md:73-75)`。
-2. **直接改 profile manifest**：`C:\Users\<user>\.dsh\profiles\desktop\package.json` 的
+2. **直接改 profile manifest**：`C:\Users\<你>\.dsh\profiles\desktop\package.json` 的
    `dependencies`（本地包用 `file:E:/path`）+ `dsh.profile.bundles` 数组。
    证据：本机真实文件 `package.json:5-20`（deps 有 `"dsh-token-meter-badge": "file:E:/PythonProject/jiuwen/dsh-token-meter-badge"`，bundles 为 `["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app","dshmarket","dsh-computer-use-win"]`）。
 

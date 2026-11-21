@@ -2,7 +2,7 @@
 
 结论先行：**可以在插件里按目标主机为模型请求选出口，且绑定修改即时生效（不用重启 dsh-web）**。方案是在插件激活时包装 `globalThis.fetch`。第一次装插件要重启一次 dsh-web（由 lead 部署时做）。
 
-证据均来自服务器 192.0.2.10 的只读探测（`ssh ... 'cat -n/grep -n'`），没有写任何文件、没有重启服务。路径缩写：
+证据均来自服务器 <服务器IP> 的只读探测（`ssh ... 'cat -n/grep -n'`），没有写任何文件、没有重启服务。路径缩写：
 
 - `STORE` = `/usr/local/pnpm-global/store/v11/links`
 - `PIAI` = `$STORE/@earendil-works/pi-ai/1.5.2/bcd6f785…/node_modules/@earendil-works/pi-ai`
