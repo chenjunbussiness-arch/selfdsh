@@ -21,6 +21,8 @@ export interface PanelState {
         readonly kind: 'ok' | 'error';
         readonly text: string;
     };
+    /** True while a hand-triggered refresh is in flight. */
+    readonly refreshing?: boolean;
 }
 /** Bridge between the sources and the React view. */
 export declare class EgressController {
@@ -32,6 +34,7 @@ export declare class EgressController {
     private active;
     private mock;
     private timer;
+    private noticeTimer;
     private disposed;
     /**
      * @param host - the real bridge source.
@@ -52,11 +55,14 @@ export declare class EgressController {
     start(): () => void;
     /** Stop polling and drop listeners. */
     dispose(): void;
+    private readonly onVisible;
     /**
      * Read the state, preferring the real bridge.
      * @param quiet - true for background polls: do not flash the loading state.
      */
     refresh(quiet?: boolean): Promise<void>;
+    /** Show one toast line; a success clears itself after a moment. */
+    private notify;
     /** Run one write and fold its answer (or error) into the state. */
     private act;
     /** Clear the toast line. */

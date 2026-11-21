@@ -20,17 +20,17 @@ function sampleProfiles(now: number): ProfileView[] {
   return [
     {
       id: 'p-1a2b3c4d', name: '公司内网 git', type: 'password', host: 'vpn.corp.example', port: 443, username: 'zhanglei',
-      realm: '', trustedCert: '', targets: ['10.20.0.0/16', 'git.corp.example'], setDns: false, command: [],
+      realm: '', trustedCert: '', targets: ['198.51.100.0/24', 'git.corp.example'], setDns: false, command: [],
       secretConfigured: true, createdAt: new Date(now - 9 * day).toISOString(), updatedAt: new Date(now - 2 * day).toISOString(),
     },
     {
       id: 'p-5e6f7a8b', name: '运维网关（token 链接）', type: 'token-url', host: 'gw.ops.example', port: 10443, username: '',
-      realm: '', trustedCert: 'e46d4aff08ba6914e64daa85bc6112a422fa7ce16631bff0b592a28556f993db', targets: ['192.168.88.0/24', '10.30.1.15'],
+      realm: '', trustedCert: 'e46d4aff08ba6914e64daa85bc6112a422fa7ce16631bff0b592a28556f993db', targets: ['203.0.113.0/24', '203.0.113.15'],
       setDns: false, command: [], secretConfigured: true, createdAt: new Date(now - 5 * day).toISOString(), updatedAt: new Date(now - 5 * day).toISOString(),
     },
     {
       id: 'p-9c0d1e2f', name: '测试环境（待配置）', type: 'password', host: 'vpn.lab.example', port: 8443, username: 'ci-bot',
-      realm: 'lab', trustedCert: '', targets: ['172.30.0.0/20'], setDns: false, command: [],
+      realm: 'lab', trustedCert: '', targets: ['198.18.0.0/20'], setDns: false, command: [],
       secretConfigured: false, createdAt: new Date(now - day).toISOString(), updatedAt: new Date(now - day).toISOString(),
     },
   ]
@@ -45,7 +45,7 @@ function sampleLogs(now: number, state: VpnState): LogLine[] {
     { t: at(4298), level: 'out', text: 'INFO:   Authenticated.' },
     { t: at(4298), level: 'out', text: 'INFO:   Remote gateway has allocated a VPN.' },
     { t: at(4297), level: 'out', text: 'INFO:   Interface ppp0 is UP.' },
-    { t: at(4297), level: 'out', text: 'INFO:   Got addresses: [10.8.0.6], ns [10.8.0.1]' },
+    { t: at(4297), level: 'out', text: 'INFO:   Got addresses: [192.0.2.6], ns [192.0.2.1]' },
     { t: at(4297), level: 'out', text: 'INFO:   Tunnel is up and running.' },
   ]
   if (state === 'connecting') return head.slice(0, 3).map((line, index) => ({ ...line, t: at(6 - index * 2) }))
@@ -60,8 +60,8 @@ function sampleLogs(now: number, state: VpnState): LogLine[] {
   if (state === 'disconnected') return []
   return [
     ...head,
-    { t: at(4296), level: 'info', text: 'route added: 10.20.0.0/16 -> ppp0' },
-    { t: at(4296), level: 'info', text: 'route added: 10.20.30.40/32 -> ppp0' },
+    { t: at(4296), level: 'info', text: 'route added: 198.51.100.0/24 -> ppp0' },
+    { t: at(4296), level: 'info', text: 'route added: 198.51.100.40/32 -> ppp0' },
     { t: at(4295), level: 'info', text: '已连接；加了 2 条路由，默认路由未动' },
     { t: at(4265), level: 'info', text: '看门狗通过（30s）' },
     { t: at(300), level: 'out', text: 'DEBUG:  password = ***' },
@@ -91,10 +91,10 @@ export function createMockSource(scenario: Scenario = 'connected'): VpnSource {
     return {
       status: state,
       ...state === 'disconnected' || profile === undefined ? {} : { profileId: profile.id, profileName: profile.name },
-      ...up ? { iface: 'ppp0', ip: '10.8.0.6', connectedAt: new Date(connectedAt).toISOString(), uptimeSeconds: Math.round((Date.now() - connectedAt) / 1000), pid: 31877 } : {},
+      ...up ? { iface: 'ppp0', ip: '192.0.2.6', connectedAt: new Date(connectedAt).toISOString(), uptimeSeconds: Math.round((Date.now() - connectedAt) / 1000), pid: 31877 } : {},
       ...state === 'connecting' ? { iface: 'ppp0', pid: 31877 } : {},
       ...error === undefined ? {} : { error },
-      routes: up ? ['10.20.0.0/16', '10.20.30.40/32'] : [],
+      routes: up ? ['198.51.100.0/24', '198.51.100.40/32'] : [],
       watchdog: up
         ? { state: 'passed' }
         : state === 'failed' ? { state: 'idle' } : { state: state === 'connecting' ? 'idle' : 'idle' },

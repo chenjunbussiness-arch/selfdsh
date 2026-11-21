@@ -142,6 +142,40 @@ const renderJson = (_args, value) => [{ type: 'text', text: JSON.stringify(value
 
 // --- tools -------------------------------------------------------------------
 
+/** Edit distance, capped: anything above `limit` returns `limit + 1`. */
+function distance(a, b, limit) {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index)
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i]
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+    }
+    previous = current
+  }
+  return previous[b.length]
+}
+
+/**
+ * `secret not found: NAME`, plus up to three stored names that look like what
+ * was meant (a case slip, a typo, a missing prefix), so the agent can retry
+ * without a secret_list round trip. Only names are suggested, never values.
+ * @param {string} name - the name asked for.
+ * @param {Record<string, unknown>} entries - the vault's entries.
+ */
+export function notFound(name, entries) {
+  const wanted = String(name).toLowerCase()
+  const close = Object.keys(entries).filter((candidate) => {
+    const lower = candidate.toLowerCase()
+    if (lower === wanted) return true
+    if (wanted.length >= 3 && lower.length >= 3 && (lower.includes(wanted) || wanted.includes(lower))) return true
+    return wanted.length >= 4 && distance(lower, wanted, 2) <= 2
+  }).slice(0, 3)
+  return new Error(close.length === 0
+    ? `secret not found: ${name}`
+    : `secret not found: ${name} (did you mean ${close.join(', ')}?)`)
+}
+
 /**
  * Build all tool definitions.
  * @param {{ vault: import('./vault.js').Vault, config: ReturnType<import('./config.js').resolveConfig>, logger: any }} deps
@@ -155,7 +189,7 @@ export function createTools({ vault, config, logger }) {
     const out = new Map()
     for (const name of names) {
       const entry = entries[name]
-      if (entry === undefined) throw new Error(`secret not found: ${name}`)
+      if (entry === undefined) throw notFound(name, entries)
       out.set(name, entry.value)
     }
     return out
@@ -227,7 +261,7 @@ export function createTools({ vault, config, logger }) {
       if (description === undefined && tags === undefined) throw new Error('give description and/or tags')
       const result = await vault.mutate((entries) => {
         const entry = entries[name]
-        if (entry === undefined) throw new Error(`secret not found: ${name}`)
+        if (entry === undefined) throw notFound(name, entries)
         if (description !== undefined) entry.description = description
         if (tags !== undefined) entry.tags = tags
         entry.metaUpdatedAt = new Date().toISOString()
@@ -270,7 +304,7 @@ export function createTools({ vault, config, logger }) {
     async execute(raw, exec) {
       const name = requireName(raw?.name)
       await vault.mutate((entries) => {
-        if (entries[name] === undefined) throw new Error(`secret not found: ${name}`)
+        if (entries[name] === undefined) throw notFound(name, entries)
         delete entries[name]
       }, { signal: exec?.signal })
       log(`dsh-secrets: deleted secret ${name}`)
@@ -295,7 +329,7 @@ export function createTools({ vault, config, logger }) {
       if (raw?.overwrite !== undefined && typeof raw.overwrite !== 'boolean') throw new Error('overwrite must be a boolean')
       const overwrite = raw?.overwrite === true
       const result = await vault.mutate((entries) => {
-        if (entries[from] === undefined) throw new Error(`secret not found: ${from}`)
+        if (entries[from] === undefined) throw notFound(from, entries)
         if (from === to) return { result: { from, to, overwritten: false }, skipWrite: true }
         const exists = entries[to] !== undefined
         if (exists && !overwrite) throw new Error(`secret already exists: ${to} (pass overwrite: true to replace it)`)
