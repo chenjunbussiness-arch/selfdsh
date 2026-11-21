@@ -62,6 +62,28 @@ export function toInput(form: FormState): ProfileInput {
   }
 }
 
+/**
+ * Gateway host and port from a pasted address.
+ *
+ * `https://vpn.example.com:10443/remote/login` → `vpn.example.com` and `10443`;
+ * `vpn.example.com:8443` → host and port. A bare host name returns `undefined`,
+ * so typing is never rewritten mid-word.
+ * @param raw - the gateway field's text.
+ * @returns host and optional port, or `undefined` when there is nothing to split.
+ */
+export function gatewayFrom(raw: string): { host: string; port?: string } | undefined {
+  const text = raw.trim()
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text)
+  if (!hasScheme && !/:[0-9]{1,5}\/?$/.test(text) && !text.includes('/')) return undefined
+  try {
+    const url = new URL(hasScheme ? text : `https://${text}`)
+    if (url.hostname === '') return undefined
+    return { host: url.hostname.replace(/^\[|\]$/g, ''), ...url.port === '' ? {} : { port: url.port } }
+  } catch {
+    return undefined
+  }
+}
+
 /** Props of {@link ProfileForm}. */
 export interface ProfileFormProps {
   readonly t: Translate
@@ -83,16 +105,35 @@ export function ProfileForm(props: ProfileFormProps): ReactNode {
   const types: ProfileType[] = props.allowCustom ? ['password', 'token-url', 'custom'] : ['password', 'token-url']
   const editing = form.id !== undefined
 
+  /** Switch the auth type. A half-typed password must not land in the token-URL field. */
+  const pickType = (type: ProfileType): void => {
+    if (type !== form.type) set({ type, secret: '' })
+  }
+
+  /** `https://vpn.example.com:10443/remote/login` pasted as the gateway → host and port. */
+  const absorbGateway = (text: string): boolean => {
+    const gateway = gatewayFrom(text)
+    if (gateway === undefined) return false
+    set({ host: gateway.host, ...gateway.port === undefined ? {} : { port: gateway.port } })
+    return true
+  }
+
   const submit = async (event: { preventDefault(): void }): Promise<void> => {
     event.preventDefault()
     setError(undefined)
+    // Catch the two blanks the host would reject, in words, before a round trip.
+    if (form.name.trim() === '') { setError(t('form.err.name')); return }
+    if (toInput(form).targets.length === 0) { setError(t('form.err.targets')); return }
     const message = await props.onSave(toInput(form))
     if (message === undefined) set({ secret: '' })
     else setError(message)
   }
 
   return (
-    <form className="dshv-form" onSubmit={(event) => { void submit(event) }} autoComplete="off" data-type={form.type}>
+    <form
+      className="dshv-form" onSubmit={(event) => { void submit(event) }} autoComplete="off" data-type={form.type}
+      onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); props.onCancel() } }}
+    >
       <h2 className="dshv-form-title">{editing ? t('form.title.edit') : t('form.title.new')}</h2>
 
       <div className="dshv-field">
@@ -104,7 +145,7 @@ export function ProfileForm(props: ProfileFormProps): ReactNode {
         <span className="dshv-label" id="dshv-type-label">{t('form.type')}</span>
         <div className="dshv-seg" role="radiogroup" aria-labelledby="dshv-type-label">
           {types.map(type => (
-            <button key={type} type="button" role="radio" aria-checked={form.type === type} onClick={() => { set({ type }) }}>
+            <button key={type} type="button" role="radio" aria-checked={form.type === type} onClick={() => { pickType(type) }}>
               {t(`type.${type}` as 'type.password')}
             </button>
           ))}
@@ -116,7 +157,12 @@ export function ProfileForm(props: ProfileFormProps): ReactNode {
           <div className="dshv-grid">
             <div className="dshv-field">
               <label className="dshv-label" htmlFor="dshv-host">{t('form.host')}</label>
-              <input id="dshv-host" className="dshv-input" data-mono="true" value={form.host} placeholder="vpn.example.com" onChange={event => { set({ host: event.target.value }) }} />
+              <input
+                id="dshv-host" className="dshv-input" data-mono="true" value={form.host} placeholder="vpn.example.com"
+                onChange={event => { set({ host: event.target.value }) }}
+                onPaste={(event) => { if (absorbGateway(event.clipboardData.getData('text'))) event.preventDefault() }}
+                onBlur={() => { absorbGateway(form.host) }}
+              />
             </div>
             <div className="dshv-field">
               <label className="dshv-label" htmlFor="dshv-port">{t('form.port')}</label>
@@ -185,7 +231,7 @@ export function ProfileForm(props: ProfileFormProps): ReactNode {
 
       <div className="dshv-field">
         <label className="dshv-label" htmlFor="dshv-targets">{t('form.targets')}</label>
-        <textarea id="dshv-targets" className="dshv-input" data-mono="true" value={form.targets} placeholder={'10.20.0.0/16\ngit.corp.example'} onChange={event => { set({ targets: event.target.value }) }} />
+        <textarea id="dshv-targets" className="dshv-input" data-mono="true" value={form.targets} placeholder={'198.51.100.0/24\ngit.corp.example'} onChange={event => { set({ targets: event.target.value }) }} />
         <p className="dshv-hint">{t('form.targets.hint')}</p>
       </div>
 
