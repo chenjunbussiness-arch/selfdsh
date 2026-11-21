@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Token 用量统计",
+    "description": "侧边栏里的 token 消耗统计：今日总量与按模型拆分，可展开最近 7/30 天每日汇总；只读本机 ~/.dsh 会话日志，带增量缓存。",
+    "detail": "README.md"
+  }
+}

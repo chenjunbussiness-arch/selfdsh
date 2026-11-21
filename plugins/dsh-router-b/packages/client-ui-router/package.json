@@ -1,0 +1,57 @@
+{
+  "name": "dsh-client-ui-router",
+  "description": "Partition router task board for the DSH Web client: a right-Sidebar panel listing every dispatched task with its partition, manager/worker roster, reported-vs-verified state, and the worker's live todo checklist",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0",
+    "react": ">=18.2.0"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/types/**/*.d.ts",
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "node node_modules/typescript/bin/tsc -p tsconfig.build.json && node scripts/build-client.mjs && node scripts/build-host.mjs",
+    "verify:load": "node scripts/verify-load.mjs",
+    "preview": "node scripts/build-preview.mjs && node scripts/serve-preview.mjs"
+  },
+  "keywords": ["dsh", "dsh-plugin", "client-ui", "task-board"],
+  "author": "dsh-router-b",
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "esbuild": "^0.24.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.3"
+  }
+}

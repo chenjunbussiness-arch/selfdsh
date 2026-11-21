@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Wrapper: drive the resident Chromium (CDP 127.0.0.1:9222) via Python Playwright.
+#
+# Lane support (isolated Chromium + Xvfb + x11vnc + noVNC per task) lives in browser.py
+# and is reached through this same entry point:
+#   browser lane list
+#   browser lane new [--name X] [--size 1600x900] [--headless]
+#   browser lane kill <name>
+#   browser <open|shot|eval|tabs> ... --lane <name>     (default: 127.0.0.1:9222, unchanged)
+# Every lane exposes its own noVNC URL (printed by "lane list"/"lane new") for watching.
+exec /opt/shot/venv/bin/python /srv/workspace/bin/browser.py "$@"

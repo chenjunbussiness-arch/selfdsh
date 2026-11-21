@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Partition Router",
+    "description": "Routes demands into file partitions, dispatches them to workers, and shows a board that keeps a worker's self-report distinct from a verified result.",
+    "detail": "docs/DETAIL.md"
+  }
+}

@@ -1,0 +1,31 @@
+# dsh-secrets — bundle patch layer
+#
+# Mounts host-secrets: an AES-256-GCM encrypted vault at <DSH home>/secrets.vault
+# and the tools secret_set / secret_describe / secret_list / secret_delete /
+# secret_rename / secret_check / secret_exec / secret_http / secret_export /
+# secret_import. No tool returns a secret value. See DESIGN.md.
+#
+# Every key under `config` is optional:
+#   vaultPath            vault file (default <DSH home>/secrets.vault)
+#   keySource            passphrase-env (default) | keyfile
+#   passphraseEnv        env var with the master passphrase (default DSH_SECRETS_PASSPHRASE)
+#   keyfilePath          keyfile, mode 600 (default <DSH home>/secrets.key)
+#   scryptN/R/P          32768 / 8 / 1
+#   maxOutputChars       65536
+#   execTimeoutMs        60000 (capped by execMaxTimeoutMs 600000)
+#   execAllowedCommands  null = any command; a list restricts secret_exec
+#   httpAllowedHosts     null = any host; list of hosts or *.suffix
+#   httpTimeoutMs        30000
+#   httpFollowRedirects  false
+#   redactToolOutput     true: redact known values from every tool's text output
+#   redactMinLength      8
+#   lockTimeoutMs        10000
+#   lockStaleMs          30000
+
+- insert:
+    - id: host-secrets
+      name: dsh-host-secrets
+      config:
+        keySource: passphrase-env
+        passphraseEnv: DSH_SECRETS_PASSPHRASE
+        redactToolOutput: true

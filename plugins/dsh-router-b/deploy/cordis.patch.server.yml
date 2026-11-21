@@ -1,0 +1,47 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+- id: ui-settings-general
+  name: "@deepseek-ai/dsh-client-ui-settings-general"
+  config:
+    welcomeNoticeVersion: 2026-09-28.1
+
+# commandcode 走 OpenAI-completions 协议，不是 DeepSeek 原生协议。
+# 必须关掉 developer role（它只收 user/assistant）并用 deepseek 的 thinking 格式，
+# 否则上游会回 "Invalid discriminator value ... messages.N.role" /
+# "Invalid input at thinking"。
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      commandecode:
+        displayName: commandecode
+        apiKeyEnv: DEEPSEEK_API_KEY
+        api: openai-completions
+        baseURL: https://api.commandcode.ai/provider/v1
+        reasoning: max
+        compat:
+          thinkingFormat: deepseek
+          supportsStore: false
+          supportsDeveloperRole: false
+          maxTokensField: max_tokens
+        models:
+          - id: deepseek/deepseek-v4.1-flash
+            name: DSV4.1
+            contextWindow: 1000000
+            maxTokens: 384000
+            input:
+              - text
+              - image
+            reasoningEfforts:
+              off: null
+              low: low
+              high: high
+              max: max
+
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: commandecode
+    model: deepseek/deepseek-v4.1-flash
+    reasoningEffort: max
