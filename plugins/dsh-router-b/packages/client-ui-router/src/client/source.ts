@@ -23,7 +23,7 @@
  */
 
 import type {
-  BoardSnapshot, CredentialView, HostTaskState, PublishResult, TaskState, TaskView,
+  BoardSnapshot, CredentialView, FileListingView, HostTaskState, PublishResult, TaskState, TaskView,
 } from './contract.ts'
 import { createMockSource } from './mock.ts'
 
@@ -55,8 +55,14 @@ export interface BoardSource {
    * @param taskId - the task.
    * @param action - the `task_control` action; only `resume` is used today.
    * @param value - the action's optional `value` argument.
+   * @param extra - `suspend` only: the prerequisite to create, or ids to wait for.
    */
-  control?(taskId: string, action: ControlAction, value?: string): Promise<void>
+  control?(taskId: string, action: ControlAction, value?: string, extra?: ControlExtra): Promise<void>
+  /**
+   * List one directory level of one partition. Optional: a source without it
+   * renders the workspace page as "not available".
+   */
+  listFiles?(partition: string, path: string): Promise<FileListingView>
   /**
    * Observe Host-side changes.
    * @param listener - called whenever the board may have changed.
@@ -66,7 +72,15 @@ export interface BoardSource {
 }
 
 /** `task_control` actions the panel may send. */
-export type ControlAction = 'resume'
+export type ControlAction = 'resume' | 'suspend' | 'retry' | 'cancel'
+
+/** Extra arguments of a `suspend`. */
+export interface ControlExtra {
+  /** A prerequisite task to create and wait for. */
+  readonly prerequisite?: string
+  /** Existing task ids to wait for. */
+  readonly waitFor?: readonly string[]
+}
 
 /** The Remote surface the Host half is expected to expose (`ctx.remote.router`). */
 export interface RouterRemoteLike {
@@ -119,6 +133,8 @@ export function asBoardSnapshot(value: unknown): BoardSnapshot | undefined {
     // Additive fields are forwarded only when the Host sent them, so a view can
     // tell "the Host did not describe credentials" from "it described none".
     ...(Array.isArray(candidate.credentials) ? { credentials: candidate.credentials as readonly CredentialView[] } : {}),
+    ...(Array.isArray(candidate.groups) ? { groups: candidate.groups } : {}),
+    ...(Array.isArray(candidate.notices) ? { notices: candidate.notices } : {}),
   }
 }
 
@@ -326,15 +342,29 @@ export function createHttpSource(options: HttpSourceOptions = {}): BoardSource {
         jsonPost({ taskId, verdict, ...(note === undefined ? {} : { note }) }),
       )
     },
-    async control(taskId, action, value) {
+    async control(taskId, action, value, extra) {
       // Same transport as verify: the Host maps this onto `task_control`
       // (`{ task_id, action, value }`), so the board row changes exactly as the
       // tool would change it.
       await requestJson(
         requireFetch(),
         `${base}/control`,
-        jsonPost({ taskId, action, ...(value === undefined ? {} : { value }) }),
+        jsonPost({
+          taskId,
+          action,
+          ...(value === undefined ? {} : { value }),
+          ...(extra?.prerequisite === undefined || extra.prerequisite === '' ? {} : { prerequisite: extra.prerequisite }),
+          ...(extra?.waitFor === undefined || extra.waitFor.length === 0 ? {} : { waitFor: extra.waitFor }),
+        }),
       )
+    },
+    async listFiles(partition, path) {
+      const query = new URLSearchParams({ partition, path })
+      const body = await requestJson(requireFetch(), `${base}/files?${query.toString()}`)
+      if (typeof body !== 'object' || body === null || !Array.isArray((body as { entries?: unknown }).entries)) {
+        throw new Error('GET /api/router/files returned a payload that is not a listing')
+      }
+      return body as FileListingView
     },
     subscribe(listener) {
       let stream: EventSource | undefined

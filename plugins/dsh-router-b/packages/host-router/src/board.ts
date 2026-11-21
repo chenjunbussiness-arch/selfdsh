@@ -52,6 +52,12 @@ export type TaskState =
    * boot instead of starting the work over.
    */
   | 'interrupted'
+  /**
+   * Parked until other tasks finish: the task (or a human) found it needs a
+   * prerequisite first. Its session is kept; when every row in `waitingOn` is
+   * finished the router continues that same session. Holds no worker slot.
+   */
+  | 'suspended'
 
 /** How a task was dispatched, so the board shows the routing level. */
 export type DispatchLevel =
@@ -122,6 +128,36 @@ export interface RouterTask {
   readonly resumeNote?: string
   /** How many times this row's session was resumed after an interruption. */
   readonly resumes?: number
+  /**
+   * Task ids that must finish before this row may start. A queued row whose
+   * prerequisites are still open waits in the queue; one whose prerequisite
+   * failed or was cancelled is parked as `blocked` for a human.
+   */
+  readonly dependsOn?: readonly string[]
+  /**
+   * Ordered phase among siblings (rows with the same `parentId`). A row starts
+   * only after every sibling with a lower stage has finished. Absent = stage 0
+   * with no ordering among rows that carry no stage.
+   */
+  readonly stage?: number
+  /** While `suspended`: the task ids it waits for. */
+  readonly waitingOn?: readonly string[]
+  /** Why the row was suspended, in the words of whoever suspended it. */
+  readonly suspendReason?: string
+  /** How many times this row was suspended so far. */
+  readonly suspends?: number
+  /** State the row had when it was suspended, so a resume knows whether it had finished once. */
+  readonly suspendedFrom?: TaskState
+  /** How many times a manager that ended with open children was woken to keep waiting. */
+  readonly rewakes?: number
+  /**
+   * Set on a `blocked` row the router parked because a prerequisite failed:
+   * the state to return to once that prerequisite is retried and finishes.
+   * Only meaningful together with a non-empty `waitingOn`.
+   */
+  readonly blockedFrom?: 'queued' | 'suspended'
+  /** A human chose to start this row without waiting for its prerequisites. */
+  readonly ignoreOrder?: boolean
   /** Human remarks recorded while the task was in flight. */
   readonly notes?: readonly string[]
   /** Difficulty tier chosen before dispatch (`easy | medium | hard`). */
@@ -182,13 +218,24 @@ export function mark(state: TaskState): string {
     case 'blocked': return '[B]'
     case 'cancelled': return '[-]'
     case 'interrupted': return '[^]'
+    case 'suspended': return '[z]'
   }
 }
 
 /** States a dispatched child can still be occupying a slot in. */
 export function isOpen(state: TaskState): boolean {
   return state === 'queued' || state === 'dispatched' || state === 'running' || state === 'reported'
-    || state === 'interrupted'
+    || state === 'interrupted' || state === 'suspended'
+}
+
+/** States that count as "finished" for a prerequisite. */
+export function isFinished(state: TaskState): boolean {
+  return state === 'done' || state === 'verified' || state === 'reported'
+}
+
+/** States that can never become finished without a human (a prerequisite in one of these is dead). */
+export function isDead(state: TaskState): boolean {
+  return state === 'failed' || state === 'cancelled'
 }
 
 /** Order tasks for execution: priority first, then arrival. */
@@ -219,8 +266,13 @@ export function summarize(
     const age = Math.max(0, Math.round((Date.now() - Date.parse(task.updatedAt)) / 1000))
     const parent = task.parentId === undefined ? '' : ` <- ${task.parentId}`
     const worker = task.worker === undefined ? '-' : task.worker
+    const order = [
+      task.stage === undefined ? '' : ` stage ${String(task.stage)}`,
+      (task.dependsOn?.length ?? 0) === 0 ? '' : ` after ${task.dependsOn!.join(',')}`,
+      task.state === 'suspended' && (task.waitingOn?.length ?? 0) > 0 ? ` waiting-on ${task.waitingOn!.join(',')}` : '',
+    ].join('')
     const row = `${mark(task.state)} ${task.id} ${task.partition}/${task.level} ${worker} `
-      + `p${String(task.priority)} ${task.subject}${parent} (${String(age)}s)`
+      + `p${String(task.priority)} ${task.subject}${parent}${order} (${String(age)}s)`
     // What the worker reported is what the next routing decision reads, so the
     // board shows it rather than making the caller open each row.
     const did = task.summary === undefined ? '' : `    did: ${task.summary}`
@@ -228,7 +280,8 @@ export function summarize(
       ? ''
       : `    touched: ${task.touched!.slice(0, 8).join(', ')}`
         + (task.touched!.length > 8 ? ` +${String(task.touched!.length - 8)} more` : '')
-    return did === '' && touched === '' ? [row] : [row, did, touched]
+    const why = task.state === 'suspended' && task.suspendReason !== undefined ? `    suspended: ${task.suspendReason}` : ''
+    return [row, did, touched, why].filter(line => line !== '')
   })
   return [header, ...rows].join('\n')
 }
