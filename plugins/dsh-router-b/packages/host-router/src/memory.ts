@@ -308,7 +308,7 @@ export function memoryBrief(
 }
 
 /** Text of the content blocks of one message-shaped payload. */
-function textBlocks(content: unknown): string {
+export function textBlocks(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
   return content.flatMap((block): string[] => {
@@ -319,7 +319,7 @@ function textBlocks(content: unknown): string {
 }
 
 /** Short argument preview for a tool call line. */
-function argumentPreview(value: unknown): string {
+export function argumentPreview(value: unknown): string {
   if (value === undefined) return ''
   let text: string
   try {

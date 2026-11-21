@@ -158,6 +158,13 @@ export interface RouterTask {
   readonly blockedFrom?: 'queued' | 'suspended'
   /** A human chose to start this row without waiting for its prerequisites. */
   readonly ignoreOrder?: boolean
+  /** Model a human picked for this row (改派 / 换模型重跑); wins over tiers. */
+  readonly routeOverride?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+  /** The row that took this one's work over, and the row this one took over. */
+  readonly reassignedTo?: string
+  readonly reassignedFrom?: string
+  /** Pull request this row published, if any. */
+  readonly pr?: { readonly number: number; readonly url: string; readonly provider: string }
   /** Human remarks recorded while the task was in flight. */
   readonly notes?: readonly string[]
   /** Difficulty tier chosen before dispatch (`easy | medium | hard`). */

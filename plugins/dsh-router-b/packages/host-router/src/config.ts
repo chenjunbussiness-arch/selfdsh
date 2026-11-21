@@ -13,7 +13,9 @@
 
 import { isAbsolute, resolve } from 'node:path'
 
+import type { OutletPolicy } from './outlets.ts'
 import { REPORT_INSTRUCTION } from './report.ts'
+import { type ScmConfig, scmProblem } from './scm.ts'
 
 /** Reachability a partition declares, so its workers stop guessing. */
 export type PartitionNetwork = 'intranet' | 'internet' | 'offline'
@@ -24,6 +26,12 @@ export interface PartitionGit {
   readonly branch?: string
   /** Extra git rule for this partition, appended verbatim. */
   readonly rule?: string
+  /**
+   * Code host of this checkout (GitHub or Gitea). With it, workers publish their
+   * branch and open or update a pull request through `git_publish`, read checks
+   * through `pr_status`, and ask for a merge through `pr_merge` (a human approves).
+   */
+  readonly scm?: ScmConfig
 }
 
 /** One declarative file partition. */
@@ -68,6 +76,13 @@ export interface PartitionConfig {
    * would move work that is not the worker's to move.
    */
   readonly git?: PartitionGit
+  /**
+   * What agents in this partition may do outside the sandbox: push and open
+   * pull requests (`git`), run server commands (`ops`), open pages headless
+   * (`browser`). `off` refuses, `confirm` asks a human every time, `allow` runs
+   * (dangerous commands and merges still ask). See outlets.ts.
+   */
+  readonly outlets?: OutletPolicy
   /**
    * Use one long-lived manager child for this partition: tasks are handed to it
    * and it decomposes them into worker calls. Default follows the router-level
@@ -173,6 +188,11 @@ export interface RouterConfig {
   readonly progressNotices?: boolean
   /** Notices arriving within this window are posted as one message. Default 3000 ms. */
   readonly progressNoticeDelayMs?: number
+  /**
+   * Headless screenshot command used by `browser_capture`:
+   * `<command> <url> <out.png> [--full] [--wait ms]`. Default `/srv/workspace/bin/screenshot`.
+   */
+  readonly screenshotCommand?: string
 }
 
 /** Why a task landed where it did; recorded so a human can audit routing. */
@@ -321,6 +341,16 @@ export function normalisePartitions(
         `partition "${partition.name}" has network "${String(partition.network)}"; `
         + 'expected intranet, internet, or offline',
       )
+    }
+    if (partition.git?.scm !== undefined) {
+      const problem = scmProblem(partition.git.scm)
+      if (problem !== undefined) throw new PartitionConfigError(`partition "${partition.name}": ${problem}`)
+    }
+    for (const key of ['git', 'ops', 'browser'] as const) {
+      const mode = partition.outlets?.[key]
+      if (mode !== undefined && mode !== 'off' && mode !== 'confirm' && mode !== 'allow') {
+        throw new PartitionConfigError(`partition "${partition.name}": outlets.${key} must be off, confirm or allow`)
+      }
     }
     result.push({
       ...partition,
@@ -742,8 +772,21 @@ export function partitionBrief(partition: Partition, options: { readonly verify:
         + 'with a human and with other agents, and those operations move work that is not yours.',
       partition.git.rule,
     ].filter((rule): rule is string => rule !== undefined && rule.trim() !== '')
+    if (partition.git.scm !== undefined) {
+      gitRules.push(
+        `Code host: ${partition.git.scm.provider} ${partition.git.scm.repo}. When your change is committed, publish it with `
+          + '`git_publish` (it pushes the current branch and opens or updates its pull request); read CI with `pr_status`. '
+          + 'Never merge yourself and never push the default branch: a merge is `pr_merge`, which waits for the human.',
+      )
+    }
     if (gitRules.length > 0) lines.push('', 'Git rules for this partition:', ...gitRules)
   }
+  lines.push(
+    '',
+    'Server commands: run anything that changes the server (restart or reload a service, edit system files, '
+      + 'delete or move media, change DNS, firewall or users) through `ops_run`, never your own shell, so it is '
+      + 'logged and the dangerous ones wait for the human. Read-only looks (logs, status, disk) may use either.',
+  )
   if (options.verify && partition.verify !== undefined && partition.verify.length > 0) {
     lines.push(
       '',

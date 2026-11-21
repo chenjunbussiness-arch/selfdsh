@@ -133,7 +133,21 @@
 | 期 | 内容 | 状态 |
 | --- | --- | --- |
 | 第一期 | 架构骨架（routing 快速转发 → manager → session → worker）；分区记忆和 session 感知；manager 默认最强模型；停止与控制面（单个、整个需求、分区全部、通知 manager、乐观更新、可重试）；工作区记忆面板；任务板搜索 | 本次 PR |
-| 第二期 | git 分支与 PR 出口；确认队列和审计；运维命令分级；截图和抓取工具化；manager 计划可视化；手动指定分区；历史搜索 | 待排期 |
-| 第三期 | 可交互浏览器；定时巡检；面板新建和编辑分区；实时输出；改派和换模型；批量操作 | 待排期 |
+| 第二期 | git 分支与 PR 出口（GitHub，可切 Gitea）；确认队列和审计；运维命令分级；无头截图和取正文；**提前做了**实时输出、改派和换模型、批量操作；面板日夜主题与简洁风格 | 第二期 PR（叠在第一期之上） |
+| 第三期 | 每个需求独立 worktree；可交互浏览器；定时巡检；面板新建和编辑分区；manager 计划可视化；手动指定分区；历史搜索 | 待排期 |
 
-第二期开工前需要你定的问题见 3.2、3.3、3.6、3.7 里标 ❓ 的条目。
+第二期怎么做的、依赖哪些 DSH 接口、升级怎么核对，见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+
+---
+
+## 6. 待确认（第二期按默认做了，你看一眼要不要改）
+
+1. **出口默认策略**：git / 命令 / 浏览器 默认都是“放行”，只有合并 PR 和危险命令要确认。想更保守就把某个分区设成 `confirm`。
+2. **危险命令清单**：`rm`、`dd`、`mkfs`、`reboot`、`kill`、`systemctl stop/restart/disable`、`docker rm/stop/compose down`、`git push --force`、`reset --hard`、防火墙、改用户、`chmod 777 /`、`DROP TABLE` 等。`systemctl restart` 算危险（会断服务）；`nginx -s reload`、`docker run` 不算。要增减用分区的 `outlets.danger`。
+3. **合并方式**：默认 `squash`，合并前再核对一次 PR 头提交，变了就作废要重新申请。
+4. **确认卡有效期**：24 小时，过期自动作废。
+5. **改派次数**：一个任务只能改派一次（对新任务可以继续改派），避免一条链越拉越长。
+6. **浏览器白名单**：默认不限域名（只限 http/https）。媒体站建议给每个分区配 `browserAllow`。
+7. **主题“跟随系统”**：先看 DSH 外壳的暗色标记，再看操作系统设置。
+8. **令牌变量名**：默认 `GITHUB_TOKEN` / `GITEA_TOKEN`，可在分区 `git.scm.tokenEnv` 改。
+9. **`ops_run` 不是硬隔离**：worker 自己仍有 shell。要强制只走出口，需要在 DSH 配置里收掉 worker 的 shell 工具。

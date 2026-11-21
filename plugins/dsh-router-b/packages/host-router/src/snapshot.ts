@@ -176,6 +176,11 @@ export interface TaskView {
   readonly provider?: string
   readonly model?: string
   readonly reasoningEffort?: string
+  /** 改派: the row that took this one over, and the row this one took over. */
+  readonly reassignedTo?: string
+  readonly reassignedFrom?: string
+  /** Pull request this row published. */
+  readonly pr?: { readonly number: number; readonly url: string; readonly provider: string }
   readonly createdAt: string
   readonly updatedAt: string
 }
@@ -427,6 +432,9 @@ async function viewOf(task: RouterTask, deps: SnapshotDeps): Promise<TaskView> {
     ...task.provider === undefined ? {} : { provider: task.provider },
     ...task.model === undefined ? {} : { model: task.model },
     ...task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort },
+    ...task.reassignedTo === undefined ? {} : { reassignedTo: task.reassignedTo },
+    ...task.reassignedFrom === undefined ? {} : { reassignedFrom: task.reassignedFrom },
+    ...task.pr === undefined ? {} : { pr: task.pr },
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
   }
