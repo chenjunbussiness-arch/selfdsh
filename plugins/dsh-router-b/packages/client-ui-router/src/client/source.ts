@@ -23,6 +23,7 @@
  */
 
 import type {
+  ApprovalsView, ApprovalView, AuditEntryView, BatchAction, BatchResultView, LiveView, ModelChoiceView, ReassignInput, ReassignResult,
   BoardSnapshot, CredentialView, FileListingView, MemoryNoteView, PartitionMemoryView, HostTaskState, PublishResult, TaskState, TaskView,
 } from './contract.ts'
 import { createMockSource } from './mock.ts'
@@ -69,6 +70,20 @@ export interface BoardSource {
   addMemoryNote?(partition: string, text: string): Promise<MemoryNoteView>
   /** Remove one note from a partition's memory. */
   removeMemoryNote?(partition: string, id: string): Promise<void>
+  /** Outlet actions waiting for a human, and the latest decided ones. */
+  readApprovals?(): Promise<ApprovalsView>
+  /** Approve (run once) or reject one approval. */
+  decideApproval?(id: string, decision: 'approve' | 'reject', note?: string): Promise<ApprovalView>
+  /** Newest audit lines. */
+  readAudit?(limit?: number): Promise<readonly AuditEntryView[]>
+  /** A worker's output since segment `after`. */
+  readLive?(taskId: string, after?: number): Promise<LiveView>
+  /** Models the runtime offers (for 换模型). */
+  listModels?(): Promise<readonly ModelChoiceView[]>
+  /** 改派 / 换模型. */
+  reassign?(input: ReassignInput): Promise<ReassignResult>
+  /** One action over many rows. */
+  batch?(taskIds: readonly string[], action: BatchAction, value?: string): Promise<BatchResultView>
   /**
    * Observe Host-side changes.
    * @param listener - called whenever the board may have changed.
@@ -386,6 +401,34 @@ export function createHttpSource(options: HttpSourceOptions = {}): BoardSource {
     async removeMemoryNote(partition, id) {
       const query = new URLSearchParams({ partition, id })
       await requestJson(requireFetch(), `${base}/memory?${query.toString()}`, { method: 'DELETE' })
+    },
+    async readApprovals() {
+      const body = await requestJson(requireFetch(), `${base}/approvals`) as Partial<ApprovalsView> | undefined
+      if (body === undefined || !Array.isArray(body.pending)) throw new Error('GET /api/router/approvals returned a payload that is not an approval list')
+      return { pending: body.pending, recent: Array.isArray(body.recent) ? body.recent : [] }
+    },
+    async decideApproval(id, decision, note) {
+      return await requestJson(requireFetch(), `${base}/approvals`, jsonPost({ id, decision, ...(note === undefined || note === '' ? {} : { note }) })) as ApprovalView
+    },
+    async readAudit(limit = 100) {
+      const body = await requestJson(requireFetch(), `${base}/audit?limit=${String(limit)}`) as { entries?: AuditEntryView[] } | undefined
+      return Array.isArray(body?.entries) ? body.entries : []
+    },
+    async readLive(taskId, after = -1) {
+      const query = new URLSearchParams({ taskId, after: String(after) })
+      const body = await requestJson(requireFetch(), `${base}/live?${query.toString()}`) as Partial<LiveView> | undefined
+      if (body === undefined || !Array.isArray(body.segments)) throw new Error('GET /api/router/live returned a payload that is not live output')
+      return body as LiveView
+    },
+    async listModels() {
+      const body = await requestJson(requireFetch(), `${base}/tiers`) as { models?: ModelChoiceView[] } | undefined
+      return Array.isArray(body?.models) ? body.models : []
+    },
+    async reassign(input) {
+      return await requestJson(requireFetch(), `${base}/reassign`, jsonPost(input)) as ReassignResult
+    },
+    async batch(taskIds, action, value) {
+      return await requestJson(requireFetch(), `${base}/batch`, jsonPost({ taskIds, action, ...(value === undefined ? {} : { value }) })) as BatchResultView
     },
     subscribe(listener) {
       let stream: EventSource | undefined

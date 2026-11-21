@@ -10,6 +10,7 @@
 import type { BoardSnapshot, PublishResult, TaskState } from './contract.ts'
 import type { BoardSource, ControlAction, ControlExtra } from './source.ts'
 import type { FileListingView, MemoryNoteView, PartitionMemoryView } from './contract.ts'
+import type { ApprovalsView, ApprovalView, AuditEntryView, BatchAction, BatchResultView, LiveView, ModelChoiceView, ReassignInput, ReassignResult } from './contract.ts'
 
 
 /** Host states a stop leaves alone. */
@@ -262,6 +263,72 @@ export class RouterBoardController {
     const source = this.source
     if (source.removeMemoryNote === undefined) throw new Error('partition memory is not wired on this source')
     await source.removeMemoryNote(partition, id)
+  }
+
+  // --- desk: approvals, live output, 改派, batch ---------------------------------
+
+  /** Whether the source has the approval queue. */
+  get canApprove(): boolean { return typeof this.source.readApprovals === 'function' && typeof this.source.decideApproval === 'function' }
+  /** Whether the source streams worker output. */
+  get canReadLive(): boolean { return typeof this.source.readLive === 'function' }
+  /** Whether the source can move a task to another partition or model. */
+  get canReassign(): boolean { return typeof this.source.reassign === 'function' }
+  /** Whether the source takes batch actions. */
+  get canBatch(): boolean { return typeof this.source.batch === 'function' }
+
+  /** Pending and recent approvals. */
+  async readApprovals(): Promise<ApprovalsView> {
+    const source = this.source
+    if (source.readApprovals === undefined) return { pending: [], recent: [] }
+    return source.readApprovals()
+  }
+
+  /** Approve (runs once) or reject one approval, then re-read the board. */
+  async decideApproval(id: string, decision: 'approve' | 'reject', note?: string): Promise<ApprovalView> {
+    const source = this.source
+    if (source.decideApproval === undefined) throw new Error('approvals are not wired on this source')
+    const out = await source.decideApproval(id, decision, note)
+    void this.load()
+    return out
+  }
+
+  /** Newest audit lines. */
+  async readAudit(limit?: number): Promise<readonly AuditEntryView[]> {
+    const source = this.source
+    if (source.readAudit === undefined) return []
+    return source.readAudit(limit)
+  }
+
+  /** A worker's output since segment `after`. */
+  async readLive(taskId: string, after?: number): Promise<LiveView> {
+    const source = this.source
+    if (source.readLive === undefined) throw new Error('live output is not wired on this source')
+    return source.readLive(taskId, after)
+  }
+
+  /** Models offered by the runtime. */
+  async listModels(): Promise<readonly ModelChoiceView[]> {
+    const source = this.source
+    if (source.listModels === undefined) return []
+    return source.listModels()
+  }
+
+  /** 改派 / 换模型, then re-read the board. */
+  async reassign(input: ReassignInput): Promise<ReassignResult> {
+    const source = this.source
+    if (source.reassign === undefined) throw new Error('reassign is not wired on this source')
+    const out = await source.reassign(input)
+    void this.load()
+    return out
+  }
+
+  /** One action over many rows, then re-read the board. */
+  async batch(taskIds: readonly string[], action: BatchAction, value?: string): Promise<BatchResultView> {
+    const source = this.source
+    if (source.batch === undefined) throw new Error('batch actions are not wired on this source')
+    const out = await source.batch(taskIds, action, value)
+    void this.load()
+    return out
   }
 
   /** Clear the publish banner after the view has shown it. */

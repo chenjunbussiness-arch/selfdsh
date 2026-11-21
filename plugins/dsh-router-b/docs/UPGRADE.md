@@ -74,6 +74,8 @@ node scripts/install.mjs --profile <profile> # 通常是 no-op
 
 ## 四、升级时要逐个核对的接口点
 
+> 第二期（出口、作战台、主题）新增的依赖与完整核对清单见 [ARCHITECTURE.md 第六节](./ARCHITECTURE.md#六依赖的-dsh-接口升级核对清单)。本期唯一新增的 DSH 依赖是外壳暗色标记 `body[data-ds-dark-theme]`（只影响“跟随系统”），其余都复用下表已有接口。
+
 这是全部的外部依赖面。**只改这七处**，其余都是本仓库自己的代码。
 
 | # | 用到的能力 | 代码位置 | 断了的现象 | 怎么验 |
