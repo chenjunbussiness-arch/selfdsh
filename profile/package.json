@@ -1,0 +1,33 @@
+{
+  "name": "dsh-profile-web",
+  "private": true,
+  "dependencies": {
+    "dsh-router-b": "link:/srv/dsh-router-b",
+    "dsh-host-router": "link:/srv/dsh-router-b/packages/host-router",
+    "dsh-client-ui-router": "link:/srv/dsh-router-b/packages/client-ui-router",
+    "dsh-egress": "link:/srv/dsh-egress",
+    "dsh-host-egress": "link:/srv/dsh-egress/packages/host-egress",
+    "dsh-client-ui-egress": "link:/srv/dsh-egress/packages/client-ui-egress",
+    "dsh-vpn": "link:/srv/dsh-vpn",
+    "dsh-host-vpn": "link:/srv/dsh-vpn/packages/host-vpn",
+    "dsh-client-ui-vpn": "link:/srv/dsh-vpn/packages/client-ui-vpn",
+    "dsh-token-stats": "link:/srv/workspace/deepseek-harness/dsh-token-stats",
+    "dsh-host-token-stats": "link:/srv/workspace/deepseek-harness/dsh-token-stats/packages/host-token-stats",
+    "dsh-client-ui-token-stats": "link:/srv/workspace/deepseek-harness/dsh-token-stats/packages/client-ui-token-stats",
+    "dsh-secrets": "link:/srv/workspace/deepseek-harness/dsh-secrets",
+    "dsh-host-secrets": "link:/srv/workspace/deepseek-harness/dsh-secrets/packages/host-secrets"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-router-b",
+        "dsh-egress",
+        "dsh-vpn",
+        "dsh-token-stats",
+        "dsh-secrets"
+      ]
+    }
+  }
+}

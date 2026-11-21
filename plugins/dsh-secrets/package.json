@@ -1,0 +1,35 @@
+{
+  "name": "dsh-secrets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local encrypted secret vault for DeepSeek Harness: agents can store and use secrets (env injection, HTTP placeholders) but never read them back",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "DESIGN.md",
+    "packages"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test packages/host-secrets/tests/*.test.mjs",
+    "install:profile": "node scripts/install.mjs"
+  },
+  "dependencies": {
+    "dsh-host-secrets": "file:./packages/host-secrets"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

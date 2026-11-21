@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "分区路由 · Partition Router",
+    "description": "把需求按文件分区路由给 worker，并在右侧栏看板里区分「worker 自报」与「验收通过」。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "dsh-token-stats",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Token usage statistics for the DeepSeek Harness sidebar: today's total plus a per-model split, with expandable 7/30-day daily totals, aggregated read-only from the local ~/.dsh session logs",
+  "type": "module",
+  "icon": "./icon.svg",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale",
+    "packages"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "install:profile": "node scripts/install.mjs"
+  },
+  "dependencies": {
+    "dsh-host-token-stats": "file:./packages/host-token-stats",
+    "dsh-client-ui-token-stats": "file:./packages/client-ui-token-stats"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

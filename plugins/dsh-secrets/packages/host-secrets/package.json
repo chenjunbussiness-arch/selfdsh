@@ -1,0 +1,30 @@
+{
+  "name": "dsh-host-secrets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Host half of dsh-secrets: encrypted local vault and the secret_* tools (write and use, never read)",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./vault": "./vault.js",
+    "./redact": "./redact.js",
+    "./placeholders": "./placeholders.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "config.js",
+    "vault.js",
+    "redact.js",
+    "placeholders.js",
+    "tools.js"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}

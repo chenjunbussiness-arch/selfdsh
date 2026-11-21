@@ -1,0 +1,42 @@
+{
+  "name": "dsh-egress",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Egress manager bundle for DeepSeek Harness: choose which proxy (http, https, socks5 or direct) each model endpoint leaves the server through, fail-closed, from a panel in the Web client",
+  "type": "module",
+  "icon": "./icon.svg",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale",
+    "docs",
+    "packages"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs",
+    "install:profile": "node scripts/install.mjs"
+  },
+  "dependencies": {
+    "dsh-host-egress": "file:./packages/host-egress",
+    "dsh-client-ui-egress": "file:./packages/client-ui-egress"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,267 @@
+# ⚠ 脱敏副本 —— 2026-11-21 从 /root/.dsh/profiles/web/cordis.patch.yml 复制。
+# 本文件不含任何真实凭据：源文件中没有字面 API key / token / 口令；
+# 唯一出现过的凭据占位值 `exa-proxy-local`（EXA_PROXY_TOKEN 在凭据库里的值）已替换为 __REPLACE_ME__。
+# 各 provider 的 apiKeyEnv（DEEPSEEK_API_KEY / KIRO_API_KEY / GEMINI_GATEWAY_KEY）只是环境变量名，
+# 值请在新机的 /root/.dsh/.credentials.yaml 或 /root/.dsh/.env 里重新录入。
+# 路径类（分区根、vendor/exa-mcp-server）按 docs/README-MIGRATE.md 第 3 节改。
+
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+- id: ui-settings-general
+  name: "@deepseek-ai/dsh-client-ui-settings-general"
+  config:
+    welcomeNoticeVersion: 2026-09-28.1
+
+# commandcode 走 OpenAI-completions 协议，不是 DeepSeek 原生协议。
+# 必须关掉 developer role（它只收 user/assistant）并用 deepseek 的 thinking 格式，
+# 否则上游会回 "Invalid discriminator value ... messages.N.role" /
+# "Invalid input at thinking"。
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      commandecode:
+        displayName: commandecode
+        apiKeyEnv: DEEPSEEK_API_KEY
+        api: openai-completions
+        baseURL: https://api.commandcode.ai/provider/v1
+        reasoning: max
+        compat:
+          thinkingFormat: deepseek
+          supportsStore: false
+          supportsDeveloperRole: false
+          maxTokensField: max_tokens
+        models:
+          - id: deepseek/deepseek-v4.1-flash
+            name: DSV4.1
+            contextWindow: 1000000
+            maxTokens: 384000
+            input:
+              - text
+              - image
+            reasoningEfforts:
+              off: null
+              low: low
+              high: high
+              max: max
+
+      kiro:
+        displayName: kiro
+        api: openai-completions
+        apiKeyEnv: KIRO_API_KEY
+        baseURL: http://127.0.0.1:7993/v1
+        reasoning: high
+        models:
+          - id: kiro/claude-opus-5.5
+            name: kiro/claude-opus-5.5
+            contextWindow: 1000000
+            maxTokens: 328000
+            input:
+              - text
+              - image
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: kiro/claude-sonnet-5.5
+            name: kiro/claude-sonnet-5.5
+            contextWindow: 1000000
+            maxTokens: 328000
+            input:
+              - text
+              - image
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: kiro/claude-haiku-5.5
+            name: kiro/claude-haiku-5.5
+            contextWindow: 1000000
+            maxTokens: 328000
+            input:
+              - text
+              - image
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+      gemini:
+        displayName: Gemini (Vertex)
+        api: openai-completions
+        apiKeyEnv: GEMINI_GATEWAY_KEY
+        baseURL: http://127.0.0.1:4000/v1
+        streamIdleTimeoutMs: 900000
+        models:
+          - id: gemini-4-hydrogen
+            name: gemini-4-hydrogen
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+          - id: gemini-4-carbon
+            name: gemini-4-carbon
+            contextWindow: 1048576
+            maxTokens: 32768
+            input:
+              - text
+              - image
+          - id: gemini-4-argon
+            name: gemini-4-argon
+            contextWindow: 1048576
+            maxTokens: 32768
+            input:
+              - text
+              - image
+          - id: gemini-3.8-flash
+            name: gemini-3.8-flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+          - id: gemini-3.5-flash
+            name: gemini-3.5-flash
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+          - id: gemini-3.1-flash-lite
+            name: gemini-3.1-flash-lite
+            contextWindow: 1048576
+            maxTokens: 65536
+            input:
+              - text
+              - image
+- id: permission
+  name: "@deepseek-ai/dsh-permission-presets"
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+    defaultPreset: danger-full-access
+
+# 换品牌：`sidebar.brand.mark` / `sidebar.brand.name` 是 single 座位，被官方
+# plugin 占着时再注册会抛 `single slot "..." already has a registration`
+# （`ui-slots/src/index.ts:1284`）。所以必须先停用官方行，dsh-client-ui-router
+# 才能接管这两个座位。停用后首页那条鲸鱼(hero)也不再渲染，由作战室取代。
+- id: ui-brand-official
+  name: "@deepseek-ai/dsh-client-ui-brand-official"
+  disabled: true
+- id: locale
+  name: "@deepseek-ai/dsh-client-locale"
+  config:
+    preference: zh
+
+# 路由器 worker 不设上限（router maxWorkers/workers = 0），这里是唯一硬保护：
+# 服务器 2 核 3.5G，所有路由子代理共享同一 anchor 树，64 个活跃子代理为上限。
+- id: subagent
+  name: '@deepseek-ai/dsh-subagent'
+  config:
+    maxActiveSubagents: 64
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: commandecode
+    model: deepseek/deepseek-v4.1-flash
+    reasoningEffort: low
+
+# 忙碌时再发消息：并入当前这一轮（steer），不排到下一轮等一遍。
+# 默认是 queue（每条消息独占一轮），对连发和多 worker 协调都太慢。
+# 想临时切回排队，在「设置 → 通用 → 忙碌时按 Enter 的行为」里改回即可。
+- id: ui-conversation
+  name: "@deepseek-ai/dsh-client-ui-conversation"
+  config:
+    busyEnter: steer
+- id: ui-theme
+  name: "@deepseek-ai/dsh-client-ui-theme"
+  config:
+    preference: dark
+
+# ── web_search → 本地 exa-proxy → Exa /search ─────────────────────────────
+# 插件把 {query,count,need_content} POST 到 <searchBaseURL>/search（Bearer 头），
+# exa-proxy.service（127.0.0.1:18787，/root/.dsh/exa-proxy/）转成 Exa 请求并映射回
+# {results:[{url,title,snippet,date}]}。命中 id 后整个 config 被替换，故 name 必须重述。
+# searchApiKeyEnv 指向非敏感占位 EXA_PROXY_TOKEN（凭据库 refs 里值为 __REPLACE_ME__）：
+#   - 它永远“已配置”，所以 searchReady() 恒为 true，web_search 不会从模型面前消失；
+#   - 代理收到这个占位 Bearer 时不转发，改用自己环境里的 EXA_API_KEY（/root/.dsh/.env）。
+#   真 key 只有代理持有，DSH 进程不碰它；换 key 只需 systemctl restart exa-proxy，无需重启 Host。
+# 回退：删掉本段即恢复默认（api.deepseek.com/v1/tools + DEEPSEEK_API_KEY）。
+- id: web-deepseek-api
+  name: '@deepseek-ai/dsh-web-deepseek-api'
+  config:
+    searchBaseURL: http://127.0.0.1:18787
+    searchApiKeyEnv: EXA_PROXY_TOKEN
+    count: 10
+    sendOriginalQuestion: false
+
+# ── MCP servers（mcp-manager）───────────────────────────────────────────────
+# 生效行来自 bundle（@deepseek-ai/dsh-web-app 的 cordis.patch.yml）：
+#   - id: mcp-manager
+#     name: '@deepseek-ai/dsh-mcp-manager'
+#     inject: [credentials]
+# patch 按 id 命中后整条 config 被替换，所以这里必须重述 name 和 inject。
+# 加/删一个 MCP server：在下面 servers: 下加/删一个键。键名就是工具前缀，
+# 必须匹配 ^[A-Za-z0-9_-]{1,32}$，模型侧工具名为 mcp__<键名>__<tool>，全局可见。
+# 临时停用某个 server：把它的 enabled 改成 false（不用删配置，HMR 约 2 秒生效）。
+# transport 只支持 stdio / streamable-http：stdio 只认 command/args/env/cwd，
+# streamable-http 只认 url/headers，两类字段混写会被拒绝。
+# 字符串里只能写 ${credential:REF} 模板（写 ${EXA_API_KEY} 会被校验拒绝）；
+# 引用的 credential 缺失时该 server 停在 waiting-credentials、工具不注册，
+# 但不会拖垮其它 server。REF 由 credentials provider 解析，回退读 /root/.dsh/.env。
+- id: mcp-manager
+  name: '@deepseek-ai/dsh-mcp-manager'
+  inject: [ credentials ]
+  config:
+    servers:
+      # Exa 远程 MCP，匿名即可用（有速率限制）。当前匿名跑，所以不带 headers。
+      # 有 EXA_API_KEY 后想走 key 版本，就在这条下面加：
+      #   headers:
+      #     x-api-key: '${credential:EXA_API_KEY}'
+      # 但 key 没写进 .env 之前该 server 只会停在 waiting-credentials、不注册工具，
+      # 所以现在先只跑匿名版本。
+      exa:
+        transport: streamable-http
+        url: https://mcp.exa.ai/mcp
+        enabled: true
+        startupTimeoutMs: 30000
+        toolCallTimeoutMs: 60000
+      # Exa stdio 版本。本机 npm/npx 在 node 24 下已坏（Class extends value undefined），
+      # 所以没走 npx：直接把 npm 包 exa-mcp-server@3.5.1 的 tarball 解到
+      # /srv/workspace/deepseek-harness/vendor/exa-mcp-server，用 node 跑 dist/stdio.cjs，
+      # 不装 npm 包、不碰 pnpm store。stdio 子进程会剔除名字含
+      # KEY/TOKEN/SECRET/PASSWORD 的环境变量，所以 key 必须在这里显式传 env。
+      # 现在 .env 里还没有 EXA_API_KEY → enabled: false。填好 key 后把 enabled 改成 true
+      # 即可（HMR 生效，无需重启 Host）。
+      exa-stdio:
+        transport: stdio
+        command: node
+        args:
+          - /srv/workspace/deepseek-harness/vendor/exa-mcp-server/dist/stdio.cjs
+        env:
+          EXA_API_KEY: '${credential:EXA_API_KEY}'
+        enabled: false
+        startupTimeoutMs: 60000
+        toolCallTimeoutMs: 60000
+- id: ui-settings
+  name: "@deepseek-ai/dsh-client-ui-settings"
+  config:
+    enabled: false

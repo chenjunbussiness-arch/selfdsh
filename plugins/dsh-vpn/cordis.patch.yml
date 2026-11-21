@@ -1,0 +1,33 @@
+# dsh-vpn — bundle patch layer
+#
+# Mounts the two halves of the VPN manager:
+#
+#   host-vpn        profile store, openfortivpn process manager, watchdog, the
+#                   same-origin HTTP bridge at /api/vpn/*, and the read-only
+#                   `vpn_status` agent tool
+#   client-ui-vpn   the "VPN" page and its Sidebar row; its host half is empty
+#
+# Same conventions as dsh-router-b: no `peerDependencies`, and neither package
+# imports an `@deepseek-ai/*` module at runtime, so the boot-time compatibility
+# preflight has nothing to disable.
+#
+# Every key under `config` is optional.
+#   dir                   where profiles and secrets live (default <DSH home>/vpn)
+#   openfortivpn          executable, or an argv prefix array (default openfortivpn)
+#   watchdogSeconds       window in which the tunnel is probed after it comes up (default 30)
+#   localProbePort        port of the local DSH web service the watchdog must still reach (default 42443)
+#   publicProbe           host:port that must stay reachable over the normal route (default 223.5.5.5:53)
+#   allowCustomCommand    enable the "custom command" profile type (default false)
+#   recoverOnStart        clean up an openfortivpn left behind by a previous run (default true)
+
+- insert:
+    - id: host-vpn
+      name: dsh-host-vpn
+      config:
+        watchdogSeconds: 30
+        localProbePort: 42443
+        publicProbe: 223.5.5.5:53
+        allowCustomCommand: false
+        recoverOnStart: true
+    - id: client-ui-vpn
+      name: dsh-client-ui-vpn

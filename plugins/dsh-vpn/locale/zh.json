@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "VPN",
+    "description": "管理连接内网 git 用的 VPN：分流隧道的 openfortivpn 配置（账号密码或 token URL）、连接看门狗，以及给 agent 的只读状态工具。",
+    "detail": "docs/VPN.md"
+  }
+}

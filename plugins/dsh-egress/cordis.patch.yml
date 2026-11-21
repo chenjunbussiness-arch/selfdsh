@@ -1,0 +1,33 @@
+# dsh-egress — bundle patch layer
+#
+# Mounts the two halves of the egress manager:
+#
+#   host-egress        installs the fail-closed fetch hook, owns the exit list and the
+#                      bindings, serves the HTTP bridge at /api/egress/*, and registers
+#                      the read-only `egress_status` tool
+#   client-ui-egress   the "Egress" main panel in the Web client (host half is empty)
+#
+# Like dsh-router-b, no `peerDependencies` are declared and nothing imports an
+# `@deepseek-ai/dsh-*` package at runtime, so the boot-time compatibility preflight
+# has nothing to disable.
+#
+# Config of the host row (all optional):
+#   dataDir     directory for config.json (0700 dir, 0600 file); default <DSH home>/egress
+#   providers   model endpoints to list in the binding table even before a request
+#               has been seen; `name` is only a label, the binding key is the host of
+#               `baseURL`
+#   undiciPath  absolute path of an undici (>=7) `index.js` to use when it cannot be
+#               resolved from the profile (see docs/EGRESS.md)
+#
+# A new exit starts as nothing: the exit list is empty, every host is bound to the
+# built-in `direct` exit until a person picks otherwise in the panel.
+
+- insert:
+    - id: host-egress
+      name: dsh-host-egress
+      config:
+        providers:
+          - name: commandecode
+            baseURL: https://api.commandcode.ai/provider/v1
+    - id: client-ui-egress
+      name: dsh-client-ui-egress
