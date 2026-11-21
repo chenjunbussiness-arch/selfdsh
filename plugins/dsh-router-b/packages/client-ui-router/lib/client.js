@@ -52,6 +52,7 @@ function asCredentialViews(refs, value) {
 }
 
 // src/client/controller.ts
+var CLOSED_HOST = /* @__PURE__ */ new Set(["done", "verified", "reported", "failed", "cancelled"]);
 var INITIAL = { board: null, status: "idle", publishing: false };
 var RouterBoardController = class {
   /**
@@ -167,6 +168,7 @@ var RouterBoardController = class {
   /**
    * Run one `task_control` action, then re-read the board.
    *
+   * `cancel` / `cancel_tree` move the rows to 已取消 the same way.
    * `resume` is applied optimistically: the row is moved to `running` in the
    * local snapshot before the request, so it leaves 已暂停 at once. A fresh read
    * (not a join of an older in-flight one) follows a success; a failure restores
@@ -180,6 +182,32 @@ var RouterBoardController = class {
     const source = this.source;
     if (source.control === void 0) return "task_control is not wired on this source";
     const before = this.state.board;
+    if ((action === "cancel" || action === "cancel_tree") && before !== null) {
+      const ids = /* @__PURE__ */ new Set([taskId]);
+      if (action === "cancel_tree") {
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (const task of before.tasks) {
+            if (task.parentId !== void 0 && ids.has(task.parentId) && !ids.has(task.id)) {
+              ids.add(task.id);
+              grew = true;
+            }
+          }
+        }
+      }
+      this.emit({
+        ...this.state,
+        board: {
+          ...before,
+          tasks: before.tasks.map((task) => !ids.has(task.id) || CLOSED_HOST.has(task.hostState ?? "") ? task : {
+            ...task,
+            state: "rejected",
+            hostState: "cancelled"
+          })
+        }
+      });
+    }
     if (action === "resume" && before !== null) {
       this.emit({
         ...this.state,
@@ -222,6 +250,28 @@ var RouterBoardController = class {
     const source = this.source;
     if (source.listFiles === void 0) throw new Error("listing files is not wired on this source");
     return source.listFiles(partition, path);
+  }
+  /** Whether the source can read partition memory. */
+  get canReadMemory() {
+    return typeof this.source.readMemory === "function";
+  }
+  /** Read one partition's memory. */
+  async readMemory(partition) {
+    const source = this.source;
+    if (source.readMemory === void 0) throw new Error("partition memory is not wired on this source");
+    return source.readMemory(partition);
+  }
+  /** Add a note to one partition's memory. */
+  async addMemoryNote(partition, text) {
+    const source = this.source;
+    if (source.addMemoryNote === void 0) throw new Error("partition memory is not wired on this source");
+    return source.addMemoryNote(partition, text);
+  }
+  /** Remove a note from one partition's memory. */
+  async removeMemoryNote(partition, id) {
+    const source = this.source;
+    if (source.removeMemoryNote === void 0) throw new Error("partition memory is not wired on this source");
+    await source.removeMemoryNote(partition, id);
   }
   /** Clear the publish banner after the view has shown it. */
   clearPublishNotice() {
@@ -2212,6 +2262,7 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-ico svg{width:16px;height:16px;display:block}
 .dshrc-tabs{display:flex;align-items:center;gap:var(--sp-1);flex:none;padding:var(--sp-1) var(--sp-3) var(--sp-2) var(--sp-4);overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--c-line-soft)}
 .dshrc-tabs::-webkit-scrollbar{display:none}
+.dshrc-find{flex:0 1 160px;min-width:72px;height:24px;margin-left:auto;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px}
 .dshrc-tab{flex:none;height:var(--h-ctl);padding:0 var(--sp-3);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text2);font-size:12px;font-weight:500;line-height:var(--h-ctl);cursor:pointer;white-space:nowrap;transition:background-color .12s ease,color .12s ease}
 .dshrc-tab:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-tab:active{background:var(--c-press)}
@@ -2277,9 +2328,11 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-notice[data-tone="bad"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
 .dshrc-empty{padding:36px var(--sp-4);color:var(--c-text3);text-align:center;font-size:12px}
 /* Row actions: hidden until the row is hovered or focused, so a quiet list stays quiet. */
-.dshrc-acts-row{flex:none;display:flex;align-items:center;gap:2px;opacity:0;transition:opacity .12s ease}
+.dshrc-acts-row{flex:none;display:flex;align-items:center;gap:2px;opacity:.55;transition:opacity .12s ease}
 .dshrc-row:hover .dshrc-acts-row,.dshrc-row:focus-within .dshrc-acts-row,.dshrc-acts-row[data-busy]{opacity:1}
 .dshrc-act{height:22px;margin-block:-3px;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:var(--dsw-alias-bg-base,transparent);color:var(--c-text2);font-size:11px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.dshrc-act[data-tone="stop"]:hover{color:var(--st-failed-text)}
+.dshrc-act[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
 .dshrc-act:hover:not(:disabled){color:var(--c-text);background:var(--c-hover)}
 .dshrc-act:active:not(:disabled){background:var(--c-press)}
 .dshrc-wait{display:flex;align-items:center;gap:var(--sp-2);min-width:0;margin:-4px 0 var(--sp-1);padding:0 var(--sp-3) 0 28px;font-size:12px;line-height:16px;color:var(--c-text3)}
@@ -2325,6 +2378,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const sessionFace = sessions ?? NO_SESSIONS;
   const sessionList = (0, import_react3.useSyncExternalStore)(sessionFace.list.subscribe, sessionFace.list.getSnapshot, sessionFace.list.getSnapshot);
   const [tab, setTab] = (0, import_react3.useState)("active");
+  const [query, setQuery] = (0, import_react3.useState)("");
   const [collapsed, setCollapsed] = (0, import_react3.useState)(readCollapsedFamilies);
   const [open, setOpen] = (0, import_react3.useState)(() => /* @__PURE__ */ new Set());
   const [folded, setFolded] = (0, import_react3.useState)(() => new Set(FOLDED_GROUPS));
@@ -2337,6 +2391,16 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const [formReason, setFormReason] = (0, import_react3.useState)("");
   const [formPrereq, setFormPrereq] = (0, import_react3.useState)("");
   const [formError, setFormError] = (0, import_react3.useState)("");
+  const [arming, setArming] = (0, import_react3.useState)(null);
+  (0, import_react3.useEffect)(() => {
+    if (arming === null) return;
+    const timer = setTimeout(() => {
+      setArming(null);
+    }, 4e3);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [arming]);
   (0, import_react3.useEffect)(() => {
     if (notice === null) return;
     const timer = setTimeout(() => {
@@ -2431,7 +2495,9 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     const workerName = /* @__PURE__ */ new Map();
     for (const partition of partitions2) for (const worker2 of partition.workers) workerName.set(worker2.id, worker2.name);
     const titleOf = new Map(tasks.map((task) => [task.id, task.title]));
-    const families = buildFamilies(tasks, live);
+    const needle = query.trim().toLowerCase();
+    const matches = (task) => [task.title, task.id, nameOf.get(task.partitionId) ?? ""].some((text) => text.toLowerCase().includes(needle));
+    const families = buildFamilies(tasks, live).filter((family) => needle === "" || family.members.some(matches));
     const groupFams = /* @__PURE__ */ new Map();
     for (const group of Object.keys(TAB_GROUPS).flatMap((id) => TAB_GROUPS[id])) groupFams.set(group, []);
     for (const family of families) {
@@ -2440,9 +2506,10 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     }
     const counts = /* @__PURE__ */ new Map();
     for (const [group, list] of groupFams) counts.set(group, list.length);
-    const anyLive = [...counts].some(([group, count]) => count > 0 && isLive(group));
+    const anyShown = [...counts].some(([group, count]) => count > 0 && isLive(group));
+    const anyLive = needle === "" ? anyShown : buildFamilies(tasks, live).some((family) => isLive(family.group));
     return { live, nameOf, workerName, titleOf, groupFams, counts, anyLive };
-  }, [board]);
+  }, [board, query]);
   (0, import_react3.useEffect)(() => {
     if (!model.anyLive) return;
     const timer = setInterval(() => {
@@ -2559,17 +2626,30 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     if (task.waitingFor !== void 0 && task.waitingFor.length > 0) lines.push(t("order.waiting", { ids: task.waitingFor.join(", ") }));
     return lines;
   };
+  const hasChildren = (task) => (board?.tasks ?? []).some((other) => other.parentId === task.id);
+  const stop = (task, action) => {
+    const key = `${task.id}:${action}`;
+    if (arming !== key) {
+      setArming(key);
+      return;
+    }
+    setArming(null);
+    void act(task, action);
+  };
   const rowActs = (task, group) => {
     if (!controller.canControl) return null;
+    const open2 = group === "running" || group === "queued" || group === "blocked" || group === "suspended";
     const canSuspend = group === "running" || group === "queued";
-    const canRetry = group === "failed";
-    if (!canSuspend && !canRetry) return null;
+    const canRetry = group === "failed" || group === "cancelled";
+    const canStopTree = open2 && hasChildren(task);
+    if (!open2 && !canRetry) return null;
     const anyBusy = [...busy].some((key) => key.startsWith(`${task.id}:`));
+    const armed = (action) => arming === `${task.id}:${action}`;
     return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
       "span",
       {
         className: "dshrc-acts-row",
-        "data-busy": anyBusy || suspending === task.id ? "" : void 0,
+        "data-busy": anyBusy || suspending === task.id || arming?.startsWith(`${task.id}:`) === true ? "" : void 0,
         onClick: (event) => {
           event.stopPropagation();
         },
@@ -2586,6 +2666,36 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
                 openSuspend(task);
               },
               children: t("act.suspend")
+            }
+          ),
+          open2 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshrc-act",
+              "data-tone": "stop",
+              "data-armed": armed("cancel") ? "" : void 0,
+              title: t("act.stopHint"),
+              disabled: anyBusy,
+              onClick: () => {
+                stop(task, "cancel");
+              },
+              children: armed("cancel") ? t("act.confirmStop") : t("act.cancel")
+            }
+          ),
+          canStopTree && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshrc-act",
+              "data-tone": "stop",
+              "data-armed": armed("cancel_tree") ? "" : void 0,
+              title: t("act.stopTreeHint"),
+              disabled: anyBusy,
+              onClick: () => {
+                stop(task, "cancel_tree");
+              },
+              children: armed("cancel_tree") ? t("act.confirmStop") : t("act.cancel_tree")
             }
           ),
           canRetry && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
@@ -2901,21 +3011,39 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
         )
       ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-tabs", role: "tablist", "aria-label": t("panel.title"), children: TABS.map((item) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
-      "button",
-      {
-        type: "button",
-        role: "tab",
-        className: "dshrc-tab",
-        "data-on": tab === item.id ? "" : void 0,
-        "aria-selected": tab === item.id,
-        onClick: () => {
-          setTab(item.id);
+    /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-tabs", role: "tablist", "aria-label": t("panel.title"), children: [
+      TABS.map((item) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+        "button",
+        {
+          type: "button",
+          role: "tab",
+          className: "dshrc-tab",
+          "data-on": tab === item.id ? "" : void 0,
+          "aria-selected": tab === item.id,
+          onClick: () => {
+            setTab(item.id);
+          },
+          children: t(item.key)
         },
-        children: t(item.key)
-      },
-      item.id
-    )) }),
+        item.id
+      )),
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+        "input",
+        {
+          className: "dshrc-find",
+          type: "search",
+          value: query,
+          placeholder: t("board.find"),
+          "aria-label": t("board.find"),
+          onChange: (event) => {
+            setQuery(event.target.value);
+          },
+          onKeyDown: (event) => {
+            if (event.key === "Escape") setQuery("");
+          }
+        }
+      )
+    ] }),
     failed && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-err", role: "alert", "data-router-error": true, children: [
       /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("span", { className: "dshrc-err-text", children: [
         /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-err-msg", children: t("board.error", { message: state.error ?? "" }) }),
@@ -2997,6 +3125,19 @@ button.dshws-node:hover{background:var(--c-hover)}
 .dshws-note[data-tone="error"]{color:var(--st-failed-text)}
 .dshws-sec{margin:0 0 var(--sp-4)}
 .dshws-sec h3{margin:0 0 var(--sp-2);font-size:12px;font-weight:600;color:var(--c-text2)}
+.dshws-sech{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);margin-bottom:var(--sp-2)}
+.dshws-sech h3{margin:0}
+.dshws-btn[data-tone="stop"]:hover{color:var(--st-failed-text)}
+.dshws-btn[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
+.dshws-h4{margin:var(--sp-3) 0 var(--sp-1);font-size:11px;font-weight:600;color:var(--c-text3)}
+.dshws-notes{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
+.dshws-mnote{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:0 var(--sp-2);padding:var(--sp-1) var(--sp-2);border-radius:var(--r-ctl);background:var(--c-line-soft);font-size:12px}
+.dshws-mtext{grid-column:1;overflow-wrap:anywhere}
+.dshws-mmeta{grid-column:1;font-size:11px;color:var(--c-text3)}
+.dshws-x{grid-column:2;grid-row:1/3;width:20px;height:20px;padding:0;border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text3);cursor:pointer}
+.dshws-x:hover{background:var(--c-hover);color:var(--st-failed-text)}
+.dshws-addnote{display:flex;gap:var(--sp-2);margin-top:var(--sp-2)}
+.dshws-addnote input{flex:1 1 auto;min-width:0;height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px}
 .dshws-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--sp-1) var(--sp-3);margin:0;font-size:12px}
 .dshws-kv dt{color:var(--c-text3)}
 .dshws-kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
@@ -3072,8 +3213,8 @@ function WorkspacePage({ controller, t, onOpenSession }) {
       const listing = await controller.listFiles(partition, path);
       setDirs((previous) => new Map(previous).set(key, { status: "ok", listing }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setDirs((previous) => new Map(previous).set(key, { status: "error", message }));
+      const message2 = error instanceof Error ? error.message : String(error);
+      setDirs((previous) => new Map(previous).set(key, { status: "error", message: message2 }));
     }
   }, [controller]);
   (0, import_react5.useEffect)(() => {
@@ -3081,6 +3222,45 @@ function WorkspacePage({ controller, t, onOpenSession }) {
     if (dirs.has(dirKey(partitionId, ""))) return;
     void loadDir(partitionId, "");
   }, [partitionId, dirs, loadDir, controller]);
+  const [memory, setMemory] = (0, import_react5.useState)(null);
+  const [noteText, setNoteText] = (0, import_react5.useState)("");
+  const [noteBusy, setNoteBusy] = (0, import_react5.useState)(false);
+  const [stopArmed, setStopArmed] = (0, import_react5.useState)(false);
+  const [stopping, setStopping] = (0, import_react5.useState)(false);
+  const [message, setMessage] = (0, import_react5.useState)(null);
+  const loadMemory = (0, import_react5.useCallback)(async (partition) => {
+    if (!controller.canReadMemory) return;
+    try {
+      const view = await controller.readMemory(partition);
+      setMemory({ partition, view });
+    } catch (error) {
+      setMemory({ partition, error: error instanceof Error ? error.message : String(error) });
+    }
+  }, [controller]);
+  (0, import_react5.useEffect)(() => {
+    if (partitionId === void 0) return;
+    setNoteText("");
+    setStopArmed(false);
+    void loadMemory(partitionId);
+  }, [partitionId, loadMemory]);
+  (0, import_react5.useEffect)(() => {
+    if (!stopArmed) return;
+    const timer = setTimeout(() => {
+      setStopArmed(false);
+    }, 4e3);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [stopArmed]);
+  (0, import_react5.useEffect)(() => {
+    if (message === null) return;
+    const timer = setTimeout(() => {
+      setMessage(null);
+    }, 4e3);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [message]);
   const toggleDir = (partition, path) => {
     const key = dirKey(partition, path);
     const opening = !expanded.has(key);
@@ -3094,6 +3274,7 @@ function WorkspacePage({ controller, t, onOpenSession }) {
   };
   const refresh = () => {
     void controller.load();
+    if (partitionId !== void 0) void loadMemory(partitionId);
     if (partitionId === void 0 || !controller.canListFiles) return;
     const open = [...expanded].filter((key) => key.startsWith(`${partitionId}\0`)).map((key) => key.slice(partitionId.length + 1));
     for (const path of ["", ...open]) void loadDir(partitionId, path);
@@ -3216,6 +3397,141 @@ function WorkspacePage({ controller, t, onOpenSession }) {
       lines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tm", title: line, children: line }, line))
     ] }, task.id);
   };
+  const stopAll = async () => {
+    if (!stopArmed) {
+      setStopArmed(true);
+      return;
+    }
+    setStopArmed(false);
+    const openIds = new Set(tasks.map((row) => row.task.id));
+    const tops = tasks.map((row) => row.task).filter((task) => task.parentId === void 0 || !openIds.has(task.parentId));
+    setStopping(true);
+    const failures = [];
+    for (const task of tops) {
+      const failure = await controller.control(task.id, "cancel_tree");
+      if (failure !== void 0) failures.push(`${task.title}: ${failure}`);
+    }
+    setStopping(false);
+    setMessage(failures.length === 0 ? { tone: "ok", text: t("ws.stopAllDone", { n: tops.length }) } : { tone: "bad", text: t("ws.stopAllFailed", { message: failures.join("\uFF1B") }) });
+    if (partitionId !== void 0) void loadMemory(partitionId);
+  };
+  const addNote = async () => {
+    const text = noteText.trim();
+    if (partitionId === void 0 || text === "" || noteBusy) return;
+    setNoteBusy(true);
+    try {
+      await controller.addMemoryNote(partitionId, text);
+      setNoteText("");
+      await loadMemory(partitionId);
+    } catch (error) {
+      setMessage({ tone: "bad", text: t("ws.mem.failed", { message: error instanceof Error ? error.message : String(error) }) });
+    } finally {
+      setNoteBusy(false);
+    }
+  };
+  const forgetNote = async (id) => {
+    if (partitionId === void 0) return;
+    try {
+      await controller.removeMemoryNote(partitionId, id);
+      await loadMemory(partitionId);
+    } catch (error) {
+      setMessage({ tone: "bad", text: t("ws.mem.failed", { message: error instanceof Error ? error.message : String(error) }) });
+    }
+  };
+  const MANAGER_SOURCE2 = {
+    strongest: t("ws.mem.src.strongest"),
+    hard: t("ws.mem.src.hard"),
+    saved: t("ws.mem.src.saved"),
+    inherit: t("ws.mem.src.inherit")
+  };
+  const memorySection = () => {
+    if (!controller.canReadMemory) return null;
+    const read = memory !== null && memory.partition === partitionId ? memory : void 0;
+    const view = read?.view;
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", "data-router-memory": true, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.mem.title") }),
+      read === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.loading") }) : read.error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", "data-tone": "error", children: t("ws.error", { message: read.error }) }) : view !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(import_jsx_runtime7.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("dl", { className: "dshws-kv", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dt", { children: t("ws.mem.manager") }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dd", { children: !view.manager.enabled ? t("ws.mem.noManager") : view.manager.route === void 0 ? MANAGER_SOURCE2[view.manager.source] ?? view.manager.source : `${view.manager.route.model}${view.manager.route.reasoningEffort === void 0 ? "" : ` \xB7 ${view.manager.route.reasoningEffort}`}\uFF08${MANAGER_SOURCE2[view.manager.source] ?? view.manager.source}\uFF09` })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.notes", { n: view.notes.length }) }),
+        view.notes.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.mem.noNotes") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-notes", children: view.notes.map((note) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("li", { className: "dshws-mnote", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-mtext", children: note.text }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshws-mmeta", children: [
+            t(`ws.mem.by.${note.by}`),
+            " \xB7 ",
+            relativeTime(note.at, now)
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshws-x",
+              title: t("ws.mem.forget"),
+              "aria-label": t("ws.mem.forget"),
+              onClick: () => {
+                void forgetNote(note.id);
+              },
+              children: "\xD7"
+            }
+          )
+        ] }, note.id)) }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("form", { className: "dshws-addnote", onSubmit: (event) => {
+          event.preventDefault();
+          void addNote();
+        }, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+            "input",
+            {
+              value: noteText,
+              maxLength: 600,
+              placeholder: t("ws.mem.placeholder"),
+              onChange: (event) => {
+                setNoteText(event.target.value);
+              }
+            }
+          ),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "submit", className: "dshws-btn", disabled: noteBusy || noteText.trim() === "", children: t("ws.mem.add") })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.work", { n: view.logTotal }) }),
+        view.log.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.mem.noWork") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-tasks", children: view.log.slice(0, 12).map((entry) => {
+          const open = entry.sessionId !== void 0 && onOpenSession !== void 0 ? () => {
+            onOpenSession(entry.sessionId);
+          } : void 0;
+          return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+            "li",
+            {
+              className: "dshws-task",
+              "data-link": open === void 0 ? void 0 : "",
+              onClick: open,
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-tt", children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tn", children: entry.subject }),
+                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ts", "data-tone": entry.state === "failed" || entry.state === "cancelled" ? "blocked" : void 0, children: t(`ws.mem.state.${entry.state}`) })
+                ] }),
+                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tm", children: [relativeTime(entry.at, now), entry.level === "manager" ? "manager" : entry.model, entry.summary ?? entry.error].filter((part) => part !== void 0 && part !== "").join(" \xB7 ") })
+              ]
+            },
+            `${entry.taskId}-${entry.at}`
+          );
+        }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.sessions", { n: view.sessions.length }) }),
+        view.sessions.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.mem.noSessions") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-tasks", children: view.sessions.slice(0, 12).map((ref) => {
+          const open = onOpenSession !== void 0 ? () => {
+            onOpenSession(ref.sessionId);
+          } : void 0;
+          return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("li", { className: "dshws-task", "data-link": open === void 0 ? void 0 : "", onClick: open, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-tt", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tn", children: ref.subject }),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ts", children: t(`ws.mem.state.${ref.state}`) })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tm", children: [ref.taskId, relativeTime(ref.updatedAt, now), ref.summary].filter((part) => part !== void 0 && part !== "").join(" \xB7 ") })
+          ] }, ref.sessionId);
+        }) })
+      ] })
+    ] });
+  };
   const rootListing = partitionId === void 0 ? void 0 : dirs.get(dirKey(partitionId, ""));
   const include = current?.include ?? (rootListing?.status === "ok" ? rootListing.listing.include : void 0);
   const exclude = current?.exclude ?? (rootListing?.status === "ok" ? rootListing.listing.exclude : void 0);
@@ -3262,9 +3578,28 @@ function WorkspacePage({ controller, t, onOpenSession }) {
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.tasks") }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-sech", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.tasks") }),
+            tasks.length > 0 && controller.canControl && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+              "button",
+              {
+                type: "button",
+                className: "dshws-btn",
+                "data-tone": "stop",
+                "data-armed": stopArmed ? "" : void 0,
+                disabled: stopping,
+                title: t("ws.stopAllHint"),
+                onClick: () => {
+                  void stopAll();
+                },
+                children: stopping ? t("ws.stopping") : stopArmed ? t("ws.stopAllConfirm", { n: tasks.length }) : t("ws.stopAll")
+              }
+            )
+          ] }),
+          message !== null && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", "data-tone": message.tone === "bad" ? "error" : void 0, role: "status", children: message.text }),
           tasks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-sub", children: t("ws.noTasks") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-tasks", children: tasks.map(taskRow) })
-        ] })
+        ] }),
+        memorySection()
       ] })
     ] })
   ] }) });
@@ -3304,6 +3639,14 @@ var HINT = {
   medium: "\u5E38\u89C4\u4FEE\u6539\uFF1A\u52A0\u529F\u80FD\u3001\u4FEE\u5C0F\u95EE\u9898",
   hard: "\u5927\u6539\u52A8\uFF1A\u91CD\u6784\u3001\u6539\u7248\u3001\u8DE8\u6587\u4EF6\u6392\u67E5"
 };
+var MANAGER_SOURCE = {
+  strongest: "\u81EA\u52A8\u9009\u6700\u5F3A",
+  hard: "\u8DDF\u9AD8\u7EA7\u6863",
+  saved: "\u6307\u5B9A",
+  inherit: "\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B"
+};
+var STRONGEST = "__strongest";
+var INHERIT = "__inherit";
 var keyOf = (route) => route == null ? "" : `${route.provider}\0${route.model}`;
 function shortName(name) {
   const slash = name.lastIndexOf("/");
@@ -3359,6 +3702,7 @@ var CSS = `
 .dmt-dot[data-tier="easy"] { background: var(--dmt-easy); }
 .dmt-dot[data-tier="medium"] { background: var(--dmt-medium); }
 .dmt-dot[data-tier="hard"] { background: var(--dmt-hard); }
+.dmt-dot[data-tier="manager"] { background: var(--dmt-text); }
 .dmt-line-label { font-size: 11px; color: var(--dmt-text2); white-space: nowrap; }
 .dmt-line-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dmt-text); text-align: right; }
 .dmt-root[data-off] .dmt-line { opacity: .5; }
@@ -3553,18 +3897,28 @@ function ModelTiers({ wide = true }) {
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-badge", ...auto ? { "data-on": "" } : {}, children: doc === null ? "\u2026" : auto ? "\u81EA\u52A8\u9009\u62E9" : "\u5DF2\u5173\u95ED" }),
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-caret", "aria-hidden": true, children: open ? "\u25BE" : "\u25B4" })
           ] }),
-          doc === null ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-note", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u52A0\u8F7D\u4E2D\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-lines", children: TIERS.map((tier) => {
-            const route = doc.effective[tier];
-            const effort = route?.reasoningEffort;
-            return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-line", title: route == null ? "" : `${optionOf(route)?.providerName ?? route.provider} \xB7 ${route.model}`, children: [
-              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
-              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-line-label", children: LABEL[tier] }),
+          doc === null ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-note", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u52A0\u8F7D\u4E2D\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-lines", children: [
+            TIERS.map((tier) => {
+              const route = doc.effective[tier];
+              const effort = route?.reasoningEffort;
+              return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-line", title: route == null ? "" : `${optionOf(route)?.providerName ?? route.provider} \xB7 ${route.model}`, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-line-label", children: LABEL[tier] }),
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-line-model", children: [
+                  labelOf(route),
+                  effort === void 0 ? "" : ` \xB7 ${EFFORT_LABEL[effort] ?? effort}`
+                ] })
+              ] }, tier);
+            }),
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-line", title: "\u6BCF\u4E2A\u5206\u533A\u7684 manager \u7528\u7684\u6A21\u578B", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-dot", "data-tier": "manager" }),
+              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-line-label", children: "Manager" }),
               /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-line-model", children: [
-                labelOf(route),
-                effort === void 0 ? "" : ` \xB7 ${EFFORT_LABEL[effort] ?? effort}`
+                doc.managerEffective?.route === void 0 ? labelOf(doc.defaultModel) : labelOf(doc.managerEffective.route),
+                doc.managerEffective?.route?.reasoningEffort === void 0 ? "" : ` \xB7 ${EFFORT_LABEL[doc.managerEffective.route.reasoningEffort] ?? doc.managerEffective.route.reasoningEffort}`
               ] })
-            ] }, tier);
-          }) })
+            ] })
+          ] })
         ]
       }
     ),
@@ -3675,7 +4029,65 @@ function ModelTiers({ wide = true }) {
                   )
                 ] })
               ] }, tier);
-            })
+            }),
+            doc === null ? null : (() => {
+              const choice = doc.manager ?? "strongest";
+              const value = choice === "strongest" ? STRONGEST : choice === "inherit" ? INHERIT : keyOf(choice);
+              const effective = doc.managerEffective;
+              return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-tier", "data-tier-block": "manager", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-tier-head", children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-dot", "data-tier": "manager" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-tier-name", children: "Manager" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-tier-hint", title: "\u6BCF\u4E2A\u5206\u533A\u7684 manager \u8D1F\u8D23\u62C6\u4EFB\u52A1\u3001\u6392\u987A\u5E8F\u3001\u8BB0\u4F4F\u5206\u533A\u505A\u8FC7\u4EC0\u4E48", children: "\u62C6\u4EFB\u52A1\u3001\u6392\u987A\u5E8F\u3001\u8BB0\u4F4F\u5206\u533A\u5386\u53F2" }),
+                  choice === "strongest" ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-tag", children: "\u9ED8\u8BA4" }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+                    "button",
+                    {
+                      type: "button",
+                      className: "dmt-reset",
+                      disabled: busy,
+                      onClick: () => {
+                        void save({ manager: null }, "Manager \u5DF2\u6062\u590D\u4E3A\u81EA\u52A8\u9009\u6700\u5F3A");
+                      },
+                      children: "\u6062\u590D\u9ED8\u8BA4"
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dmt-fields", "data-single": "", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
+                  "select",
+                  {
+                    className: "dmt-select",
+                    "data-tier": "manager",
+                    "aria-label": "Manager \u6A21\u578B",
+                    disabled: busy,
+                    value,
+                    onChange: (event) => {
+                      const picked = event.currentTarget.value;
+                      if (picked === STRONGEST) {
+                        void save({ manager: "strongest" }, "Manager \u6539\u4E3A\u81EA\u52A8\u9009\u6700\u5F3A\uFF0C\u4E0B\u4E00\u4E2A\u9700\u6C42\u751F\u6548");
+                        return;
+                      }
+                      if (picked === INHERIT) {
+                        void save({ manager: "inherit" }, "Manager \u6539\u4E3A\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B\uFF0C\u4E0B\u4E00\u4E2A\u9700\u6C42\u751F\u6548");
+                        return;
+                      }
+                      const next = doc.models.find((entry) => keyOf(entry) === picked);
+                      if (next === void 0) return;
+                      const top = next.efforts?.at(-1);
+                      void save(
+                        { manager: { provider: next.provider, model: next.model, ...top === void 0 ? {} : { reasoningEffort: top } } },
+                        `Manager \u5DF2\u6539\u4E3A ${shortName(next.name)}\uFF0C\u4E0B\u4E00\u4E2A\u9700\u6C42\u751F\u6548`
+                      );
+                    },
+                    children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: STRONGEST, children: "\u81EA\u52A8\u9009\u6700\u5F3A" }),
+                      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: INHERIT, children: "\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B" }),
+                      groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("optgroup", { label: group.name, children: group.models.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: keyOf(entry), children: shortName(entry.name) }, keyOf(entry))) }, group.name))
+                    ]
+                  }
+                ) }),
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dmt-switch-hint", "data-manager-effective": "", children: effective === void 0 ? "\u5BBF\u4E3B\u8FD8\u6CA1\u66F4\u65B0\uFF0Cmanager \u6682\u65F6\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B" : `\u5B9E\u9645\u4F7F\u7528\uFF1A${effective.route === void 0 ? labelOf(doc.defaultModel) : labelOf(effective.route)}${effective.route?.reasoningEffort === void 0 ? "" : ` \xB7 \u63A8\u7406${EFFORT_LABEL[effective.route.reasoningEffort] ?? effective.route.reasoningEffort}`}\uFF08${MANAGER_SOURCE[effective.source] ?? effective.source}\uFF09` })
+              ] });
+            })()
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dmt-pop-foot", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u4FEE\u6539\u7ACB\u5373\u4FDD\u5B58\uFF0C\u4ECE\u4E0B\u4E00\u4E2A\u6D3E\u51FA\u7684\u4EFB\u52A1\u5F00\u59CB\u751F\u6548" })
         ]
@@ -3696,6 +4108,7 @@ var zh = {
   "board.retry": "\u91CD\u8BD5",
   "board.refresh": "\u5237\u65B0",
   "board.loading": "\u6B63\u5728\u8BFB\u53D6\u4EFB\u52A1\u677F\u2026",
+  "board.find": "\u641C\u7D22\u4EFB\u52A1 / \u7F16\u53F7 / \u5DE5\u4F5C\u533A",
   "board.empty": "\u8FD9\u4E2A\u72B6\u6001\u6682\u65F6\u6CA1\u6709\u4EFB\u52A1",
   "board.stale": "\u5BBF\u4E3B\u6682\u65F6\u8BFB\u4E0D\u5230\uFF0C\u4EE5\u4E0B\u662F\u4E0A\u6B21\u7ED3\u679C",
   "tab.active": "\u73B0\u5728",
@@ -3869,7 +4282,11 @@ var zh = {
   "act.suspendHint": "\u5148\u653E\u4E00\u653E\uFF1A\u9700\u8981\u7684\u524D\u7F6E\u505A\u5B8C\u540E\u81EA\u52A8\u7EE7\u7EED",
   "act.retry": "\u91CD\u8BD5",
   "act.retryHint": "\u7528\u539F\u6765\u7684\u9700\u6C42\u91CD\u65B0\u6D3E\u4E00\u6B21",
-  "act.cancel": "\u53D6\u6D88",
+  "act.cancel": "\u505C\u6B62",
+  "act.cancel_tree": "\u505C\u6B62\u6574\u4E2A\u9700\u6C42",
+  "act.stopHint": "\u505C\u6B62\u8FD9\u4E2A\u4EFB\u52A1\u7684 worker\uFF08\u518D\u70B9\u4E00\u6B21\u786E\u8BA4\uFF09",
+  "act.stopTreeHint": "\u505C\u6B62\u5B83\u548C\u5B83\u4E0B\u9762\u6240\u6709\u8FD8\u6CA1\u7ED3\u675F\u7684\u4EFB\u52A1\uFF08\u518D\u70B9\u4E00\u6B21\u786E\u8BA4\uFF09",
+  "act.confirmStop": "\u786E\u8BA4\u505C\u6B62?",
   "act.done": "\u5DF2\u63D0\u4EA4\uFF1A{action} {title}",
   "act.failed": "\u64CD\u4F5C\u5931\u8D25\uFF1A{message}",
   "susp.form.reason": "\u4E3A\u4EC0\u4E48\u6302\u8D77",
@@ -3912,6 +4329,43 @@ var zh = {
   "ws.rule2": "\u9700\u8981\u6539\u522B\u7684\u5206\u533A\u6216\u53D1\u73B0\u7F3A\u524D\u7F6E\u65F6\uFF0C\u6302\u8D77\u4EFB\u52A1\u5E76\u5199\u660E\u524D\u7F6E",
   "ws.rule3": "\u4EA4\u4ED8\u65F6\u5728 touched: \u4E0B\u5217\u51FA\u6539\u8FC7\u7684\u8DEF\u5F84",
   "ws.up": "\u4E0A\u4E00\u7EA7",
+  "ws.stopAll": "\u505C\u6B62\u5168\u90E8",
+  "ws.stopAllHint": "\u505C\u6B62\u8FD9\u4E2A\u5206\u533A\u6240\u6709\u8FD8\u6CA1\u7ED3\u675F\u7684\u4EFB\u52A1\u548C worker\uFF08\u518D\u70B9\u4E00\u6B21\u786E\u8BA4\uFF09",
+  "ws.stopAllConfirm": "\u786E\u8BA4\u505C\u6B62 {n} \u4E2A?",
+  "ws.stopping": "\u6B63\u5728\u505C\u6B62\u2026",
+  "ws.stopAllDone": "\u5DF2\u505C\u6B62 {n} \u4E2A\u9700\u6C42",
+  "ws.stopAllFailed": "\u6709\u4EFB\u52A1\u6CA1\u505C\u4E0B\uFF1A{message}",
+  "ws.mem.title": "\u5206\u533A\u8BB0\u5FC6",
+  "ws.mem.manager": "Manager \u6A21\u578B",
+  "ws.mem.noManager": "\u672A\u542F\u7528 manager\uFF08\u7531\u8DEF\u7531\u76F4\u63A5\u62C6\u5206\uFF09",
+  "ws.mem.src.strongest": "\u81EA\u52A8\u9009\u6700\u5F3A",
+  "ws.mem.src.hard": "\u8DDF\u9AD8\u7EA7\u6863",
+  "ws.mem.src.saved": "\u6307\u5B9A",
+  "ws.mem.src.inherit": "\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B",
+  "ws.mem.notes": "\u5E38\u9A7B\u7B14\u8BB0\uFF08{n}\uFF09",
+  "ws.mem.noNotes": "\u8FD8\u6CA1\u6709\u7B14\u8BB0\u3002manager \u4F1A\u628A\u957F\u671F\u6709\u6548\u7684\u7EA6\u5B9A\u8BB0\u5728\u8FD9\u91CC\uFF0C\u4F60\u4E5F\u53EF\u4EE5\u624B\u52A8\u52A0\u3002",
+  "ws.mem.placeholder": "\u52A0\u4E00\u6761\u8FD9\u4E2A\u5206\u533A\u7684\u957F\u671F\u7EA6\u5B9A\uFF0C\u4F8B\u5982\uFF1A\u63A5\u53E3\u7EDF\u4E00\u8D70 /api/v2",
+  "ws.mem.add": "\u8BB0\u4E0B",
+  "ws.mem.forget": "\u5220\u9664\u8FD9\u6761",
+  "ws.mem.failed": "\u8BB0\u5FC6\u64CD\u4F5C\u5931\u8D25\uFF1A{message}",
+  "ws.mem.by.manager": "manager \u8BB0\u7684",
+  "ws.mem.by.human": "\u4F60\u8BB0\u7684",
+  "ws.mem.by.router": "\u8DEF\u7531\u8BB0\u7684",
+  "ws.mem.work": "\u6700\u8FD1\u5B8C\u6210\u7684\u5DE5\u4F5C\uFF08\u5171 {n} \u6761\uFF09",
+  "ws.mem.noWork": "\u8FD9\u4E2A\u5206\u533A\u8FD8\u6CA1\u6709\u7ED3\u675F\u7684\u4EFB\u52A1\u3002",
+  "ws.mem.sessions": "Worker session\uFF08{n}\uFF09",
+  "ws.mem.noSessions": "\u8FD8\u6CA1\u6709 worker session\u3002",
+  "ws.mem.state.queued": "\u6392\u961F",
+  "ws.mem.state.dispatched": "\u5DF2\u6D3E\u53D1",
+  "ws.mem.state.running": "\u8FDB\u884C\u4E2D",
+  "ws.mem.state.interrupted": "\u5DF2\u4E2D\u65AD",
+  "ws.mem.state.suspended": "\u5DF2\u6302\u8D77",
+  "ws.mem.state.blocked": "\u5F85\u51B3\u5B9A",
+  "ws.mem.state.done": "\u5DF2\u5B8C\u6210",
+  "ws.mem.state.verified": "\u5DF2\u9A8C\u6536",
+  "ws.mem.state.reported": "\u5DF2\u6C47\u62A5",
+  "ws.mem.state.failed": "\u5931\u8D25",
+  "ws.mem.state.cancelled": "\u5DF2\u505C\u6B62",
   "ws.refresh": "\u5237\u65B0",
   "ws.disabled": "\u5DF2\u505C\u7528"
 };
@@ -3925,6 +4379,7 @@ var en = {
   "board.retry": "Retry",
   "board.refresh": "Refresh",
   "board.loading": "Reading the board\u2026",
+  "board.find": "Find task / id / workspace",
   "board.empty": "Nothing in this state",
   "board.stale": "Host unreachable; showing the last result",
   "tab.active": "Active",
@@ -4098,7 +4553,11 @@ var en = {
   "act.suspendHint": "Put aside; it continues once its prerequisite finishes",
   "act.retry": "Retry",
   "act.retryHint": "Dispatch the original demand again",
-  "act.cancel": "Cancel",
+  "act.cancel": "Stop",
+  "act.cancel_tree": "Stop request",
+  "act.stopHint": "Stop this task's worker (click again to confirm)",
+  "act.stopTreeHint": "Stop it and every open task under it (click again to confirm)",
+  "act.confirmStop": "Confirm stop?",
   "act.done": "Sent: {action} {title}",
   "act.failed": "Action failed: {message}",
   "susp.form.reason": "Why suspend",
@@ -4141,6 +4600,43 @@ var en = {
   "ws.rule2": "Work in another partition or a missing prerequisite: suspend and name it",
   "ws.rule3": "Deliveries list changed paths under touched:",
   "ws.up": "Up",
+  "ws.stopAll": "Stop all",
+  "ws.stopAllHint": "Stop every open task and worker in this partition (click again to confirm)",
+  "ws.stopAllConfirm": "Stop {n}?",
+  "ws.stopping": "Stopping\u2026",
+  "ws.stopAllDone": "Stopped {n} request(s)",
+  "ws.stopAllFailed": "Some tasks did not stop: {message}",
+  "ws.mem.title": "Partition memory",
+  "ws.mem.manager": "Manager model",
+  "ws.mem.noManager": "No manager (the router splits requests itself)",
+  "ws.mem.src.strongest": "strongest available",
+  "ws.mem.src.hard": "same as Hard tier",
+  "ws.mem.src.saved": "chosen",
+  "ws.mem.src.inherit": "default model",
+  "ws.mem.notes": "Standing notes ({n})",
+  "ws.mem.noNotes": "No notes yet. The manager keeps lasting conventions here; you can add some too.",
+  "ws.mem.placeholder": "Add a lasting convention for this partition, e.g. all APIs go through /api/v2",
+  "ws.mem.add": "Save",
+  "ws.mem.forget": "Delete this note",
+  "ws.mem.failed": "Memory action failed: {message}",
+  "ws.mem.by.manager": "by manager",
+  "ws.mem.by.human": "by you",
+  "ws.mem.by.router": "by router",
+  "ws.mem.work": "Recent work ({n} in all)",
+  "ws.mem.noWork": "No finished tasks in this partition yet.",
+  "ws.mem.sessions": "Worker sessions ({n})",
+  "ws.mem.noSessions": "No worker sessions yet.",
+  "ws.mem.state.queued": "queued",
+  "ws.mem.state.dispatched": "dispatched",
+  "ws.mem.state.running": "running",
+  "ws.mem.state.interrupted": "interrupted",
+  "ws.mem.state.suspended": "suspended",
+  "ws.mem.state.blocked": "needs decision",
+  "ws.mem.state.done": "done",
+  "ws.mem.state.verified": "verified",
+  "ws.mem.state.reported": "reported",
+  "ws.mem.state.failed": "failed",
+  "ws.mem.state.cancelled": "stopped",
   "ws.refresh": "Refresh",
   "ws.disabled": "disabled"
 };
@@ -4370,6 +4866,21 @@ function createHttpSource(options = {}) {
         throw new Error("GET /api/router/files returned a payload that is not a listing");
       }
       return body;
+    },
+    async readMemory(partition) {
+      const query = new URLSearchParams({ partition });
+      const body = await requestJson(requireFetch(), `${base}/memory?${query.toString()}`);
+      if (typeof body !== "object" || body === null || !Array.isArray(body.notes)) {
+        throw new Error("GET /api/router/memory returned a payload that is not a partition memory");
+      }
+      return body;
+    },
+    async addMemoryNote(partition, text) {
+      return await requestJson(requireFetch(), `${base}/memory`, jsonPost({ partition, text }));
+    },
+    async removeMemoryNote(partition, id) {
+      const query = new URLSearchParams({ partition, id });
+      await requestJson(requireFetch(), `${base}/memory?${query.toString()}`, { method: "DELETE" });
     },
     subscribe(listener) {
       let stream;

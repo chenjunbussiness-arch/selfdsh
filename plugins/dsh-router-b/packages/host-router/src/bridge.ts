@@ -54,6 +54,8 @@ export const EVENTS_PATH = `${BRIDGE_BASE}/events`
 export const TIERS_PATH = `${BRIDGE_BASE}/tiers`
 /** `GET ?partition=&path=` → one directory level of a partition (names only, never contents). */
 export const FILES_PATH = `${BRIDGE_BASE}/files`
+/** `GET|POST|DELETE` one partition's memory (notes and recent work). */
+export const MEMORY_PATH = `${BRIDGE_BASE}/memory`
 
 /** Request body ceiling: demands and verdicts are small by construction. */
 const MAX_BODY_BYTES = 256 * 1024
@@ -403,6 +405,12 @@ export interface BridgeDeps {
   ) => Promise<{ id: string; state: TaskState; text: string }>
   /** One directory level of a partition; absent means the route answers 404. */
   readonly files?: (partition: string, path: string | undefined) => Promise<unknown>
+  /** Partition memory; absent means the route answers 404. */
+  readonly memory?: {
+    readonly read: (partition: string) => Promise<unknown>
+    readonly addNote: (partition: string, text: string) => Promise<unknown>
+    readonly removeNote: (partition: string, id: string) => Promise<unknown>
+  }
   /** Partition configuration problems found at boot. */
   readonly problems?: () => readonly { readonly partition: string; readonly level: 'error' | 'warning'; readonly message: string }[]
   /** Flip a partition's operator switch. */
@@ -874,6 +882,40 @@ async function filesRoute(req: IncomingMessage, res: ServerResponse, deps: Bridg
 }
 
 /**
+ * `GET /api/router/memory?partition=<name>` — notes, recent work, sessions.
+ * `POST` `{ partition, text }` adds a note; `DELETE ?partition=&id=` removes one.
+ */
+async function memoryRoute(req: IncomingMessage, res: ServerResponse, deps: BridgeDeps): Promise<void> {
+  if (deps.memory === undefined) throw new BridgeError(404, 'not-found', 'partition memory is not available')
+  const url = new URL(req.url ?? '/', 'http://router.invalid')
+  if (req.method === 'GET') {
+    const partition = url.searchParams.get('partition')?.trim() ?? ''
+    if (partition === '') throw new BridgeError(400, 'bad-request', 'partition is required')
+    sendJson(res, 200, await deps.memory.read(partition))
+    return
+  }
+  if (req.method === 'POST') {
+    const body = objectOf(await readJsonBody(req), 'body')
+    if (typeof body['partition'] !== 'string' || body['partition'].trim() === '') {
+      throw new BridgeError(400, 'bad-request', 'partition must be a non-empty string')
+    }
+    if (typeof body['text'] !== 'string' || body['text'].trim() === '') {
+      throw new BridgeError(400, 'bad-request', 'text must be a non-empty string')
+    }
+    sendJson(res, 200, await deps.memory.addNote(body['partition'].trim(), body['text']))
+    return
+  }
+  if (req.method === 'DELETE') {
+    const partition = url.searchParams.get('partition')?.trim() ?? ''
+    const id = url.searchParams.get('id')?.trim() ?? ''
+    if (partition === '' || id === '') throw new BridgeError(400, 'bad-request', 'partition and id are required')
+    sendJson(res, 200, await deps.memory.removeNote(partition, id))
+    return
+  }
+  sendMethodNotAllowed(res, 'GET, POST, DELETE')
+}
+
+/**
  * `GET /api/router/events` — server-sent change notifications.
  *
  * The payload carries no board data on purpose: the panel re-reads
@@ -977,6 +1019,7 @@ export function createRoutes(deps: BridgeDeps): readonly WebRouteLike[] {
     { kind: 'exact', path: PARTITION_PATH, handler: guard(deps, PARTITION_PATH, (req, res) => partitionRoute(req, res, deps)) },
     { kind: 'exact', path: TIERS_PATH, handler: guard(deps, TIERS_PATH, (req, res) => tiersRoute(req, res, deps)) },
     { kind: 'exact', path: FILES_PATH, handler: guard(deps, FILES_PATH, (req, res) => filesRoute(req, res, deps)) },
+    { kind: 'exact', path: MEMORY_PATH, handler: guard(deps, MEMORY_PATH, (req, res) => memoryRoute(req, res, deps)) },
     { kind: 'exact', path: EVENTS_PATH, handler: guard(deps, EVENTS_PATH, async (req, res) => { eventsRoute(req, res, deps) }) },
   ]
 }

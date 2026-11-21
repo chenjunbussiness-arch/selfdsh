@@ -55,7 +55,7 @@ import {
 import type { Classifier, Partition, RouteDecision, RouteReason, RouterConfig } from './config.ts'
 import { formatTokens, pressureTokensOf } from './context.ts'
 import { parseWorkerReport } from './report.ts'
-import { INTERRUPTED_NOTE, TaskBoard, isDead, isFinished, mark, nextTaskId, summarize, tail } from './board.ts'
+import { INTERRUPTED_NOTE, SETTLED, TaskBoard, isDead, isFinished, mark, nextTaskId, summarize, tail } from './board.ts'
 import { dependencyError, gateOf, gateOfIds, groupProgress, progressLine, rootOf } from './order.ts'
 import type { Gate, GroupProgress } from './order.ts'
 import type { RouterTask, TaskState } from './board.ts'
@@ -67,7 +67,8 @@ import { FileListError, listPartitionDir, partitionProblems } from './files.ts'
 import type { PartitionProblem } from './files.ts'
 import type { BridgeDeps, PublishResult, UiCredentialView } from './bridge.ts'
 import { randomUUID } from 'node:crypto'
-import { TIERS, TierStore, classifyTier, defaultTiers, isTier, normaliseSettings } from './tier.ts'
+import { TIERS, TierStore, classifyTier, defaultTiers, isTier, managerRouteOf, normaliseManager, normaliseSettings } from './tier.ts'
+import { MemoryStore, entryOf, memoryBrief, renderTranscript, sessionRoster, workLine } from './memory.ts'
 import type { ModelOption, Tier, TierDecision, TierRoute } from './tier.ts'
 import type { ContentBlock, CredentialsServiceLike, LiveAgent, LlmRuntimeLike, PluginContext, SubagentActivation, ToolRunContext } from './types.ts'
 
@@ -124,10 +125,16 @@ function managerPrompt(input: {
   readonly body: string
   /** Prompt-token ceiling past which the router refuses further dispatch. */
   readonly contextLimit: number
+  /** What the partition remembers: notes, recent work, worker sessions (`memoryBrief`). */
+  readonly memory?: string
 }): string {
   return [
     `You are the manager of the "${input.partition.name}" partition of this workspace.`,
     `Its files live under ${input.partition.dir}; that is the scope you direct.`,
+    'You are this partition\'s standing manager: every request for this partition comes to its manager, and',
+    'what earlier requests did is kept for you in the partition memory below. Read it before you plan. You',
+    'know your partition\'s sessions: `session_list` shows every worker session, `session_read` shows what',
+    'one of them actually did (its messages and tool calls), and `task_resume` continues one.',
     '',
     'Your role is dispatch only. You are level 2 of the router: the router already chose this partition,',
     'and your job is to hand the work to workers. Hard rules:',
@@ -163,7 +170,9 @@ function managerPrompt(input: {
     'Steps:',
     '1. Split the request into self-contained pieces (do not invent work), applying the split rule above.',
     '2. For each piece, decide whether to continue an existing worker or start a new one:',
-    '   - you may read `task_board` for this partition: finished rows carry `did` and `touched`;',
+    '   - the memory below lists recent work with `did`, `touched`, and the session; `task_board` and',
+    '     `session_list` have the rest. When a piece continues earlier work, `session_read` that session first',
+    '     so your brief builds on what was really done instead of guessing;',
     '   - continue with `task_resume` only when a reported row\'s `touched` overlaps the files this piece',
     '     will change; otherwise start a new worker with `route_task`;',
     '   - prefer a new worker when in doubt.',
@@ -178,7 +187,12 @@ function managerPrompt(input: {
     '   A worker that ended failed or aborted must be handled, not ignored: re-dispatch that piece with a',
     '   narrower brief (`route_task`) or retry the same row (`task_control` with action `retry`). Only give up',
     '   after a retry also fails, and say so explicitly in your answer.',
-    '4. Then answer with one consolidated report written for the human, in the request\'s language:',
+    '4. Before you answer, keep what the next manager of this partition must know: call `partition_memory`',
+    '   with action `note` once per lasting fact (a convention you found, a decision the user made, a pitfall',
+    '   a worker hit, where something lives). One short fact per note; skip what the work log already holds',
+    '   (each finished task is recorded automatically), and skip facts that only matter for this request.',
+    '   If a note in memory turned out wrong, remove it (`partition_memory` action `forget` with its id).',
+    '5. Then answer with one consolidated report written for the human, in the request\'s language:',
     '   what was done, how it was done, the results (concrete facts the workers observed), and every',
     '   artifact and screenshot path the workers gave, copied verbatim as absolute paths. Do not invent',
     '   facts and do not drop paths. There is no acceptance step: this report is the answer.',
@@ -188,6 +202,7 @@ function managerPrompt(input: {
         'that reason, say so in your answer instead of doing the work yourself.']
       : [],
     '',
+    ...input.memory === undefined ? [] : [input.memory, ''],
     `--- request ${input.taskId} ---`,
     input.body,
   ].join('\n')
@@ -212,23 +227,22 @@ function anchorInstructions(partitions: readonly Partition[]): string {
     '',
     '## 分区',
     ...partitions.map(partition => `- ${partition.name}: ${partition.dir}`
+      + (partition.managerEnabled ? '' : '（无 manager）')
       + (partition.description === undefined ? '' : ` — ${partition.description.replace(/\s+/g, ' ').trim()}`)),
     '',
     '## 规则',
     '1. 闲聊、问答、解释、介绍你能做什么，以及靠对话本身就能回答的问题：直接回答，不要派任务。',
-    '2. 需要动手的事（改代码、跑命令、查看或分析文件、打开网页、截图、部署等）：你处在这条链的第 1 级，',
-    '   职责是「路由 + 拆解」，不是把整段需求原样转手。按三步走：',
-    '   a. **拆**：把需求拆成若干工作项，每项是一个能独立完成、有明确产物的单元（例如「改后端接口」与「改前端页面」',
-    '      是两个工作项；「先查清现状再改」可以是一个工作项）。单点小事才只有一个工作项。',
-    '   b. **分配**：每个工作项各自判断属于哪个分区；跨分区的工作项分别派给各自分区。',
-    '   c. **派发**：所有工作项都在同一轮里用 `route_task` 一次性派出。互不依赖的直接派；有先后依赖的也现在派，',
-    '      但给后面的工作项带上 `depends_on`（填前面 `route_task` 返回的任务号）。路由器会让它排队，等前置做完',
-    '      自动开始。不要为了"等前面做完再派"而结束这一轮。',
-    '      不要因为「一个需求」就只派一条——那会把整块工作压成主从式的单线传递。',
-    '   - 拆解结果先用 `todo_write` 记下来（每个工作项一步，最后一步汇总），用户能在面板上看到路由计划。',
-    '   - 每个 `route_task` 的 `text` 要自包含（执行者看不到这段对话，要带 URL、路径、要求、期望产物），',
-    '     但只写这个工作项的范围，不要把整段需求复制过去。',
-    '   - 能判断分区就填 `partition`，判断不了就省略，由路由器决定。不要传 `parent_task`。',
+    '2. 需要动手的事（改代码、跑命令、查看或分析文件、打开网页、截图、部署等）：你是这条链的第 1 级「路由」，',
+    '   只负责**快速转发**：routing（你）→ 分区 manager → session → worker。拆解、排顺序、选 worker 都是',
+    '   分区 manager 的事，它记得这个分区以前做过什么、有哪些 session，比你更清楚怎么拆。',
+    '   a. **认分区**：判断需求涉及哪个分区；涉及几个就是几个。',
+    '   b. **转发**：每个涉及的分区发一条 `route_task`，`partition` 填分区名；`text` 写用户原话里属于这个分区的',
+    '      那部分，再补上这段对话里它需要的上下文（URL、路径、要求、期望产物）。执行方看不到这段对话，所以要自包含，',
+    '      但**不要替 manager 拆成小任务**，也不要加你自己的实现方案。',
+    '   c. 跨分区且有先后（例如先改后端接口、再改前端页面），给后面那条带 `depends_on`（填前面返回的任务号）。',
+    '   d. 所有转发在同一轮里发完，不要等前面做完。不要传 `parent_task`。',
+    '   - 分区列表里标了「无 manager」的分区没有 manager，转给它的需求你要自己按工作项拆开、各发一条。',
+    '   - 判断不了分区就省略 `partition`，由路由器决定。',
     '3. 你自己绝不动手干活：不调用 bash、pwsh、write、edit、apply_patch 等修改文件或执行命令的工具，',
     '   也不要用 web_fetch、browser 之类的工具代替执行者去做任务。可以用 `task_board` / `task_progress` 查进度，',
     '   用 `read` / `read_image` 查看执行者产出的文件和截图。',
@@ -240,7 +254,8 @@ function anchorInstructions(partitions: readonly Partition[]): string {
     '   - 其他产物用 Markdown 链接写出绝对路径；',
     '   - 失败就如实说明失败在哪里，以及建议的下一步。',
     '   没有验收环节，不要提"验收""待验收"；汇报本身就是结果。',
-    '6. 用户追问某个任务的细节时，用 `task_board`（带 task_id）查记录；需要在同一个执行者上继续做，用 `task_resume`。',
+    '6. 用户追问某个任务的细节时，用 `task_board`（带 task_id）查记录，`session_read` 看那个 session 实际做了什么；',
+    '   需要在同一个执行者上继续做，用 `task_resume`。问某个分区以前做过什么，用 `partition_memory`（action `read`）。',
     '7. 挂起：用户说某个任务（不管是否已完成）缺了前置、要先挂起以后再补，用 `task_suspend`：填 task_id、原因，',
     '   前置要做的事写在 `prerequisite`（路由器会新建前置任务），或者在 `wait_for` 里填已有的任务号。',
     '   前置完成后路由器会在原来的会话里叫醒这个任务继续做。没有前置、只是先放着的，也可以只写原因，之后用',
@@ -314,6 +329,30 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
   /** Identity of this plugin activation, so a restart can spot its own leftovers. */
   const runToken = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const board = await TaskBoard.open(boardDir, runToken)
+  /**
+   * Partition memory: every settled row lands in its partition's work log, so the
+   * next manager of that partition starts knowing what was done before.
+   */
+  const memory = await MemoryStore.open(join(boardDir, 'memory'), partitions.map(partition => partition.name))
+  {
+    // First boot with memory: the board already holds the partition's history.
+    const byId = new Map(board.list().map(row => [row.id, row]))
+    for (const partition of partitions) {
+      const settled = board.inPartition(partition.name).filter(task => SETTLED.has(task.state))
+      const seeded = await memory.seed(partition.name, settled.map(task => entryOf(task, rootOf(task, byId).id)))
+        .catch((error: unknown) => {
+          ctx.logger.warn(`host-router: could not seed ${partition.name} memory: ${String(error)}`)
+          return 0
+        })
+      if (seeded > 0) ctx.logger.info(`host-router: ${partition.name} memory seeded with ${String(seeded)} finished task(s)`)
+    }
+  }
+  board.onSettled((task) => {
+    const byId = new Map(board.list().map(row => [row.id, row]))
+    void memory.record(task.partition, entryOf(task, rootOf(task, byId).id)).catch((error: unknown) => {
+      ctx.logger.warn(`host-router: could not record ${task.id} in ${task.partition} memory: ${String(error)}`)
+    })
+  })
 
   const provider = config.provider ?? 'spawn'
   const maxWorkers = config.maxWorkers ?? DEFAULT_MAX_WORKERS
@@ -471,6 +510,10 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
     }
   }
 
+  /** Model route for partition managers: saved choice, else the strongest advertised model. */
+  const managerRoute = async (): Promise<ReturnType<typeof managerRouteOf>> =>
+    managerRouteOf(tierStore.get(), await cachedModelOptions(), defaultRoute())
+
   /** Classify one route_task call; never throws. */
   const decideTier = async (args: RouteArgs): Promise<TierDecision | undefined> => {
     if (!tierStore.get().auto && !isTier(args.tier)) return undefined
@@ -494,6 +537,8 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
         effective: await effectiveTiers(),
         defaults,
         defaultModel: defaultRoute() ?? null,
+        manager: settings.manager ?? 'strongest',
+        managerEffective: await managerRoute(),
         models,
       }
     },
@@ -519,7 +564,19 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
           }
         }
       }
-      await tierStore.set({ auto: incoming.auto, tiers })
+      let manager = current.manager
+      if ('manager' in body) {
+        manager = body['manager'] === null ? undefined : normaliseManager(body['manager'])
+        if (body['manager'] !== null && manager === undefined) {
+          throw new BridgeError(400, 'bad-request', 'manager must be "strongest", "inherit", or a {provider, model} route')
+        }
+        const picked = manager
+        if (typeof picked === 'object' && models.length > 0
+          && !models.some(option => option.provider === picked.provider && option.model === picked.model)) {
+          throw new BridgeError(400, 'bad-request', `unknown model route ${picked.provider}/${picked.model}`)
+        }
+      }
+      await tierStore.set({ auto: incoming.auto, tiers, ...manager === undefined ? {} : { manager } })
       ctx.logger.info(`host-router: tier settings saved (auto=${String(incoming.auto)})`)
       return await tierFace.read()
     },
@@ -1053,13 +1110,31 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
   const dispatch = async (task: RouterTask, parent: LiveAgent): Promise<void> => {
     const partition = partitionOf(task)
     const isManager = task.level === 'manager'
+    let brief: string | undefined
+    if (isManager) {
+      try {
+        brief = memoryBrief(await memory.read(partition.name), board.inPartition(partition.name))
+      } catch (error) {
+        ctx.logger.warn(`host-router: ${partition.name} memory unavailable for ${task.id}: ${String(error)}`)
+      }
+    }
     const prompt = isManager
-      ? managerPrompt({ partition, taskId: task.id, body: task.body, contextLimit })
+      ? managerPrompt({ partition, taskId: task.id, body: task.body, contextLimit, ...brief === undefined ? {} : { memory: brief } })
       : workerPrompt(partition, task.id, task.body, autoVerify)
     const label = `${partition.name}/${isManager ? 'manager' : 'worker'}: ${task.subject}`
     // Tier -> model route, read at dispatch time so a saved change applies to queued rows too.
     let route: TierRoute | undefined
-    if (task.tier !== undefined && (tierStore.get().auto || task.tierSource === 'explicit')) {
+    let managerSource: string | undefined
+    if (isManager) {
+      // A manager plans for the whole partition: it runs on the strongest model by default.
+      try {
+        const chosen = await managerRoute()
+        route = chosen.route
+        managerSource = chosen.source
+      } catch (error) {
+        ctx.logger.warn(`host-router: manager route for ${task.id} unavailable: ${String(error)}`)
+      }
+    } else if (task.tier !== undefined && (tierStore.get().auto || task.tierSource === 'explicit')) {
       try {
         route = (await effectiveTiers())[task.tier]
       } catch (error) {
@@ -1106,7 +1181,9 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
         ...recorded === undefined ? {} : { provider: recorded.provider, model: recorded.model },
         ...recorded?.reasoningEffort === undefined ? {} : { reasoningEffort: recorded.reasoningEffort },
         ...route !== undefined && usedRoute === undefined ? { tierReason: `${task.tierReason ?? ''} (route rejected, inherited)` } : {},
-        ...task.tier === undefined ? { tierSource: 'off' } : {},
+        ...managerSource !== undefined
+          ? { tierSource: 'manager', tierReason: `manager model: ${managerSource}${route !== undefined && usedRoute === undefined ? ' (route rejected, inherited)' : ''}` }
+          : task.tier === undefined ? { tierSource: 'off' } : {},
       })
       await board.patch(task.id, {
         state: 'dispatched',
@@ -1615,7 +1692,7 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
   }
 
   /** `task_control` actions the panel may run over HTTP. */
-  const PANEL_ACTIONS: ReadonlySet<string> = new Set(['resume', 'block', 'suspend', 'retry', 'cancel'])
+  const PANEL_ACTIONS: ReadonlySet<string> = new Set(['resume', 'block', 'suspend', 'retry', 'cancel', 'cancel_tree'])
 
   /**
    * Run one `task_control` action from the router panel. The request has no
@@ -1656,7 +1733,7 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
       }
     }
     const out = await taskControl(
-      { task_id: task.id, action, ...value === undefined ? {} : { value } },
+      { task_id: task.id, action, ...value === undefined ? {} : { value }, by: 'human' },
       { ...agent === undefined ? {} : { agent }, signal: AbortSignal.timeout(60_000) },
     )
     const after = board.get(task.id)!
@@ -1994,12 +2071,74 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
 
   // --- Control ---------------------------------------------------------------
 
+  /** Every row below one task, at any depth. */
+  const descendantsOf = (taskId: string): RouterTask[] => {
+    const out: RouterTask[] = []
+    const seen = new Set<string>([taskId])
+    const walk = (id: string): void => {
+      for (const child of board.childrenOf(id)) {
+        if (seen.has(child.id)) continue
+        seen.add(child.id)
+        out.push(child)
+        walk(child.id)
+      }
+    }
+    walk(taskId)
+    return out
+  }
+
+  /**
+   * Stop one row: interrupt its worker's turn, drop the activation, mark it
+   * cancelled. A human stop also tells the manager above it.
+   * @returns the session that was interrupted, if any.
+   */
+  const stopRow = async (task: RouterTask, reason: string | undefined, byHuman: boolean): Promise<string | undefined> => {
+    const activation = inFlight.get(task.id)
+    const sessionId = activation?.childId ?? task.sessionId
+    const live = activation !== undefined || task.state === 'running' || task.state === 'dispatched' || task.state === 'interrupted'
+    if (sessionId !== undefined && live) {
+      try { cancelWorker(ctx.get('subagents')!, sessionId) } catch (error) {
+        ctx.logger.warn(`host-router: stopping ${task.id}: interrupt ${sessionId} failed: ${String(error)}`)
+      }
+    }
+    if (activation !== undefined) await activation.dispose().catch(() => {})
+    inFlight.delete(task.id)
+    const note = byHuman ? `人工停止${reason === undefined || reason.trim() === '' ? '' : `: ${reason.trim()}`}` : reason
+    await board.patch(task.id, {
+      state: 'cancelled',
+      ...note === undefined || note === '' ? {} : { error: `cancelled: ${note}` },
+    })
+    if (byHuman) await tellManager(task, reason)
+    return live ? sessionId : undefined
+  }
+
+  /**
+   * Tell the manager that owns a row, when that manager is still working, that a
+   * human stopped the row, so it neither waits for it nor dispatches it again.
+   */
+  const tellManager = async (task: RouterTask, reason: string | undefined): Promise<void> => {
+    const parent = task.parentId === undefined ? undefined : board.get(task.parentId)
+    if (parent === undefined || parent.level !== 'manager' || parent.sessionId === undefined) return
+    if (parent.state !== 'running' && parent.state !== 'dispatched') return
+    const sender = liveAgent(parent.dispatchFrom) ?? await ensureAnchor().catch(() => undefined)
+    if (sender === undefined) return
+    const text = [
+      `【系统通知】用户手动停止了你的子任务 ${task.id}「${task.subject}」${reason === undefined || reason.trim() === '' ? '' : `，原因：${reason.trim()}`}。`,
+      '不要重新派发它，也不要再等它。其余子任务照常进行；汇总时说明这一项已被人工停止。',
+    ].join('\n')
+    try {
+      await continueWorker(ctx.get('subagents')!, sender, parent.sessionId, text, AbortSignal.timeout(30_000))
+    } catch (error) {
+      ctx.logger.warn(`host-router: could not tell manager ${parent.id} about ${task.id}: ${String(error)}`)
+    }
+  }
+
   /**
    * One `task_control` action. Shared by the tool and by `POST /api/router/control`,
    * so a panel click changes the row exactly as the tool would.
    */
   const taskControl = async (
-    args: { task_id: string; action: string; value?: string },
+    args: { task_id: string; action: string; value?: string; by?: 'human' },
     exec: ToolRunContext,
   ): Promise<{ text: string }> => {
       if (exec.agent !== undefined) lastCaller = exec.agent
@@ -2009,21 +2148,34 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
 
       switch (args.action) {
         case 'cancel': {
-          const activation = inFlight.get(task.id)
-          const sessionId = activation?.childId ?? task.sessionId
-          if (sessionId !== undefined) cancelWorker(ctx.get('subagents')!, sessionId)
-          if (activation !== undefined) await activation.dispose().catch(() => {})
-          inFlight.delete(task.id)
-          const updated = await board.patch(task.id, {
-            state: 'cancelled',
-            ...args.value === undefined ? {} : { error: `cancelled: ${args.value}` },
-          })
+          if (SETTLED.has(task.state)) return { text: `${task.id} already ended ("${task.state}")` }
+          const sessionId = await stopRow(task, args.value, args.by === 'human')
           // Rows waiting on it can no longer start: park them for a human now.
           await afterChange().catch(() => {})
           await publishSnapshot().catch(() => {})
           return {
-            text: `${updated.id} cancelled (${sessionId === undefined ? 'no live worker' : `interrupted ${sessionId}`})`,
+            text: `${task.id} cancelled (${sessionId === undefined ? 'no live worker' : `interrupted ${sessionId}`})`,
           }
+        }
+        case 'cancel_tree': {
+          // The whole request under this row: the row itself, then every open
+          // descendant. The parent goes first so a manager cannot react to its
+          // children stopping by dispatching them again.
+          const family = [task, ...descendantsOf(task.id)].filter(row => !SETTLED.has(row.state))
+          if (family.length === 0) return { text: `${task.id} and its tasks already ended` }
+          const stopped: string[] = []
+          for (const row of family) {
+            const current = board.get(row.id)
+            if (current === undefined || SETTLED.has(current.state)) continue
+            await stopRow(current, args.by === 'human' ? `人工停止整个需求${args.value === undefined || args.value.trim() === '' ? '' : `: ${args.value.trim()}`}` : args.value ?? 'stopped with the whole request', false)
+            stopped.push(current.id)
+          }
+          // A human stopping a subtree inside a larger request: the manager above
+          // it still runs and has to know.
+          if (args.by === 'human') await tellManager(task, args.value)
+          await afterChange().catch(() => {})
+          await publishSnapshot().catch(() => {})
+          return { text: `stopped ${String(stopped.length)} task(s): ${stopped.join(', ')}` }
         }
         case 'priority': {
           const value = Number(args.value)
@@ -2148,9 +2300,179 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
       }
   }
 
+  /** Partition a tool call is about: explicit, else the calling manager's own partition. */
+  const partitionForCall = (explicit: string | undefined, exec: ToolRunContext): Partition => {
+    if (explicit !== undefined && explicit.trim() !== '') {
+      const found = partitions.find(entry => entry.name === explicit.trim())
+      if (found === undefined) throw new Error(`unknown partition "${explicit}"; partition_list shows the names`)
+      return found
+    }
+    const callerSession = exec.agent?.session.id
+    const own = callerSession === undefined
+      ? undefined
+      : board.list().find(task => task.level === 'manager' && task.sessionId === callerSession)
+    if (own !== undefined) return partitionOf(own)
+    if (partitions.length === 1) return partitions[0]!
+    throw new Error('pass partition: this call does not come from a partition manager')
+  }
+
+  /** Task id of the calling manager, when the caller is one. */
+  const managerTaskOf = (exec: ToolRunContext): string | undefined => {
+    const callerSession = exec.agent?.session.id
+    if (callerSession === undefined) return undefined
+    return board.list().find(task => task.level === 'manager' && task.sessionId === callerSession)?.id
+  }
+
+  const textOutput = {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['text'],
+      properties: { text: { type: 'string' } },
+    },
+    render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: (value as { text: string }).text }],
+  }
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'session_list',
+    description: 'List the worker sessions of one partition, newest first: open ones (running, queued, '
+      + 'suspended, blocked) always, then recent finished ones. Each line has the task id, the session id, the '
+      + 'state, the subject, and what the worker said it did. A manager omits `partition` to get its own.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        partition: { type: 'string', description: 'Partition name; a manager may omit it.' },
+        limit: { type: 'integer', minimum: 1, maximum: 100, description: 'How many sessions (default 30).' },
+      },
+    },
+    output: textOutput,
+    isConcurrencySafe: () => true,
+    async execute(raw, exec: ToolRunContext) {
+      const args = raw as { partition?: string; limit?: number }
+      const partition = partitionForCall(args.partition, exec)
+      const lines = sessionRoster(board.inPartition(partition.name), Math.min(100, Math.max(1, args.limit ?? 30)))
+      return {
+        text: lines.length === 0
+          ? `${partition.name}: no worker sessions yet`
+          : [`${partition.name}: ${String(lines.length)} session(s)`, ...lines].join('\n'),
+      }
+    },
+  }))
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'session_read',
+    description: 'Read what one worker session actually did: the end of its transcript (messages, tool calls '
+      + 'and results, turn ends), plus the task record. Use it before continuing or redoing earlier work, or to '
+      + 'answer "what happened in that session". Read-only.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        task_id: { type: 'string', description: 'Task whose session to read.' },
+        session_id: { type: 'string', description: 'Or the session id directly (from session_list).' },
+        last: { type: 'integer', minimum: 1, maximum: 80, description: 'Transcript entries from the end (default 20).' },
+      },
+    },
+    output: textOutput,
+    isConcurrencySafe: () => true,
+    async execute(raw) {
+      const args = raw as { task_id?: string; session_id?: string; last?: number }
+      const task = args.task_id !== undefined
+        ? board.get(args.task_id)
+        : args.session_id === undefined ? undefined : board.list().find(row => row.sessionId === args.session_id)
+      if (args.task_id !== undefined && task === undefined) throw new Error(`unknown task "${args.task_id}"`)
+      const sessionId = task?.sessionId ?? args.session_id
+      if (sessionId === undefined) {
+        throw new Error(args.task_id === undefined ? 'pass task_id or session_id' : `${args.task_id} has no session yet`)
+      }
+      // Only sessions the router started: this tool is a window on partitions, not on every chat.
+      if (task === undefined) throw new Error(`session ${sessionId} does not belong to any routed task`)
+      const events = await readLog(sessionId)
+      const transcript = renderTranscript(events, Math.min(80, Math.max(1, args.last ?? 20)))
+      const head = [
+        `${task.id} ${task.partition}/${task.level} [${task.state}] session ${sessionId}`,
+        `subject: ${task.subject}`,
+        ...task.summary === undefined ? [] : [`did: ${task.summary}`],
+        ...task.touched === undefined || task.touched.length === 0 ? [] : [`touched: ${task.touched.join(', ')}`],
+        ...task.left === undefined ? [] : [`left: ${task.left}`],
+        ...task.error === undefined ? [] : [`error: ${task.error}`],
+      ]
+      return {
+        text: [
+          ...head,
+          '',
+          events.length === 0
+            ? '(the session log is empty or could not be read)'
+            : `--- last ${String(transcript.length)} transcript entries ---`,
+          ...transcript,
+        ].join('\n'),
+      }
+    },
+  }))
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'partition_memory',
+    description: 'A partition\'s durable memory, kept across requests. `read` returns its notes and recent '
+      + 'work log (optionally filtered by `query`); `note` adds one lasting fact (a convention, a decision, a '
+      + 'pitfall, where something lives); `forget` removes a note by id. Finished tasks are logged '
+      + 'automatically, so do not note them. A manager omits `partition` to use its own.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['action'],
+      properties: {
+        action: { type: 'string', enum: ['read', 'note', 'forget'] },
+        partition: { type: 'string', description: 'Partition name; a manager may omit it.' },
+        text: { type: 'string', description: 'For `note`: one short fact.' },
+        id: { type: 'string', description: 'For `forget`: the note id (n-xxxxxxxx).' },
+        query: { type: 'string', description: 'For `read`: keep notes and log lines containing this text.' },
+        limit: { type: 'integer', minimum: 1, maximum: 300, description: 'For `read`: log entries (default 40).' },
+      },
+    },
+    output: textOutput,
+    isConcurrencySafe: () => false,
+    async execute(raw, exec: ToolRunContext) {
+      const args = raw as { action?: string; partition?: string; text?: string; id?: string; query?: string; limit?: number }
+      const partition = partitionForCall(args.partition, exec)
+      if (args.action === 'note') {
+        if (typeof args.text !== 'string') throw new Error('note needs text')
+        const managerTask = managerTaskOf(exec)
+        const note = await memory.addNote(partition.name, args.text, managerTask === undefined ? 'router' : 'manager', managerTask)
+        await publishSnapshot().catch(() => {})
+        return { text: `noted in ${partition.name}: [${note.id}] ${note.text}` }
+      }
+      if (args.action === 'forget') {
+        if (typeof args.id !== 'string' || args.id === '') throw new Error('forget needs the note id')
+        const removed = await memory.removeNote(partition.name, args.id)
+        if (!removed) throw new Error(`no note ${args.id} in ${partition.name}`)
+        await publishSnapshot().catch(() => {})
+        return { text: `forgot ${args.id} in ${partition.name}` }
+      }
+      if (args.action !== 'read') throw new Error('action must be read, note, or forget')
+      const doc = await memory.read(partition.name)
+      const query = args.query?.trim().toLowerCase()
+      const keep = (text: string): boolean => query === undefined || query === '' || text.toLowerCase().includes(query)
+      const notes = doc.notes.filter(note => keep(note.text))
+      const log = doc.log.filter(entry => keep(workLine(entry))).slice(-Math.min(300, Math.max(1, args.limit ?? 40))).reverse()
+      return {
+        text: [
+          `${partition.name} memory: ${String(doc.notes.length)} note(s), ${String(doc.log.length)} logged task(s)`,
+          '',
+          'notes:',
+          ...notes.length === 0 ? ['(none)'] : notes.map(note => `- [${note.id}] (${note.by}) ${note.text}`),
+          '',
+          'work log (newest first):',
+          ...log.length === 0 ? ['(none)'] : log.map(entry => workLine(entry)),
+        ].join('\n'),
+      }
+    },
+  }))
+
   ctx.effect(() => ctx.tools.register({
     name: 'task_control',
-    description: 'Change one task: `cancel` interrupts its worker and marks it cancelled; `priority` '
+    description: 'Change one task: `cancel` interrupts its worker and marks it cancelled; `cancel_tree` '
+      + 'stops the task and every open task under it (a whole request, or a manager and its workers); `priority` '
       + 'reorders the queue; `retry` re-dispatches a failed or reported task to a fresh worker; '
       + '`resume` continues an interrupted or failed row in its own session from its log; '
       + '`verify` runs the acceptance commands against the current tree; `block` parks it on a human '
@@ -2165,7 +2487,7 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
         task_id: { type: 'string', description: 'Task id.' },
         action: {
           type: 'string',
-          enum: ['cancel', 'priority', 'retry', 'resume', 'verify', 'block', 'suspend', 'note'],
+          enum: ['cancel', 'cancel_tree', 'priority', 'retry', 'resume', 'verify', 'block', 'suspend', 'note'],
           description: 'What to change.',
         },
         value: {
@@ -2418,6 +2740,50 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
         if (error instanceof FileListError) throw new BridgeError(error.status, error.code, error.message)
         throw error
       }
+    },
+    memory: {
+      read: async (name) => {
+        const partition = partitions.find(entry => entry.name === name)
+        if (partition === undefined) throw new BridgeError(404, 'not-found', `unknown partition "${name}"`)
+        const doc = await memory.read(name)
+        const route = await managerRoute().catch(() => ({ source: 'inherit' as const }))
+        return {
+          partition: name,
+          notes: doc.notes,
+          log: [...doc.log].reverse().slice(0, 60),
+          logTotal: doc.log.length,
+          sessions: board.inPartition(name)
+            .filter(task => task.level === 'worker' && task.sessionId !== undefined)
+            .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+            .slice(0, 40)
+            .map(task => ({
+              taskId: task.id,
+              sessionId: task.sessionId!,
+              state: task.state,
+              subject: task.subject,
+              updatedAt: task.updatedAt,
+              ...task.summary === undefined ? {} : { summary: task.summary },
+            })),
+          manager: {
+            enabled: partition.managerEnabled,
+            source: route.source,
+            ...'route' in route && route.route !== undefined ? { route: route.route } : {},
+          },
+        }
+      },
+      addNote: async (name, text) => {
+        if (!partitions.some(entry => entry.name === name)) throw new BridgeError(404, 'not-found', `unknown partition "${name}"`)
+        try {
+          return await memory.addNote(name, text, 'human')
+        } catch (error) {
+          throw new BridgeError(400, 'bad-request', error instanceof Error ? error.message : String(error))
+        }
+      },
+      removeNote: async (name, id) => {
+        if (!partitions.some(entry => entry.name === name)) throw new BridgeError(404, 'not-found', `unknown partition "${name}"`)
+        if (!await memory.removeNote(name, id)) throw new BridgeError(404, 'not-found', `no note ${id} in ${name}`)
+        return { ok: true, id }
+      },
     },
     problems: () => configProblems,
     isEnabled,

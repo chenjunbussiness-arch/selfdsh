@@ -287,12 +287,17 @@ export function summarize(
 }
 
 /** Error text on a row the harness stopped mid-flight; the session itself is intact. */
+/** States after which a row does not change on its own. */
+export const SETTLED: ReadonlySet<TaskState> = new Set<TaskState>(['done', 'verified', 'reported', 'failed', 'cancelled'])
+
 export const INTERRUPTED_NOTE = 'the harness stopped while this task was in flight; its session will be resumed from its log'
 
 /** The board file. One instance per plugin activation. */
 export class TaskBoard {
   private tasks: RouterTask[] = []
   private partitions: Record<string, PartitionRecord> = {}
+  /** Called after a row enters a settled state (see `SETTLED`). */
+  private readonly settleListeners: ((task: RouterTask, from: TaskState) => void)[] = []
 
   private constructor(
     private readonly file: string,
@@ -356,6 +361,7 @@ export class TaskBoard {
   async patch(id: string, change: Partial<RouterTask>): Promise<RouterTask> {
     const index = this.tasks.findIndex(task => task.id === id)
     if (index < 0) throw new Error(`host-router: unknown task ${id}`)
+    const previousState = this.tasks[index]!.state
     const updated: RouterTask = {
       ...this.tasks[index]!,
       ...change,
@@ -363,7 +369,30 @@ export class TaskBoard {
     }
     this.tasks = [...this.tasks.slice(0, index), updated, ...this.tasks.slice(index + 1)]
     await this.flush()
+    const from = previousState
+    if (SETTLED.has(updated.state) && !SETTLED.has(from)) {
+      for (const listener of this.settleListeners) {
+        try {
+          listener(updated, from)
+        } catch {
+          // A listener must never fail a board write.
+        }
+      }
+    }
     return updated
+  }
+
+  /**
+   * Run `listener` each time a row enters a settled state (done, verified,
+   * reported, failed, cancelled) from an unsettled one.
+   * @returns a function that removes the listener.
+   */
+  onSettled(listener: (task: RouterTask, from: TaskState) => void): () => void {
+    this.settleListeners.push(listener)
+    return () => {
+      const at = this.settleListeners.indexOf(listener)
+      if (at >= 0) this.settleListeners.splice(at, 1)
+    }
   }
 
   /** Merge a patch into one partition record and persist. */

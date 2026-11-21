@@ -23,7 +23,7 @@
  */
 
 import type {
-  BoardSnapshot, CredentialView, FileListingView, HostTaskState, PublishResult, TaskState, TaskView,
+  BoardSnapshot, CredentialView, FileListingView, MemoryNoteView, PartitionMemoryView, HostTaskState, PublishResult, TaskState, TaskView,
 } from './contract.ts'
 import { createMockSource } from './mock.ts'
 
@@ -63,6 +63,12 @@ export interface BoardSource {
    * renders the workspace page as "not available".
    */
   listFiles?(partition: string, path: string): Promise<FileListingView>
+  /** A partition's memory (notes, recent work, sessions); optional like `listFiles`. */
+  readMemory?(partition: string): Promise<PartitionMemoryView>
+  /** Add one note to a partition's memory. */
+  addMemoryNote?(partition: string, text: string): Promise<MemoryNoteView>
+  /** Remove one note from a partition's memory. */
+  removeMemoryNote?(partition: string, id: string): Promise<void>
   /**
    * Observe Host-side changes.
    * @param listener - called whenever the board may have changed.
@@ -72,7 +78,7 @@ export interface BoardSource {
 }
 
 /** `task_control` actions the panel may send. */
-export type ControlAction = 'resume' | 'suspend' | 'retry' | 'cancel'
+export type ControlAction = 'resume' | 'suspend' | 'retry' | 'cancel' | 'cancel_tree'
 
 /** Extra arguments of a `suspend`. */
 export interface ControlExtra {
@@ -365,6 +371,21 @@ export function createHttpSource(options: HttpSourceOptions = {}): BoardSource {
         throw new Error('GET /api/router/files returned a payload that is not a listing')
       }
       return body as FileListingView
+    },
+    async readMemory(partition) {
+      const query = new URLSearchParams({ partition })
+      const body = await requestJson(requireFetch(), `${base}/memory?${query.toString()}`)
+      if (typeof body !== 'object' || body === null || !Array.isArray((body as { notes?: unknown }).notes)) {
+        throw new Error('GET /api/router/memory returned a payload that is not a partition memory')
+      }
+      return body as PartitionMemoryView
+    },
+    async addMemoryNote(partition, text) {
+      return await requestJson(requireFetch(), `${base}/memory`, jsonPost({ partition, text })) as MemoryNoteView
+    },
+    async removeMemoryNote(partition, id) {
+      const query = new URLSearchParams({ partition, id })
+      await requestJson(requireFetch(), `${base}/memory?${query.toString()}`, { method: 'DELETE' })
     },
     subscribe(listener) {
       let stream: EventSource | undefined

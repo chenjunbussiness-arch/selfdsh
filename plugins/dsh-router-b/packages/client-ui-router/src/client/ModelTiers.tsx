@@ -31,8 +31,21 @@ interface TierDoc {
   effective: Record<Tier, Route | null | undefined>
   defaults?: Record<Tier, Route | null | undefined>
   defaultModel?: Route | null
+  /** Saved manager choice: `strongest` (default), `inherit`, or one route. */
+  manager?: 'strongest' | 'inherit' | Route
+  /** What managers actually run on, and why. */
+  managerEffective?: { route?: Route; source: 'saved' | 'hard' | 'strongest' | 'inherit' }
   models: ModelOption[]
 }
+
+const MANAGER_SOURCE: Record<string, string> = {
+  strongest: '自动选最强',
+  hard: '跟高级档',
+  saved: '指定',
+  inherit: '跟随默认模型',
+}
+const STRONGEST = '__strongest'
+const INHERIT = '__inherit'
 
 interface Placement { left: number; bottom: number; width: number; maxHeight: number }
 
@@ -91,6 +104,7 @@ const CSS = `
 .dmt-dot[data-tier="easy"] { background: var(--dmt-easy); }
 .dmt-dot[data-tier="medium"] { background: var(--dmt-medium); }
 .dmt-dot[data-tier="hard"] { background: var(--dmt-hard); }
+.dmt-dot[data-tier="manager"] { background: var(--dmt-text); }
 .dmt-line-label { font-size: 11px; color: var(--dmt-text2); white-space: nowrap; }
 .dmt-line-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dmt-text); text-align: right; }
 .dmt-root[data-off] .dmt-line { opacity: .5; }
@@ -305,6 +319,14 @@ export function ModelTiers({ wide = true }: { wide?: boolean }) {
                   </span>
                 )
               })}
+              <span className="dmt-line" title="每个分区的 manager 用的模型">
+                <span className="dmt-dot" data-tier="manager" />
+                <span className="dmt-line-label">Manager</span>
+                <span className="dmt-line-model">
+                  {doc.managerEffective?.route === undefined ? labelOf(doc.defaultModel) : labelOf(doc.managerEffective.route)}
+                  {doc.managerEffective?.route?.reasoningEffort === undefined ? '' : ` · ${EFFORT_LABEL[doc.managerEffective.route.reasoningEffort] ?? doc.managerEffective.route.reasoningEffort}`}
+                </span>
+              </span>
             </span>
           )}
       </button>
@@ -416,6 +438,61 @@ export function ModelTiers({ wide = true }: { wide?: boolean }) {
                 </div>
               )
             })}
+
+            {doc === null ? null : (() => {
+              const choice = doc.manager ?? 'strongest'
+              const value = choice === 'strongest' ? STRONGEST : choice === 'inherit' ? INHERIT : keyOf(choice)
+              const effective = doc.managerEffective
+              return (
+                <div className="dmt-tier" data-tier-block="manager">
+                  <div className="dmt-tier-head">
+                    <span className="dmt-dot" data-tier="manager" />
+                    <span className="dmt-tier-name">Manager</span>
+                    <span className="dmt-tier-hint" title="每个分区的 manager 负责拆任务、排顺序、记住分区做过什么">拆任务、排顺序、记住分区历史</span>
+                    {choice === 'strongest' ? <span className="dmt-tag">默认</span> : (
+                      <button type="button" className="dmt-reset" disabled={busy}
+                        onClick={() => { void save({ manager: null }, 'Manager 已恢复为自动选最强') }}>恢复默认</button>
+                    )}
+                  </div>
+                  <div className="dmt-fields" data-single="">
+                    <select
+                      className="dmt-select"
+                      data-tier="manager"
+                      aria-label="Manager 模型"
+                      disabled={busy}
+                      value={value}
+                      onChange={(event) => {
+                        const picked = event.currentTarget.value
+                        if (picked === STRONGEST) { void save({ manager: 'strongest' }, 'Manager 改为自动选最强，下一个需求生效'); return }
+                        if (picked === INHERIT) { void save({ manager: 'inherit' }, 'Manager 改为跟随默认模型，下一个需求生效'); return }
+                        const next = doc.models.find(entry => keyOf(entry) === picked)
+                        if (next === undefined) return
+                        const top = next.efforts?.at(-1)
+                        void save({ manager: { provider: next.provider, model: next.model, ...top === undefined ? {} : { reasoningEffort: top } } },
+                          `Manager 已改为 ${shortName(next.name)}，下一个需求生效`)
+                      }}
+                    >
+                      <option value={STRONGEST}>自动选最强</option>
+                      <option value={INHERIT}>跟随默认模型</option>
+                      {groups.map(group => (
+                        <optgroup key={group.name} label={group.name}>
+                          {group.models.map(entry => (
+                            <option key={keyOf(entry)} value={keyOf(entry)}>{shortName(entry.name)}</option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="dmt-switch-hint" data-manager-effective="">
+                    {effective === undefined
+                      ? '宿主还没更新，manager 暂时跟随默认模型'
+                      : `实际使用：${effective.route === undefined ? labelOf(doc.defaultModel) : labelOf(effective.route)}`
+                        + `${effective.route?.reasoningEffort === undefined ? '' : ` · 推理${EFFORT_LABEL[effective.route.reasoningEffort] ?? effective.route.reasoningEffort}`}`
+                        + `（${MANAGER_SOURCE[effective.source] ?? effective.source}）`}
+                  </div>
+                </div>
+              )
+            })()}
           </div>
           <div className="dmt-pop-foot" {...msg?.bad === true ? { 'data-bad': '' } : {}}>
             {msg?.text ?? '修改立即保存，从下一个派出的任务开始生效'}
