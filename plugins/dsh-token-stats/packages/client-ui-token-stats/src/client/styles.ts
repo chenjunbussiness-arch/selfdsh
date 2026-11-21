@@ -130,6 +130,8 @@ export const TOKEN_STATS_CSS = `
 .dst-retry:hover, .dst-refresh:hover { background: var(--dst-hover); }
 .dst-pop-foot { display: flex; flex-direction: column; gap: 1px; flex: none; padding: 7px 12px 8px; border-top: 1px solid var(--dst-line); }
 .dst-foot-line { font-size: 10px; line-height: 1.35; color: var(--dst-caption); overflow-wrap: anywhere; }
+.dst-foot-line[data-bad] { color: var(--dst-bad); }
+.dst-refresh:disabled { opacity: .55; cursor: default; }
 @media (prefers-reduced-motion: reduce) { .dst-card, .dst-rail { transition: none; } }
 `
 

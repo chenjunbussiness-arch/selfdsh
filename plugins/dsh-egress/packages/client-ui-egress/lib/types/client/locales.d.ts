@@ -13,6 +13,15 @@ declare const zh: {
     readonly 'badge.mock': "示例数据";
     readonly 'badge.mock.hint': "宿主侧的出口桥没有接通，下面是内置示例数据，改动不会保存";
     readonly refresh: "刷新";
+    readonly refreshing: "刷新中…";
+    readonly 'done.exitAdded': "已添加出口「{name}」";
+    readonly 'done.exitSaved': "已保存出口「{name}」";
+    readonly 'done.exitDeleted': "已删除出口「{name}」";
+    readonly 'done.bound': "{host} 改走「{exit}」，下一条请求生效";
+    readonly 'done.unbound': "{host} 已取消绑定，改走默认出口";
+    readonly 'done.default': "默认出口已改为「{exit}」";
+    readonly 'form.hint.paste': "可以直接粘贴整条代理地址，例如 socks5://用户:密码@主机:1080";
+    readonly 'log.count': "显示 {shown}/{total}";
     readonly retry: "重试";
     readonly loading: "正在读取…";
     readonly 'error.load': "读取失败：{message}";

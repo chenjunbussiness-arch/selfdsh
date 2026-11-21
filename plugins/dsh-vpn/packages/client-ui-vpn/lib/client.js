@@ -164,6 +164,14 @@ var zh = {
   "install.missing.title": "\u670D\u52A1\u5668\u4E0A\u6CA1\u6709\u5B89\u88C5 openfortivpn",
   "install.missing.body": "\u8FDE\u63A5\u524D\u5148\u5728\u670D\u52A1\u5668\u4E0A\u6267\u884C\u4E0B\u9762\u7684\u547D\u4EE4\uFF08\u63D2\u4EF6\u4E0D\u4F1A\u66FF\u4F60\u5B89\u88C5\uFF09\uFF1A",
   "install.copy": "\u590D\u5236",
+  "install.copied": "\u5DF2\u590D\u5236",
+  "connect.noProfile": "\u5148\u5728\u5DE6\u4FA7\u9009\u4E00\u4E2A\u914D\u7F6E\uFF0C\u6216\u65B0\u5EFA\u4E00\u4E2A\u3002",
+  "connect.noPassword": "\u8FD9\u4E2A\u914D\u7F6E\u8FD8\u6CA1\u586B\u5BC6\u7801\uFF1A\u70B9\u300C\u7F16\u8F91\u300D\u8865\u4E0A\u540E\u624D\u80FD\u8FDE\u63A5\u3002",
+  "connect.noUrl": "\u8FD9\u4E2A\u914D\u7F6E\u8FD8\u6CA1\u586B token \u94FE\u63A5\uFF1A\u70B9\u300C\u7F16\u8F91\u300D\u8865\u4E0A\u540E\u624D\u80FD\u8FDE\u63A5\u3002",
+  "connect.noClient": "\u670D\u52A1\u5668\u4E0A\u8FD8\u6CA1\u88C5 openfortivpn\uFF0C\u88C5\u597D\u540E\u624D\u80FD\u8FDE\u63A5\u3002",
+  "connect.oldClient": "\u670D\u52A1\u5668\u4E0A\u7684 openfortivpn \u592A\u65E7\uFF0C\u4E0D\u652F\u6301 token \u94FE\u63A5\uFF0C\u5347\u7EA7\u540E\u624D\u80FD\u8FDE\u63A5\u3002",
+  "form.err.name": "\u8BF7\u586B\u5199\u540D\u79F0",
+  "form.err.targets": "\u81F3\u5C11\u586B\u4E00\u4E2A\u8D70\u96A7\u9053\u7684\u76EE\u6807",
   "install.old": "openfortivpn {version} \u592A\u65E7\uFF0C\u4E0D\u652F\u6301 token \u94FE\u63A5\uFF08\u9700\u8981 1.18 \u53CA\u4EE5\u4E0A\uFF09\u3002",
   "install.pppd": "\u7F3A\u5C11 pppd\uFF1Aapt-get install -y ppp",
   "profiles.title": "\u914D\u7F6E",
@@ -189,7 +197,7 @@ var zh = {
   "form.cert": "\u53D7\u4FE1\u8BC1\u4E66\u6307\u7EB9 sha256\uFF08\u53EF\u9009\uFF09",
   "form.cert.hint": "\u7F51\u5173\u7528\u81EA\u7B7E\u8BC1\u4E66\u65F6\u586B\uFF1B\u8FDE\u63A5\u5931\u8D25\u7684\u65E5\u5FD7\u91CC\u4F1A\u7ED9\u51FA\u6307\u7EB9\u3002",
   "form.targets": "\u8D70\u96A7\u9053\u7684\u76EE\u6807",
-  "form.targets.hint": "\u6BCF\u884C\u4E00\u4E2A\uFF1ACIDR\uFF0810.20.0.0/16\uFF09\u3001\u5355\u4E2A IP \u6216\u4E3B\u673A\u540D\u3002\u5FC5\u586B\u3002\u4E0D\u63A5\u53D7 0.0.0.0/0\u3001::/0 \u548C\u6BD4 /8 \u66F4\u5BBD\u7684\u7F51\u6BB5\u3002",
+  "form.targets.hint": "\u6BCF\u884C\u4E00\u4E2A\uFF1ACIDR\uFF08198.51.100.0/24\uFF09\u3001\u5355\u4E2A IP \u6216\u4E3B\u673A\u540D\u3002\u5FC5\u586B\u3002\u4E0D\u63A5\u53D7 0.0.0.0/0\u3001::/0 \u548C\u6BD4 /8 \u66F4\u5BBD\u7684\u7F51\u6BB5\u3002",
   "form.dns": "\u8BA9 VPN \u6539\u5199 /etc/resolv.conf\uFF08\u9ED8\u8BA4\u5173\u95ED\uFF0C\u5185\u7F51\u57DF\u540D\u5EFA\u8BAE\u76F4\u63A5\u5199 IP\uFF09",
   "form.command": "\u547D\u4EE4\uFF08\u6BCF\u884C\u4E00\u4E2A\u53C2\u6570\uFF0C\u7B2C\u4E00\u884C\u662F\u53EF\u6267\u884C\u6587\u4EF6\u7684\u7EDD\u5BF9\u8DEF\u5F84\uFF09",
   "form.command.hint": "{url} \u4F1A\u88AB\u66FF\u6362\u6210\u4E0B\u9762\u7684\u94FE\u63A5\u3002\u547D\u4EE4\u7531\u4F60\u81EA\u5DF1\u8D1F\u8D23\uFF0C\u63D2\u4EF6\u53EA\u7BA1\u8D77\u505C\u548C\u8131\u654F\u3002",
@@ -244,6 +252,14 @@ var en = {
   "install.missing.title": "openfortivpn is not installed on the server",
   "install.missing.body": "Run this on the server before connecting (the plugin does not install anything):",
   "install.copy": "Copy",
+  "install.copied": "Copied",
+  "connect.noProfile": "Pick a profile on the left, or create one.",
+  "connect.noPassword": "This profile has no password yet. Use Edit to add it before connecting.",
+  "connect.noUrl": "This profile has no token URL yet. Use Edit to add it before connecting.",
+  "connect.noClient": "openfortivpn is not installed on the server yet.",
+  "connect.oldClient": "The server's openfortivpn is too old for token URLs; upgrade it to connect.",
+  "form.err.name": "Enter a name",
+  "form.err.targets": "Add at least one target to route through the tunnel",
   "install.old": "openfortivpn {version} is too old for token URLs (1.18 or newer is required).",
   "install.pppd": "pppd is missing: apt-get install -y ppp",
   "profiles.title": "Profiles",
@@ -269,7 +285,7 @@ var en = {
   "form.cert": "Trusted certificate sha256 (optional)",
   "form.cert.hint": "Needed for a self-signed gateway; a failed connection logs the digest to use.",
   "form.targets": "Targets through the tunnel",
-  "form.targets.hint": "One per line: CIDR (10.20.0.0/16), a single IP or a host name. Required. 0.0.0.0/0, ::/0 and anything wider than /8 are refused.",
+  "form.targets.hint": "One per line: CIDR (198.51.100.0/24), a single IP or a host name. Required. 0.0.0.0/0, ::/0 and anything wider than /8 are refused.",
   "form.dns": "Let the VPN rewrite /etc/resolv.conf (off by default; prefer IP addresses for internal hosts)",
   "form.command": "Command (one argument per line; the first is an absolute path)",
   "form.command.hint": "{url} is replaced by the link below. You own what the command does; the plugin only starts, stops and redacts.",
@@ -295,7 +311,7 @@ function sampleProfiles(now) {
       username: "zhanglei",
       realm: "",
       trustedCert: "",
-      targets: ["10.20.0.0/16", "git.corp.example"],
+      targets: ["198.51.100.0/24", "git.corp.example"],
       setDns: false,
       command: [],
       secretConfigured: true,
@@ -311,7 +327,7 @@ function sampleProfiles(now) {
       username: "",
       realm: "",
       trustedCert: "e46d4aff08ba6914e64daa85bc6112a422fa7ce16631bff0b592a28556f993db",
-      targets: ["192.168.88.0/24", "10.30.1.15"],
+      targets: ["203.0.113.0/24", "203.0.113.15"],
       setDns: false,
       command: [],
       secretConfigured: true,
@@ -327,7 +343,7 @@ function sampleProfiles(now) {
       username: "ci-bot",
       realm: "lab",
       trustedCert: "",
-      targets: ["172.30.0.0/20"],
+      targets: ["198.18.0.0/20"],
       setDns: false,
       command: [],
       secretConfigured: false,
@@ -344,7 +360,7 @@ function sampleLogs(now, state) {
     { t: at(4298), level: "out", text: "INFO:   Authenticated." },
     { t: at(4298), level: "out", text: "INFO:   Remote gateway has allocated a VPN." },
     { t: at(4297), level: "out", text: "INFO:   Interface ppp0 is UP." },
-    { t: at(4297), level: "out", text: "INFO:   Got addresses: [10.8.0.6], ns [10.8.0.1]" },
+    { t: at(4297), level: "out", text: "INFO:   Got addresses: [192.0.2.6], ns [192.0.2.1]" },
     { t: at(4297), level: "out", text: "INFO:   Tunnel is up and running." }
   ];
   if (state === "connecting") return head.slice(0, 3).map((line, index) => ({ ...line, t: at(6 - index * 2) }));
@@ -359,8 +375,8 @@ function sampleLogs(now, state) {
   if (state === "disconnected") return [];
   return [
     ...head,
-    { t: at(4296), level: "info", text: "route added: 10.20.0.0/16 -> ppp0" },
-    { t: at(4296), level: "info", text: "route added: 10.20.30.40/32 -> ppp0" },
+    { t: at(4296), level: "info", text: "route added: 198.51.100.0/24 -> ppp0" },
+    { t: at(4296), level: "info", text: "route added: 198.51.100.40/32 -> ppp0" },
     { t: at(4295), level: "info", text: "\u5DF2\u8FDE\u63A5\uFF1B\u52A0\u4E86 2 \u6761\u8DEF\u7531\uFF0C\u9ED8\u8BA4\u8DEF\u7531\u672A\u52A8" },
     { t: at(4265), level: "info", text: "\u770B\u95E8\u72D7\u901A\u8FC7\uFF0830s\uFF09" },
     { t: at(300), level: "out", text: "DEBUG:  password = ***" }
@@ -384,10 +400,10 @@ function createMockSource(scenario = "connected") {
     return {
       status: state,
       ...state === "disconnected" || profile === void 0 ? {} : { profileId: profile.id, profileName: profile.name },
-      ...up ? { iface: "ppp0", ip: "10.8.0.6", connectedAt: new Date(connectedAt).toISOString(), uptimeSeconds: Math.round((Date.now() - connectedAt) / 1e3), pid: 31877 } : {},
+      ...up ? { iface: "ppp0", ip: "192.0.2.6", connectedAt: new Date(connectedAt).toISOString(), uptimeSeconds: Math.round((Date.now() - connectedAt) / 1e3), pid: 31877 } : {},
       ...state === "connecting" ? { iface: "ppp0", pid: 31877 } : {},
       ...error === void 0 ? {} : { error },
-      routes: up ? ["10.20.0.0/16", "10.20.30.40/32"] : [],
+      routes: up ? ["198.51.100.0/24", "198.51.100.40/32"] : [],
       watchdog: up ? { state: "passed" } : state === "failed" ? { state: "idle" } : { state: state === "connecting" ? "idle" : "idle" },
       install: { installed: true, version: "1.20.0", cookieSupport: true, pppd: true, hint: "" },
       allowCustom: false,
@@ -816,6 +832,18 @@ function toInput(form) {
     ...form.secret === "" ? {} : { secret: form.secret }
   };
 }
+function gatewayFrom(raw) {
+  const text = raw.trim();
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text);
+  if (!hasScheme && !/:[0-9]{1,5}\/?$/.test(text) && !text.includes("/")) return void 0;
+  try {
+    const url = new URL(hasScheme ? text : `https://${text}`);
+    if (url.hostname === "") return void 0;
+    return { host: url.hostname.replace(/^\[|\]$/g, ""), ...url.port === "" ? {} : { port: url.port } };
+  } catch {
+    return void 0;
+  }
+}
 function ProfileForm(props) {
   const { t } = props;
   const [form, setForm] = (0, import_react.useState)(props.initial);
@@ -826,167 +854,215 @@ function ProfileForm(props) {
   };
   const types = props.allowCustom ? ["password", "token-url", "custom"] : ["password", "token-url"];
   const editing = form.id !== void 0;
+  const pickType = (type) => {
+    if (type !== form.type) set({ type, secret: "" });
+  };
+  const absorbGateway = (text) => {
+    const gateway = gatewayFrom(text);
+    if (gateway === void 0) return false;
+    set({ host: gateway.host, ...gateway.port === void 0 ? {} : { port: gateway.port } });
+    return true;
+  };
   const submit = async (event) => {
     event.preventDefault();
     setError(void 0);
+    if (form.name.trim() === "") {
+      setError(t("form.err.name"));
+      return;
+    }
+    if (toInput(form).targets.length === 0) {
+      setError(t("form.err.targets"));
+      return;
+    }
     const message = await props.onSave(toInput(form));
     if (message === void 0) set({ secret: "" });
     else setError(message);
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("form", { className: "dshv-form", onSubmit: (event) => {
-    void submit(event);
-  }, autoComplete: "off", "data-type": form.type, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h2", { className: "dshv-form-title", children: editing ? t("form.title.edit") : t("form.title.new") }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-name", children: t("form.name") }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-name", className: "dshv-input", value: form.name, maxLength: 64, onChange: (event) => {
-        set({ name: event.target.value });
-      } })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dshv-label", id: "dshv-type-label", children: t("form.type") }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshv-seg", role: "radiogroup", "aria-labelledby": "dshv-type-label", children: types.map((type) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", role: "radio", "aria-checked": form.type === type, onClick: () => {
-        set({ type });
-      }, children: t(`type.${type}`) }, type)) })
-    ] }),
-    form.type === "password" && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-grid", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
+    "form",
+    {
+      className: "dshv-form",
+      onSubmit: (event) => {
+        void submit(event);
+      },
+      autoComplete: "off",
+      "data-type": form.type,
+      onKeyDown: (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          props.onCancel();
+        }
+      },
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h2", { className: "dshv-form-title", children: editing ? t("form.title.edit") : t("form.title.new") }),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-host", children: t("form.host") }),
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-host", className: "dshv-input", "data-mono": "true", value: form.host, placeholder: "vpn.example.com", onChange: (event) => {
-            set({ host: event.target.value });
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-name", children: t("form.name") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-name", className: "dshv-input", value: form.name, maxLength: 64, onChange: (event) => {
+            set({ name: event.target.value });
           } })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-port", children: t("form.port") }),
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-port", className: "dshv-input", "data-mono": "true", inputMode: "numeric", value: form.port, onChange: (event) => {
-            set({ port: event.target.value });
-          } })
-        ] })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-grid", "data-cols": "2", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-user", children: t("form.username") }),
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-user", className: "dshv-input", autoComplete: "off", value: form.username, onChange: (event) => {
-            set({ username: event.target.value });
-          } })
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dshv-label", id: "dshv-type-label", children: t("form.type") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshv-seg", role: "radiogroup", "aria-labelledby": "dshv-type-label", children: types.map((type) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", role: "radio", "aria-checked": form.type === type, onClick: () => {
+            pickType(type);
+          }, children: t(`type.${type}`) }, type)) })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-pass", children: t("form.password") }),
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
-            "input",
-            {
-              id: "dshv-pass",
-              className: "dshv-input",
-              type: "password",
-              autoComplete: "new-password",
-              value: form.secret,
-              placeholder: form.secretConfigured ? t("form.password.set") : "",
-              onChange: (event) => {
-                set({ secret: event.target.value });
+        form.type === "password" && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-grid", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-host", children: t("form.host") }),
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+                "input",
+                {
+                  id: "dshv-host",
+                  className: "dshv-input",
+                  "data-mono": "true",
+                  value: form.host,
+                  placeholder: "vpn.example.com",
+                  onChange: (event) => {
+                    set({ host: event.target.value });
+                  },
+                  onPaste: (event) => {
+                    if (absorbGateway(event.clipboardData.getData("text"))) event.preventDefault();
+                  },
+                  onBlur: () => {
+                    absorbGateway(form.host);
+                  }
+                }
+              )
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-port", children: t("form.port") }),
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-port", className: "dshv-input", "data-mono": "true", inputMode: "numeric", value: form.port, onChange: (event) => {
+                set({ port: event.target.value });
+              } })
+            ] })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-grid", "data-cols": "2", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-user", children: t("form.username") }),
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-user", className: "dshv-input", autoComplete: "off", value: form.username, onChange: (event) => {
+                set({ username: event.target.value });
+              } })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-pass", children: t("form.password") }),
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+                "input",
+                {
+                  id: "dshv-pass",
+                  className: "dshv-input",
+                  type: "password",
+                  autoComplete: "new-password",
+                  value: form.secret,
+                  placeholder: form.secretConfigured ? t("form.password.set") : "",
+                  onChange: (event) => {
+                    set({ secret: event.target.value });
+                  }
+                }
+              )
+            ] })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-grid", "data-cols": "2", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-realm", children: t("form.realm") }),
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-realm", className: "dshv-input", value: form.realm, onChange: (event) => {
+                set({ realm: event.target.value });
+              } })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-cert", children: t("form.cert") }),
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-cert", className: "dshv-input", "data-mono": "true", value: form.trustedCert, placeholder: "e46d4aff08ba\u2026", onChange: (event) => {
+                set({ trustedCert: event.target.value });
+              } })
+            ] })
+          ] })
+        ] }),
+        form.type === "token-url" && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-url", children: t("form.url") }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+              "input",
+              {
+                id: "dshv-url",
+                className: "dshv-input",
+                "data-mono": "true",
+                type: "password",
+                autoComplete: "new-password",
+                value: form.secret,
+                placeholder: form.secretConfigured ? t("form.url.set") : "https://host:port/path?token=\u2026",
+                onChange: (event) => {
+                  set({ secret: event.target.value });
+                }
               }
+            ),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.url.hint") })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-cert2", children: t("form.cert") }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-cert2", className: "dshv-input", "data-mono": "true", value: form.trustedCert, onChange: (event) => {
+              set({ trustedCert: event.target.value });
+            } }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.cert.hint") })
+          ] })
+        ] }),
+        form.type === "custom" && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-cmd", children: t("form.command") }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("textarea", { id: "dshv-cmd", className: "dshv-input", "data-mono": "true", value: form.command, onChange: (event) => {
+              set({ command: event.target.value });
+            } }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.command.hint") })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-url2", children: t("form.url") }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-url2", className: "dshv-input", "data-mono": "true", type: "password", autoComplete: "new-password", value: form.secret, placeholder: form.secretConfigured ? t("form.url.set") : "", onChange: (event) => {
+              set({ secret: event.target.value });
+            } })
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-targets", children: t("form.targets") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("textarea", { id: "dshv-targets", className: "dshv-input", "data-mono": "true", value: form.targets, placeholder: "198.51.100.0/24\ngit.corp.example", onChange: (event) => {
+            set({ targets: event.target.value });
+          } }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.targets.hint") })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshv-check", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { type: "checkbox", checked: form.setDns, onChange: (event) => {
+            set({ setDns: event.target.checked });
+          } }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.dns") })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.secret.write-only") }),
+        error !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-form-error", role: "alert", children: t("form.error", { message: error }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-form-foot", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "submit", className: "dshv-btn", "data-kind": "primary", disabled: props.busy, children: props.busy ? t("action.saving") : t("action.save") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dshv-btn", onClick: props.onCancel, children: t("action.cancel") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dshv-spacer" }),
+          props.onDelete !== void 0 && editing && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshv-btn",
+              "data-kind": "danger",
+              disabled: props.busy,
+              onClick: () => {
+                if (!confirmDelete) {
+                  setConfirmDelete(true);
+                  return;
+                }
+                void props.onDelete?.().then((message) => {
+                  if (message !== void 0) setError(message);
+                });
+              },
+              children: confirmDelete ? t("action.delete.confirm") : t("action.delete")
             }
           )
         ] })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-grid", "data-cols": "2", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-realm", children: t("form.realm") }),
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-realm", className: "dshv-input", value: form.realm, onChange: (event) => {
-            set({ realm: event.target.value });
-          } })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-cert", children: t("form.cert") }),
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-cert", className: "dshv-input", "data-mono": "true", value: form.trustedCert, placeholder: "e46d4aff08ba\u2026", onChange: (event) => {
-            set({ trustedCert: event.target.value });
-          } })
-        ] })
-      ] })
-    ] }),
-    form.type === "token-url" && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-url", children: t("form.url") }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
-          "input",
-          {
-            id: "dshv-url",
-            className: "dshv-input",
-            "data-mono": "true",
-            type: "password",
-            autoComplete: "new-password",
-            value: form.secret,
-            placeholder: form.secretConfigured ? t("form.url.set") : "https://host:port/path?token=\u2026",
-            onChange: (event) => {
-              set({ secret: event.target.value });
-            }
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.url.hint") })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-cert2", children: t("form.cert") }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-cert2", className: "dshv-input", "data-mono": "true", value: form.trustedCert, onChange: (event) => {
-          set({ trustedCert: event.target.value });
-        } }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.cert.hint") })
-      ] })
-    ] }),
-    form.type === "custom" && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-cmd", children: t("form.command") }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("textarea", { id: "dshv-cmd", className: "dshv-input", "data-mono": "true", value: form.command, onChange: (event) => {
-          set({ command: event.target.value });
-        } }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.command.hint") })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-url2", children: t("form.url") }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { id: "dshv-url2", className: "dshv-input", "data-mono": "true", type: "password", autoComplete: "new-password", value: form.secret, placeholder: form.secretConfigured ? t("form.url.set") : "", onChange: (event) => {
-          set({ secret: event.target.value });
-        } })
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-field", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("label", { className: "dshv-label", htmlFor: "dshv-targets", children: t("form.targets") }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("textarea", { id: "dshv-targets", className: "dshv-input", "data-mono": "true", value: form.targets, placeholder: "10.20.0.0/16\ngit.corp.example", onChange: (event) => {
-        set({ targets: event.target.value });
-      } }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.targets.hint") })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshv-check", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { type: "checkbox", checked: form.setDns, onChange: (event) => {
-        set({ setDns: event.target.checked });
-      } }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.dns") })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-hint", children: t("form.secret.write-only") }),
-    error !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshv-form-error", role: "alert", children: t("form.error", { message: error }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshv-form-foot", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "submit", className: "dshv-btn", "data-kind": "primary", disabled: props.busy, children: props.busy ? t("action.saving") : t("action.save") }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dshv-btn", onClick: props.onCancel, children: t("action.cancel") }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dshv-spacer" }),
-      props.onDelete !== void 0 && editing && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
-        "button",
-        {
-          type: "button",
-          className: "dshv-btn",
-          "data-kind": "danger",
-          disabled: props.busy,
-          onClick: () => {
-            if (!confirmDelete) {
-              setConfirmDelete(true);
-              return;
-            }
-            void props.onDelete?.().then((message) => {
-              if (message !== void 0) setError(message);
-            });
-          },
-          children: confirmDelete ? t("action.delete.confirm") : t("action.delete")
-        }
-      )
-    ] })
-  ] });
+      ]
+    }
+  );
 }
 
 // src/client/VpnPage.tsx
@@ -1042,16 +1118,19 @@ function VpnPage({ controller, t, initialEdit }) {
   const running = current === "connecting" || current === "connected";
   const install = status?.install;
   const blockedByInstall = selected !== void 0 && selected.type !== "custom" && install !== void 0 && (!install.installed || selected.type === "token-url" && !install.cookieSupport);
+  const connectBlocker = selected === void 0 ? t("connect.noProfile") : !selected.secretConfigured && selected.type !== "custom" ? t(selected.type === "token-url" ? "connect.noUrl" : "connect.noPassword") : blockedByInstall ? t(install?.installed === true ? "connect.oldClient" : "connect.noClient") : void 0;
+  const [copied, setCopied] = (0, import_react2.useState)(false);
   const run = async (action) => {
     setActionError(void 0);
     const message = await action();
     if (message !== void 0) setActionError(message);
   };
   const logRef = (0, import_react2.useRef)(null);
+  const following = (0, import_react2.useRef)(true);
   const lastLog = snapshot?.logs[snapshot.logs.length - 1]?.t;
   (0, import_react2.useEffect)(() => {
     const element = logRef.current;
-    if (element !== null) element.scrollTop = element.scrollHeight;
+    if (element !== null && following.current) element.scrollTop = element.scrollHeight;
   }, [lastLog]);
   return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "dshv-page", children: [
     /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("aside", { className: "dshv-rail", "aria-label": t("profiles.title"), children: [
@@ -1117,21 +1196,23 @@ function VpnPage({ controller, t, initialEdit }) {
             }, children: t("action.edit") }),
             running ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "dshv-btn", "data-kind": "danger", disabled: state.busy, onClick: () => {
               void run(() => controller.disconnect());
-            }, children: current === "connecting" ? t("action.disconnect") : t("action.disconnect") }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+            }, children: state.busy ? t("action.disconnecting") : t("action.disconnect") }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
               "button",
               {
                 type: "button",
                 className: "dshv-btn",
                 "data-kind": "primary",
-                disabled: state.busy || selected === void 0 || !selected.secretConfigured && selected.type !== "custom" || blockedByInstall,
+                disabled: state.busy || connectBlocker !== void 0,
+                title: connectBlocker,
                 onClick: () => {
                   if (selected !== void 0) void run(() => controller.connect(selected.id));
                 },
-                children: selected === void 0 ? t("action.connect") : t("action.connect.profile", { name: selected.name })
+                children: state.busy ? t("action.connecting") : selected === void 0 ? t("action.connect") : t("action.connect.profile", { name: selected.name })
               }
             )
           ] })
         ] }),
+        !running && connectBlocker !== void 0 && selected !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "dshv-hint", children: connectBlocker }),
         actionError !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "dshv-form-error", role: "alert", children: t("action.failed", { message: actionError }) }),
         current === "failed" && status.error !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "dshv-alert", role: "alert", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "dshv-alert-title", children: status.error }) }),
         install !== void 0 && !install.installed && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "dshv-alert", "data-kind": "warn", children: [
@@ -1140,8 +1221,13 @@ function VpnPage({ controller, t, initialEdit }) {
           /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "dshv-alert-row", children: [
             /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("pre", { children: install.hint }),
             /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "dshv-btn", "data-size": "sm", onClick: () => {
-              void navigator.clipboard?.writeText(install.hint);
-            }, children: t("install.copy") })
+              void navigator.clipboard?.writeText(install.hint).then(() => {
+                setCopied(true);
+                setTimeout(() => {
+                  setCopied(false);
+                }, 1500);
+              }, () => void 0);
+            }, children: t(copied ? "install.copied" : "install.copy") })
           ] })
         ] }),
         install?.installed === true && !install.cookieSupport && selected?.type === "token-url" && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "dshv-alert", "data-kind": "warn", children: t("install.old", { version: install.version }) }),
@@ -1210,10 +1296,23 @@ function VpnPage({ controller, t, initialEdit }) {
           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "dshv-block-title", children: t("logs.title") }),
           /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "dshv-hint", children: t("logs.hint", { count: 200 }) })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "dshv-log-body", ref: logRef, role: "log", "aria-live": "off", children: (snapshot?.logs.length ?? 0) === 0 ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "dshv-log-empty", children: t("logs.empty") }) : snapshot?.logs.map((line, index) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "dshv-log-line", "data-level": line.level, children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "dshv-log-time", children: formatClock(line.t) }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: line.text })
-        ] }, `${line.t}-${String(index)}`)) })
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          "div",
+          {
+            className: "dshv-log-body",
+            ref: logRef,
+            role: "log",
+            "aria-live": "off",
+            onScroll: (event) => {
+              const element = event.currentTarget;
+              following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+            },
+            children: (snapshot?.logs.length ?? 0) === 0 ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "dshv-log-empty", children: t("logs.empty") }) : snapshot?.logs.map((line, index) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "dshv-log-line", "data-level": line.level, children: [
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "dshv-log-time", children: formatClock(line.t) }),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: line.text })
+            ] }, `${line.t}-${String(index)}`))
+          }
+        )
       ] })
     ] }) })
   ] });

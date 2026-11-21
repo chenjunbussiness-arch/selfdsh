@@ -20,7 +20,15 @@ export interface PanelState {
   readonly probing: readonly string[]
   /** Result of the last action, shown as a toast line. */
   readonly notice?: { readonly kind: 'ok' | 'error'; readonly text: string }
+  /** True while a hand-triggered refresh is in flight. */
+  readonly refreshing?: boolean
 }
+
+/** How long a success line stays up; errors stay until dismissed. */
+const OK_NOTICE_MS = 3000
+
+/** Whether the page is in a background tab. */
+const hidden = (): boolean => typeof document !== 'undefined' && document.visibilityState === 'hidden'
 
 const INITIAL: PanelState = { data: null, origin: 'mock', status: 'loading', probing: [] }
 
@@ -31,6 +39,7 @@ export class EgressController {
   private active: EgressSource
   private mock: EgressSource | undefined
   private timer: ReturnType<typeof setInterval> | undefined
+  private noticeTimer: ReturnType<typeof setTimeout> | undefined
   private disposed = false
 
   /**
@@ -68,7 +77,11 @@ export class EgressController {
   /** First read, then poll. */
   start(): () => void {
     void this.refresh()
-    if (this.pollMs > 0) this.timer = setInterval(() => { void this.refresh(true) }, this.pollMs)
+    if (this.pollMs > 0) {
+      // A hidden browser tab skips its polls; coming back reads at once.
+      this.timer = setInterval(() => { if (!hidden()) void this.refresh(true) }, this.pollMs)
+      if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.onVisible)
+    }
     return () => { this.dispose() }
   }
 
@@ -76,8 +89,12 @@ export class EgressController {
   dispose(): void {
     this.disposed = true
     if (this.timer !== undefined) clearInterval(this.timer)
+    if (this.noticeTimer !== undefined) clearTimeout(this.noticeTimer)
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.onVisible)
     this.listeners.clear()
   }
+
+  private readonly onVisible = (): void => { if (!hidden()) void this.refresh(true) }
 
   /**
    * Read the state, preferring the real bridge.
@@ -85,6 +102,7 @@ export class EgressController {
    */
   async refresh(quiet = false): Promise<void> {
     if (!quiet && this.state.data === null) this.set({ status: 'loading' })
+    if (!quiet) this.set({ refreshing: true })
     try {
       const data = await this.host.load()
       this.active = this.host
@@ -100,6 +118,18 @@ export class EgressController {
       } else {
         this.set({ bridgeError: message })
       }
+    } finally {
+      if (!quiet) this.set({ refreshing: false })
+    }
+  }
+
+  /** Show one toast line; a success clears itself after a moment. */
+  private notify(notice: NonNullable<PanelState['notice']>): void {
+    if (this.noticeTimer !== undefined) clearTimeout(this.noticeTimer)
+    this.noticeTimer = undefined
+    this.set({ notice })
+    if (notice.kind === 'ok') {
+      this.noticeTimer = setTimeout(() => { if (this.state.notice === notice) this.dismissNotice() }, OK_NOTICE_MS)
     }
   }
 
@@ -107,10 +137,11 @@ export class EgressController {
   private async act(run: () => Promise<EgressState>, okText: string): Promise<boolean> {
     try {
       const data = await run()
-      this.set({ data, notice: { kind: 'ok', text: okText } })
+      this.set({ data })
+      this.notify({ kind: 'ok', text: okText })
       return true
     } catch (error) {
-      this.set({ notice: { kind: 'error', text: error instanceof Error ? error.message : String(error) } })
+      this.notify({ kind: 'error', text: error instanceof Error ? error.message : String(error) })
       return false
     }
   }
@@ -149,7 +180,7 @@ export class EgressController {
       const { state } = await this.active.probe(id)
       this.set({ data: state })
     } catch (error) {
-      this.set({ notice: { kind: 'error', text: error instanceof Error ? error.message : String(error) } })
+      this.notify({ kind: 'error', text: error instanceof Error ? error.message : String(error) })
     } finally {
       this.set({ probing: this.state.probing.filter(entry => entry !== id) })
     }
