@@ -29,6 +29,7 @@ import { stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import type { TaskState } from './board.ts'
+import type { GroupProgress } from './order.ts'
 import type { RouterSnapshot, TaskView } from './snapshot.ts'
 import type { LoggerService, WebRouteLike } from './types.ts'
 
@@ -51,6 +52,8 @@ export const ANCHOR_PATH = `${BRIDGE_BASE}/anchor`
 export const EVENTS_PATH = `${BRIDGE_BASE}/events`
 /** `GET` → tier settings + model options; `POST` → save tier settings. */
 export const TIERS_PATH = `${BRIDGE_BASE}/tiers`
+/** `GET ?partition=&path=` → one directory level of a partition (names only, never contents). */
+export const FILES_PATH = `${BRIDGE_BASE}/files`
 
 /** Request body ceiling: demands and verdicts are small by construction. */
 const MAX_BODY_BYTES = 256 * 1024
@@ -159,6 +162,15 @@ export interface UiPartitionView {
   readonly queuedCount: number
   /** Rows whose worker self-reported and no verifier has ruled yet. */
   readonly unreviewedCount: number
+  /** Suspended rows. */
+  readonly suspendedCount?: number
+  /** Membership globs, so the workspace page can show the partition's rules. */
+  readonly include?: readonly string[]
+  readonly exclude?: readonly string[]
+  /** One-line description from the config, when given. */
+  readonly description?: string
+  /** Configuration problems found at boot (missing root, nesting). */
+  readonly problems?: readonly { readonly level: 'error' | 'warning'; readonly message: string }[]
   /** Every row this partition owns. */
   readonly taskCount: number
   readonly manager: UiManagerView
@@ -206,6 +218,16 @@ export interface UiTaskView {
   readonly error?: string
   /** Why a `blocked` row is parked: the `value` of `task_control block`. */
   readonly resumeNote?: string
+  /** Explicit prerequisites and ordered phase. */
+  readonly dependsOn?: readonly string[]
+  readonly stage?: number
+  /** A queued row held back by its order: the open prerequisites. */
+  readonly waitingFor?: readonly string[]
+  /** A suspended row: why, and what it waits for. */
+  readonly suspendReason?: string
+  readonly waitingOn?: readonly string[]
+  /** Root task of the request this row belongs to. */
+  readonly rootId?: string
   /** Difficulty tier chosen before dispatch (`easy | medium | hard`). */
   readonly tier?: 'easy' | 'medium' | 'hard'
   /** How the tier was decided and why. */
@@ -245,6 +267,10 @@ export interface UiBoardSnapshot {
   /** Always `host` here: only the client's sample data is labelled otherwise. */
   readonly origin: 'host'
   readonly staleSince?: string
+  /** Progress per request (root task). */
+  readonly groups?: readonly GroupProgress[]
+  /** Recent progress notices, newest first. */
+  readonly notices?: readonly { readonly at: string; readonly text: string }[]
 }
 
 /** One routing outcome inside a publish response. */
@@ -289,6 +315,8 @@ export const STATE_TO_UI: Readonly<Record<TaskState, UiTaskState>> = {
   // Stopped by a restart and waiting to be resumed from its own log: still work
   // in progress, not a result.
   interrupted: 'running',
+  // Parked until a prerequisite finishes: next up again, like a blocked row.
+  suspended: 'queued',
 }
 
 /**
@@ -343,6 +371,9 @@ export interface PartitionSource {
   readonly dir: string
   readonly slots: number
   readonly managerEnabled: boolean
+  readonly include?: readonly string[]
+  readonly exclude?: readonly string[]
+  readonly description?: string
 }
 
 /** Everything the routes need from the plugin. Injected so the routes stay pure I/O. */
@@ -368,7 +399,12 @@ export interface BridgeDeps {
     taskId: string,
     action: string,
     value: string | undefined,
+    extra?: { readonly prerequisite?: string; readonly waitFor?: readonly string[] },
   ) => Promise<{ id: string; state: TaskState; text: string }>
+  /** One directory level of a partition; absent means the route answers 404. */
+  readonly files?: (partition: string, path: string | undefined) => Promise<unknown>
+  /** Partition configuration problems found at boot. */
+  readonly problems?: () => readonly { readonly partition: string; readonly level: 'error' | 'warning'; readonly message: string }[]
   /** Flip a partition's operator switch. */
   readonly setPartitionState: (name: string, enabled: boolean) => Promise<{ id: string; enabled: boolean }>
   /** Credential presence by reference; never values. */
@@ -498,6 +534,12 @@ function taskOf(task: TaskView): UiTaskView {
     ...task.verifyOutput === undefined ? {} : { verifyOutput: task.verifyOutput },
     ...task.error === undefined ? {} : { error: task.error },
     ...task.resumeNote === undefined ? {} : { resumeNote: task.resumeNote },
+    ...task.dependsOn === undefined ? {} : { dependsOn: task.dependsOn },
+    ...task.stage === undefined ? {} : { stage: task.stage },
+    ...task.waitingFor === undefined ? {} : { waitingFor: task.waitingFor },
+    ...task.suspendReason === undefined ? {} : { suspendReason: task.suspendReason },
+    ...task.waitingOn === undefined ? {} : { waitingOn: task.waitingOn },
+    ...task.rootId === undefined ? {} : { rootId: task.rootId },
     ...task.tier === undefined ? {} : { tier: task.tier },
     ...task.tierSource === undefined ? {} : { tierSource: task.tierSource },
     ...task.tierReason === undefined ? {} : { tierReason: task.tierReason },
@@ -528,6 +570,8 @@ export function boardDocument(input: {
   readonly partitions: readonly PartitionSource[]
   readonly isEnabled: (name: string) => boolean
   readonly credentials: readonly UiCredentialView[]
+  /** Partition configuration problems found at boot. */
+  readonly problems?: readonly { readonly partition: string; readonly level: 'error' | 'warning'; readonly message: string }[]
   /** Clock override, for tests. */
   readonly now?: number
 }): UiBoardSnapshot {
@@ -550,7 +594,14 @@ export function boardDocument(input: {
       queuedCount: scopedViews.filter(task => task.state === 'queued').length,
       // No human acceptance step: nothing waits on the user.
       unreviewedCount: 0,
+      suspendedCount: scopedViews.filter(task => task.hostState === 'suspended').length,
       taskCount: scopedViews.length,
+      ...partition.include === undefined ? {} : { include: partition.include },
+      ...partition.exclude === undefined ? {} : { exclude: partition.exclude },
+      ...partition.description === undefined ? {} : { description: partition.description },
+      problems: (input.problems ?? [])
+        .filter(problem => problem.partition === partition.name)
+        .map(problem => ({ level: problem.level, message: problem.message })),
       manager: {
         id: `mgr:${partition.name}`,
         // A partition without a manager seat is routed by the router itself;
@@ -592,6 +643,8 @@ export function boardDocument(input: {
     buckets,
     credentials: input.credentials,
     origin: 'host',
+    ...input.snapshot.groups === undefined ? {} : { groups: input.snapshot.groups },
+    ...input.snapshot.notices === undefined ? {} : { notices: input.snapshot.notices },
   }
 }
 
@@ -691,6 +744,7 @@ async function boardRoute(req: IncomingMessage, res: ServerResponse, deps: Bridg
     partitions: deps.partitions,
     isEnabled: deps.isEnabled,
     credentials,
+    ...deps.problems === undefined ? {} : { problems: deps.problems() },
   }))
 }
 
@@ -760,7 +814,18 @@ async function controlRoute(req: IncomingMessage, res: ServerResponse, deps: Bri
   if (body.value !== undefined && typeof body.value !== 'string') {
     throw new BridgeError(400, 'bad-request', 'value must be a string when present')
   }
-  const updated = await deps.control(body.taskId.trim(), body.action.trim(), body.value as string | undefined)
+  if (body.prerequisite !== undefined && typeof body.prerequisite !== 'string') {
+    throw new BridgeError(400, 'bad-request', 'prerequisite must be a string when present')
+  }
+  if (body.waitFor !== undefined && (!Array.isArray(body.waitFor) || body.waitFor.some(id => typeof id !== 'string'))) {
+    throw new BridgeError(400, 'bad-request', 'waitFor must be an array of task ids when present')
+  }
+  const prerequisite = typeof body.prerequisite === 'string' && body.prerequisite.trim() !== '' ? body.prerequisite.trim() : undefined
+  const waitFor = Array.isArray(body.waitFor) ? (body.waitFor as string[]).map(id => id.trim()).filter(id => id !== '') : undefined
+  const updated = await deps.control(body.taskId.trim(), body.action.trim(), body.value as string | undefined, {
+    ...prerequisite === undefined ? {} : { prerequisite },
+    ...waitFor === undefined || waitFor.length === 0 ? {} : { waitFor },
+  })
   sendJson(res, 200, { ok: true, task: { id: updated.id, state: updated.state }, text: updated.text })
 }
 
@@ -792,6 +857,20 @@ async function tiersRoute(req: IncomingMessage, res: ServerResponse, deps: Bridg
   }
   const body = objectOf(await readJsonBody(req), 'body')
   sendJson(res, 200, await deps.tiers.write(body))
+}
+
+/** `GET /api/router/files?partition=<name>&path=<relative dir>`. */
+async function filesRoute(req: IncomingMessage, res: ServerResponse, deps: BridgeDeps): Promise<void> {
+  if (req.method !== 'GET') {
+    sendMethodNotAllowed(res, 'GET')
+    return
+  }
+  if (deps.files === undefined) throw new BridgeError(404, 'not-found', 'the workspace listing is not available')
+  const url = new URL(req.url ?? '/', 'http://router.invalid')
+  const partition = url.searchParams.get('partition')?.trim() ?? ''
+  if (partition === '') throw new BridgeError(400, 'bad-request', 'partition is required')
+  const path = url.searchParams.get('path') ?? undefined
+  sendJson(res, 200, await deps.files(partition, path))
 }
 
 /**
@@ -897,6 +976,7 @@ export function createRoutes(deps: BridgeDeps): readonly WebRouteLike[] {
     { kind: 'exact', path: CONTROL_PATH, handler: guard(deps, CONTROL_PATH, (req, res) => controlRoute(req, res, deps)) },
     { kind: 'exact', path: PARTITION_PATH, handler: guard(deps, PARTITION_PATH, (req, res) => partitionRoute(req, res, deps)) },
     { kind: 'exact', path: TIERS_PATH, handler: guard(deps, TIERS_PATH, (req, res) => tiersRoute(req, res, deps)) },
+    { kind: 'exact', path: FILES_PATH, handler: guard(deps, FILES_PATH, (req, res) => filesRoute(req, res, deps)) },
     { kind: 'exact', path: EVENTS_PATH, handler: guard(deps, EVENTS_PATH, async (req, res) => { eventsRoute(req, res, deps) }) },
   ]
 }

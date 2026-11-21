@@ -7,9 +7,13 @@
  * workers it dispatched indented underneath behind a `n 个 worker` chip. Rows
  * never repeat a work item as two siblings.
  *
- * The groups are 进行中, 已挂起（需要输入）, 排队中, 已失效分区, 已完成, 失败 and 已取消.
- * A parked (`blocked`) row carries a second line with its reason and a 恢复
- * button that sends `task_control resume`. There is
+ * The groups are 进行中, 已暂停（需要处理）, 已挂起（等前置）, 排队中, 已失效分区,
+ * 已完成, 失败 and 已取消. A parked (`blocked`) row carries a second line with its
+ * reason and a 恢复 button that sends `task_control resume`; a suspended row
+ * says what it waits for, and a queued row held back by the task order says
+ * which prerequisites are still open. Live rows offer 挂起 (with an optional
+ * prerequisite), failed rows offer 重试. The 进行中 tab opens with per-request
+ * progress and the router's latest progress notices. There is
  * no "awaiting review" bucket: a worker that reported in has finished, so host
  * state `reported` renders as 已完成. The finished pile opens folded, so history
  * never buries what is running.
@@ -32,7 +36,8 @@
  */
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import type { HostTaskState, PartitionView, TaskView, TodoItem } from './contract.ts'
+import type { GroupProgressView, HostTaskState, NoticeView, PartitionView, TaskView, TodoItem } from './contract.ts'
+import type { ControlAction, ControlExtra } from './source.ts'
 import type { RouterBoardController } from './controller.ts'
 import { clockTime, duration, relativeTime } from './format.ts'
 import { NO_SESSIONS, todosOf, type SessionsFace } from './native-todos.ts'
@@ -59,7 +64,7 @@ export type BoardTab = 'active' | 'next' | 'scheduled' | 'resolved'
  * has finished its work, and the panel is a progress tree, not a review queue.
  * Host states fold onto these three outcomes — running, finished, closed badly.
  */
-export type Group = 'running' | 'blocked' | 'queued' | 'stale' | 'done' | 'failed' | 'cancelled'
+export type Group = 'running' | 'blocked' | 'suspended' | 'queued' | 'stale' | 'done' | 'failed' | 'cancelled'
 
 /** Rows a group shows before it folds behind 更多. */
 const PAGE = 12
@@ -75,7 +80,7 @@ const TABS: readonly { id: BoardTab; key: string }[] = [
 
 /** Group order inside each tab. */
 const TAB_GROUPS: Readonly<Record<BoardTab, readonly Group[]>> = {
-  active: ['running', 'blocked'],
+  active: ['running', 'blocked', 'suspended'],
   next: ['queued'],
   scheduled: ['stale'],
   resolved: ['done', 'failed', 'cancelled'],
@@ -85,6 +90,7 @@ const TAB_GROUPS: Readonly<Record<BoardTab, readonly Group[]>> = {
 const GROUP_KEY: Readonly<Record<Group, string>> = {
   running: 'grp.running',
   blocked: 'grp.blocked',
+  suspended: 'grp.suspended',
   queued: 'grp.queued',
   stale: 'grp.stale',
   done: 'grp.done',
@@ -171,11 +177,12 @@ export function groupOf(task: TaskView, live: ReadonlySet<string>): Group {
   if (host === 'failed') return isCancelled(task) ? 'cancelled' : 'failed'
   if (!live.has(task.partitionId)) return 'stale'
   if (host === 'blocked') return 'blocked'
+  if (host === 'suspended') return 'suspended'
   if (host === 'queued') return 'queued'
   return 'running'
 }
 
-const isLive = (g: Group): boolean => g === 'running' || g === 'queued' || g === 'blocked'
+const isLive = (g: Group): boolean => g === 'running' || g === 'queued' || g === 'blocked' || g === 'suspended'
 
 /**
  * Groups, most attention-worthy first.
@@ -184,7 +191,7 @@ const isLive = (g: Group): boolean => g === 'running' || g === 'queued' || g ===
  * manager that already reported while its worker still runs files under 进行中
  * rather than under 已完成.
  */
-const GROUP_ORDER: readonly Group[] = ['running', 'blocked', 'queued', 'stale', 'failed', 'cancelled', 'done']
+const GROUP_ORDER: readonly Group[] = ['running', 'blocked', 'suspended', 'queued', 'stale', 'failed', 'cancelled', 'done']
 
 /**
  * Whether a closed task ended without a verdict.
@@ -220,7 +227,7 @@ export function groupOfTask(task: TaskView, live: ReadonlySet<string>): Group {
 }
 
 /** The word a row shows for its own status: icon colour alone is not enough. */
-export type StatusTone = 'running' | 'blocked' | 'queued' | 'done' | 'failed' | 'aborted' | 'cancelled' | 'stale'
+export type StatusTone = 'running' | 'blocked' | 'suspended' | 'queued' | 'waiting' | 'done' | 'failed' | 'aborted' | 'cancelled' | 'stale'
 
 /**
  * Caption key for one task's status word.
@@ -238,7 +245,9 @@ export function statusKeyOf(task: TaskView, live: ReadonlySet<string>): string {
   }
   if (!live.has(task.partitionId)) return 'status.stale'
   if (host === 'blocked') return 'status.blocked'
+  if (host === 'suspended') return 'status.suspended'
   if (host === 'interrupted') return 'status.resuming'
+  if (host === 'queued' && (task.waitingFor?.length ?? 0) > 0) return 'status.waiting'
   if (host === 'queued' || host === 'dispatched') return 'status.queued'
   return 'status.running'
 }
@@ -356,7 +365,9 @@ const TONE_COLOR: Readonly<Record<StatusTone | 'resuming', BoardTone>> = {
   running: 'running',
   resuming: 'running',
   blocked: 'blocked',
+  suspended: 'blocked',
   queued: 'cancelled',
+  waiting: 'cancelled',
   stale: 'cancelled',
   done: 'done',
   failed: 'failed',
@@ -459,7 +470,7 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-st[data-color="blocked"]{color:var(--st-blocked-text)}.dshrc-st[data-color="blocked"] .dshrc-dot{background:var(--st-blocked-dot)}
 .dshrc-st[data-color="done"]{color:var(--st-done-text)}.dshrc-st[data-color="done"] .dshrc-dot{background:var(--st-done-dot)}
 .dshrc-st[data-color="failed"]{color:var(--st-failed-text)}.dshrc-st[data-color="failed"] .dshrc-dot{background:var(--st-failed-dot)}
-.dshrc-st[data-tone="queued"] .dshrc-dot,.dshrc-st[data-tone="stale"] .dshrc-dot,.dshrc-st[data-tone="aborted"] .dshrc-dot{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
+.dshrc-st[data-tone="queued"] .dshrc-dot,.dshrc-st[data-tone="waiting"] .dshrc-dot,.dshrc-st[data-tone="suspended"] .dshrc-dot,.dshrc-st[data-tone="stale"] .dshrc-dot,.dshrc-st[data-tone="aborted"] .dshrc-dot{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
 @keyframes dshrc-pulse{0%,100%{opacity:1}50%{opacity:.4}}
 /* Worker fold chip: ghost button, 28x28 minimum hit area, 16px caret. The
    negative block margin keeps it from growing the 44px family row. */
@@ -488,10 +499,44 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-notice{flex:none;margin:var(--sp-2) var(--sp-3) 0;padding:var(--sp-1) var(--sp-3);border-radius:var(--r-ctl);background:var(--st-done-bg);color:var(--st-done-text);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .dshrc-notice[data-tone="bad"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
 .dshrc-empty{padding:36px var(--sp-4);color:var(--c-text3);text-align:center;font-size:12px}
+/* Row actions: hidden until the row is hovered or focused, so a quiet list stays quiet. */
+.dshrc-acts-row{flex:none;display:flex;align-items:center;gap:2px;opacity:0;transition:opacity .12s ease}
+.dshrc-row:hover .dshrc-acts-row,.dshrc-row:focus-within .dshrc-acts-row,.dshrc-acts-row[data-busy]{opacity:1}
+.dshrc-act{height:22px;margin-block:-3px;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:var(--dsw-alias-bg-base,transparent);color:var(--c-text2);font-size:11px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.dshrc-act:hover:not(:disabled){color:var(--c-text);background:var(--c-hover)}
+.dshrc-act:active:not(:disabled){background:var(--c-press)}
+.dshrc-wait{display:flex;align-items:center;gap:var(--sp-2);min-width:0;margin:-4px 0 var(--sp-1);padding:0 var(--sp-3) 0 28px;font-size:12px;line-height:16px;color:var(--c-text3)}
+.dshrc-wait-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshrc-wait .dshrc-id{color:var(--c-text2)}
+.dshrc-sform{display:flex;flex-direction:column;gap:var(--sp-2);margin:0 var(--sp-2) var(--sp-2) 28px;padding:var(--sp-2) var(--sp-3);border:1px solid var(--c-line);border-radius:var(--r-ctl);background:var(--c-line-soft)}
+.dshrc-sform label{display:flex;flex-direction:column;gap:2px;font-size:11px;line-height:16px;color:var(--c-text2)}
+.dshrc-sform input{height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-line);border-radius:var(--r-ctl);background:var(--dsw-alias-bg-base,#fff);color:var(--c-text);font:inherit;font-size:12px}
+.dshrc-sform input:focus-visible{outline:2px solid var(--c-focus);outline-offset:0}
+.dshrc-sform-hint{font-size:11px;color:var(--c-text3)}
+.dshrc-sform-btns{display:flex;justify-content:flex-end;gap:var(--sp-2)}
+.dshrc-sform-err{font-size:11px;color:var(--st-failed-text)}
+.dshrc-prog{display:flex;flex-direction:column;gap:var(--sp-2);margin:var(--sp-3) var(--sp-2) 0;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-ctl);background:var(--c-line-soft)}
+.dshrc-prog-h,.dshrc-nt-h{font-size:11px;font-weight:600;line-height:16px;letter-spacing:.02em;color:var(--c-text2)}
+.dshrc-prog-item{display:flex;flex-direction:column;gap:3px;min-width:0}
+.dshrc-prog-top{display:flex;align-items:baseline;gap:var(--sp-2);min-width:0;font-size:12px;line-height:16px}
+.dshrc-prog-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-text)}
+.dshrc-prog-num{flex:none;font-variant-numeric:tabular-nums;color:var(--c-text2)}
+.dshrc-bar{position:relative;display:flex;height:4px;border-radius:2px;overflow:hidden;background:var(--c-line)}
+.dshrc-bar>span{display:block;height:100%}
+.dshrc-bar>[data-k="done"]{background:var(--st-done-dot)}
+.dshrc-bar>[data-k="run"]{background:var(--st-running-dot)}
+.dshrc-bar>[data-k="susp"]{background:var(--st-blocked-dot)}
+.dshrc-bar>[data-k="fail"]{background:var(--st-failed-dot)}
+.dshrc-prog-sub{font-size:11px;line-height:16px;color:var(--c-text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dshrc-nt{margin:var(--sp-4) var(--sp-2) 0;padding-top:var(--sp-3);border-top:1px solid var(--c-line-soft)}
+.dshrc-nt-list{display:flex;flex-direction:column;gap:var(--sp-1);margin:var(--sp-2) 0 0;padding:0;list-style:none}
+.dshrc-nt-item{display:flex;gap:var(--sp-2);padding:0 var(--sp-1);font-size:12px;line-height:18px;color:var(--c-text2)}
+.dshrc-nt-time{flex:none;min-width:44px;color:var(--c-text3);font-variant-numeric:tabular-nums}
+.dshrc-nt-text{min-width:0;overflow-wrap:anywhere}
 @media (prefers-reduced-motion:reduce){.dshrc *{transition:none!important;animation:none!important}}
 /* Narrow rail (about 340px at a 1024 viewport): title and status dot only. */
 @container (max-width:379px){
-.dshrc-meta,.dshrc-id,.dshrc-sub>.dshrc-rm,.dshrc-chip-text{display:none}
+.dshrc-meta,.dshrc-id,.dshrc-sub>.dshrc-rm,.dshrc-chip-text,.dshrc-sub .dshrc-tag{display:none}
 .dshrc-st-text{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .dshrc-chip{padding:0 var(--sp-1)}
 .dshrc-st{padding:0 var(--sp-1)}
@@ -523,6 +568,13 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   const [resuming, setResuming] = useState<ReadonlySet<string>>(() => new Set())
   const [resumeError, setResumeError] = useState<ReadonlyMap<string, string>>(() => new Map())
   const [notice, setNotice] = useState<{ tone: 'ok' | 'bad'; text: string } | null>(null)
+  // Row actions in flight, keyed `${taskId}:${action}`.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set())
+  // The one row whose 挂起 form is open, and that form's fields.
+  const [suspending, setSuspending] = useState<string | null>(null)
+  const [formReason, setFormReason] = useState('')
+  const [formPrereq, setFormPrereq] = useState('')
+  const [formError, setFormError] = useState('')
 
   useEffect(() => {
     if (notice === null) return
@@ -537,7 +589,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   /**
    * Resume one parked task through `task_control resume`. The controller moves
    * the row to running at once and re-reads the board after the call, so the
-   * family leaves 已挂起 without waiting for the next poll.
+   * family leaves 已暂停 without waiting for the next poll.
    */
   const resume = async (task: TaskView): Promise<void> => {
     if (resuming.has(task.id)) return
@@ -560,6 +612,51 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
       setResumeError(previous => new Map(previous).set(task.id, failure))
       setNotice({ tone: 'bad', text: t('hold.resumeFailed', { message: failure }) })
     }
+  }
+
+  /**
+   * Run one row action (`suspend`, `retry`) through `task_control` and say how
+   * it went in the toast.
+   * @returns true when the Host accepted it.
+   */
+  const act = async (task: TaskView, action: ControlAction, value?: string, extra?: ControlExtra): Promise<boolean> => {
+    const key = `${task.id}:${action}`
+    if (busy.has(key)) return false
+    setBusy(previous => new Set(previous).add(key))
+    const failure = await controller.control(task.id, action, value, extra)
+    setBusy((previous) => {
+      const next = new Set(previous)
+      next.delete(key)
+      return next
+    })
+    if (failure === undefined) {
+      setNotice({ tone: 'ok', text: t('act.done', { action: t(`act.${action}`), title: task.title }) })
+      return true
+    }
+    setNotice({ tone: 'bad', text: t('act.failed', { message: failure }) })
+    return false
+  }
+
+  const openSuspend = (task: TaskView): void => {
+    if (suspending === task.id) {
+      setSuspending(null)
+      return
+    }
+    setSuspending(task.id)
+    setFormReason('')
+    setFormPrereq('')
+    setFormError('')
+  }
+
+  const submitSuspend = async (task: TaskView): Promise<void> => {
+    const reason = formReason.trim()
+    if (reason === '') {
+      setFormError(t('susp.form.empty'))
+      return
+    }
+    const prerequisite = formPrereq.trim()
+    const ok = await act(task, 'suspend', reason, prerequisite === '' ? undefined : { prerequisite })
+    if (ok) setSuspending(null)
   }
 
   const toggleFolded = (group: Group): void => {
@@ -585,6 +682,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     const nameOf = new Map<string, string>(partitions.map(partition => [partition.id, partition.name]))
     const workerName = new Map<string, string>()
     for (const partition of partitions) for (const worker of partition.workers) workerName.set(worker.id, worker.name)
+    const titleOf = new Map<string, string>(tasks.map(task => [task.id, task.title]))
     // One row per task family, not one per task: a manager and the workers it
     // dispatched are one piece of work, and the caption count must agree with
     // the rows actually drawn.
@@ -598,7 +696,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     const counts = new Map<Group, number>()
     for (const [group, list] of groupFams) counts.set(group, list.length)
     const anyLive = [...counts].some(([group, count]) => count > 0 && isLive(group))
-    return { live, nameOf, workerName, groupFams, counts, anyLive }
+    return { live, nameOf, workerName, titleOf, groupFams, counts, anyLive }
   }, [board])
 
   // Checklists are not in the board file: poll while something runs.
@@ -714,12 +812,117 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     const click = openOf(task)
     const status = statusOf(task)
     return (
-      <div key={task.id} className="dshrc-row dshrc-sub" data-group={group} data-task={task.id}
-        data-link={click === undefined ? undefined : ''} onClick={click} title={tooltipOf(task, group)}>
-        <span className="dshrc-rt">{task.title}</span>
-        <span className="dshrc-rm">{metaOf(task, group)}</span>
-        <span className="dshrc-id">{shortId(task.id)}</span>
-        <Status tone={status.tone} label={t(status.key)} />
+      <div key={task.id} className="dshrc-child" data-child={task.id}>
+        <div className="dshrc-row dshrc-sub" data-group={group} data-task={task.id}
+          data-link={click === undefined ? undefined : ''} onClick={click} title={tooltipOf(task, group, orderLines(task))}>
+          <span className="dshrc-rt">{task.title}</span>
+          {task.stage !== undefined && <span className="dshrc-tag" data-tone="stage">{t('order.stage', { n: task.stage })}</span>}
+          <span className="dshrc-rm">{metaOf(task, group)}</span>
+          <span className="dshrc-id">{shortId(task.id)}</span>
+          {rowActs(task, group)}
+          <Status tone={status.tone} label={t(status.key)} />
+        </div>
+        {group === 'suspended' && suspendLine(task)}
+        {group === 'queued' && waitLine(task)}
+        {suspending === task.id && suspendForm(task)}
+      </div>
+    )
+  }
+
+  /** Names of task ids, for a line a person reads: titles where the board has them. */
+  const namesOf = (ids: readonly string[]): string =>
+    ids.map(id => model.titleOf.get(id) ?? shortId(id)).join('、')
+
+  /** Tooltip lines about order and suspension. */
+  const orderLines = (task: TaskView): string[] => {
+    const lines: string[] = []
+    if (task.stage !== undefined) lines.push(t('order.stage', { n: task.stage }))
+    if (task.dependsOn !== undefined && task.dependsOn.length > 0) lines.push(t('order.after', { ids: task.dependsOn.join(', ') }))
+    if (task.waitingFor !== undefined && task.waitingFor.length > 0) lines.push(t('order.waiting', { ids: task.waitingFor.join(', ') }))
+    return lines
+  }
+
+  /**
+   * Hover actions of one row: 挂起 for live work, 重试 for a failure. They act
+   * on that row's own task, so a family row acts on its headline task and each
+   * worker row on its worker.
+   */
+  const rowActs = (task: TaskView, group: Group) => {
+    if (!controller.canControl) return null
+    const canSuspend = group === 'running' || group === 'queued'
+    const canRetry = group === 'failed'
+    if (!canSuspend && !canRetry) return null
+    const anyBusy = [...busy].some(key => key.startsWith(`${task.id}:`))
+    return (
+      <span className="dshrc-acts-row" data-busy={anyBusy || suspending === task.id ? '' : undefined}
+        onClick={(event) => { event.stopPropagation() }}>
+        {canSuspend && (
+          <button type="button" className="dshrc-act" title={t('act.suspendHint')}
+            aria-expanded={suspending === task.id} disabled={anyBusy}
+            onClick={() => { openSuspend(task) }}>
+            {t('act.suspend')}
+          </button>
+        )}
+        {canRetry && (
+          <button type="button" className="dshrc-act" title={t('act.retryHint')} disabled={anyBusy}
+            onClick={() => { void act(task, 'retry') }}>
+            {t('act.retry')}
+          </button>
+        )}
+      </span>
+    )
+  }
+
+  /** Inline 挂起 form: a reason, and optionally the prerequisite to create first. */
+  const suspendForm = (task: TaskView) => (
+    <form className="dshrc-sform" data-suspend-form={task.id}
+      onClick={(event) => { event.stopPropagation() }}
+      onSubmit={(event) => { event.preventDefault(); void submitSuspend(task) }}>
+      <label>
+        {t('susp.form.reason')}
+        <input value={formReason} placeholder={t('susp.form.reasonHint')} autoFocus
+          onChange={(event) => { setFormReason(event.target.value); setFormError('') }} />
+      </label>
+      <label>
+        {t('susp.form.prereq')}
+        <input value={formPrereq} onChange={(event) => { setFormPrereq(event.target.value) }} />
+        <span className="dshrc-sform-hint">{t('susp.form.prereqHint')}</span>
+      </label>
+      {formError !== '' && <span className="dshrc-sform-err" role="alert">{formError}</span>}
+      <div className="dshrc-sform-btns">
+        <button type="button" className="dshrc-hold-btn" onClick={() => { setSuspending(null) }}>{t('susp.form.cancel')}</button>
+        <button type="submit" className="dshrc-err-btn" disabled={busy.has(`${task.id}:suspend`)}>{t('susp.form.submit')}</button>
+      </div>
+    </form>
+  )
+
+  /** Second line of a queued row the task order holds back: what it waits for. */
+  const waitLine = (task: TaskView) => {
+    const ids = task.waitingFor ?? []
+    if (ids.length === 0) return null
+    return (
+      <div className="dshrc-wait" data-wait={task.id}>
+        <span className="dshrc-wait-text" title={ids.join('\n')}>{t('order.waiting', { ids: namesOf(ids) })}</span>
+      </div>
+    )
+  }
+
+  /** Second line of a suspended row: why, what it waits for, and 恢复 to go on now. */
+  const suspendLine = (task: TaskView) => {
+    const why = task.suspendReason ?? task.resumeNote ?? ''
+    const ids = task.waitingOn ?? []
+    const head = why === '' ? t('susp.noReason') : t('susp.reason', { reason: why })
+    const text = ids.length === 0 ? head : `${head} · ${t('susp.waitingOn', { ids: namesOf(ids) })}`
+    const going = resuming.has(task.id)
+    const wired = controller.canControl
+    return (
+      <div className="dshrc-hold" data-suspended={task.id}>
+        <span className="dshrc-hold-why" title={text}>{text}</span>
+        <button type="button" className="dshrc-hold-btn" disabled={going || !wired}
+          title={wired ? t('susp.resumeHint') : t('hold.notWired')}
+          onClick={(event) => { event.stopPropagation(); void resume(task) }}>
+          {going ? t('hold.resuming') : t('hold.resume')}
+        </button>
       </div>
     )
   }
@@ -742,11 +945,14 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     const hidden = family.members.filter(task => task.id !== family.root.id)
     const foldKey = `${FAMILY_FOLD}${family.key}`
     const expanded = !collapsed.has(foldKey)
+    // The rep's own second line shows here unless its worker row is on screen and shows it.
+    const repHere = family.rep.id === family.root.id || !expanded
     const status = statusOf(family.rep)
     const extra: string[] = []
     if (hidden.length > 0) extra.push(t('compact.family', { n: family.members.length }))
     if (family.attempt > 1) extra.push(t('task.attempt', { count: family.attempt }))
     if (family.reason !== undefined) extra.push(family.reason)
+    extra.push(...orderLines(family.root))
     return (
       <div key={family.key} className="dshrc-family" data-family={family.key} data-group={group}>
         <div className="dshrc-row" data-group={group} data-task={family.root.id}
@@ -770,9 +976,13 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
               <span className="dshrc-chip-text">{t('compact.workers', { n: hidden.length })}</span>
             </button>
           )}
+          {rowActs(family.root, groupOfTask(family.root, model.live))}
           <Status tone={status.tone} label={t(status.key)} />
         </div>
         {group === 'blocked' && holdLine(family.rep)}
+        {group === 'suspended' && repHere && suspendLine(family.rep)}
+        {group === 'queued' && repHere && waitLine(family.rep)}
+        {suspending === family.root.id && suspendForm(family.root)}
         {expanded && hidden.map(task => childRow(task, groupOfTask(task, model.live)))}
       </div>
     )
@@ -802,6 +1012,66 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
           {busy ? t('hold.resuming') : t('hold.resume')}
         </button>
       </div>
+    )
+  }
+
+  /** One request's progress: name, count, a segmented bar and what is left. */
+  const progressItem = (group: GroupProgressView) => {
+    const total = Math.max(1, group.total)
+    const part = (n: number): string => `${String(Math.round((n / total) * 1000) / 10)}%`
+    const rest: string[] = []
+    if (group.running > 0) rest.push(t('progress.running', { n: group.running }))
+    if (group.waiting > 0) rest.push(t('progress.waiting', { n: group.waiting }))
+    if (group.suspended > 0) rest.push(t('progress.suspended', { n: group.suspended }))
+    if (group.failed > 0) rest.push(t('progress.failed', { n: group.failed }))
+    const line = t('progress.line', { done: group.finished, total: group.total })
+    return (
+      <div key={group.rootId} className="dshrc-prog-item" data-progress-root={group.rootId}>
+        <div className="dshrc-prog-top">
+          <span className="dshrc-prog-name" title={group.subject}>{group.subject}</span>
+          <span className="dshrc-prog-num">{line}</span>
+        </div>
+        <div className="dshrc-bar" role="progressbar" aria-valuemin={0} aria-valuemax={group.total}
+          aria-valuenow={group.finished} aria-label={`${group.subject} ${line}`}>
+          {group.finished > 0 && <span data-k="done" style={{ width: part(group.finished) }} />}
+          {group.running > 0 && <span data-k="run" style={{ width: part(group.running) }} />}
+          {group.suspended > 0 && <span data-k="susp" style={{ width: part(group.suspended) }} />}
+          {group.failed > 0 && <span data-k="fail" style={{ width: part(group.failed) }} />}
+        </div>
+        {rest.length > 0 && <span className="dshrc-prog-sub">{rest.join(' · ')}</span>}
+      </div>
+    )
+  }
+
+  /** Requests still under way that split into more than one task. */
+  const progressBlock = (list: readonly GroupProgressView[]) => {
+    const underway = list.filter(group => !group.complete && group.total > 1).slice(0, 4)
+    if (underway.length === 0) return null
+    return (
+      <section className="dshrc-prog" data-progress aria-label={t('progress.title')}>
+        <span className="dshrc-prog-h">{t('progress.title')}</span>
+        {underway.map(progressItem)}
+      </section>
+    )
+  }
+
+  /** The router's latest progress notices (the same lines the war room receives). */
+  const noticeBlock = (list: readonly NoticeView[]) => {
+    if (list.length === 0) return null
+    const shown = list.slice(0, 5)
+    return (
+      <section className="dshrc-nt" data-notices aria-label={t('notices.title')}>
+        <span className="dshrc-nt-h">{t('notices.title')}</span>
+        <ul className="dshrc-nt-list">
+          {shown.map((item, index) => (
+            <li key={`${item.at}-${String(index)}`} className="dshrc-nt-item">
+              <span className="dshrc-nt-time" title={item.at}>{clockTime(item.at)}</span>
+              <span className="dshrc-nt-text">{item.text}</span>
+            </li>
+          ))}
+        </ul>
+        {list.length > shown.length && <span className="dshrc-prog-sub">{t('notices.more', { n: list.length - shown.length })}</span>}
+      </section>
     )
   }
 
@@ -899,9 +1169,15 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
       <div className="dshrc-list">
         {board === null
           ? <div className="dshrc-empty">{failed ? t('board.emptyOnError') : t('board.loading')}</div>
-          : shownCount === 0
-            ? <div className="dshrc-empty">{t('compact.empty')}</div>
-            : groups.map(groupBlock)}
+          : (
+              <>
+                {tab === 'active' && progressBlock(board.groups ?? [])}
+                {shownCount === 0
+                  ? <div className="dshrc-empty">{t('compact.empty')}</div>
+                  : groups.map(groupBlock)}
+                {tab === 'active' && noticeBlock(board.notices ?? [])}
+              </>
+            )}
       </div>
     </div>
   )

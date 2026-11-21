@@ -8,7 +8,8 @@
  */
 
 import type { BoardSnapshot, PublishResult, TaskState } from './contract.ts'
-import type { BoardSource, ControlAction } from './source.ts'
+import type { BoardSource, ControlAction, ControlExtra } from './source.ts'
+import type { FileListingView } from './contract.ts'
 
 /** What the panel renders. */
 export interface RouterPanelState {
@@ -153,7 +154,7 @@ export class RouterBoardController {
    * Run one `task_control` action, then re-read the board.
    *
    * `resume` is applied optimistically: the row is moved to `running` in the
-   * local snapshot before the request, so it leaves 已挂起 at once. A fresh read
+   * local snapshot before the request, so it leaves 已暂停 at once. A fresh read
    * (not a join of an older in-flight one) follows a success; a failure restores
    * the snapshot taken before the optimistic patch and re-reads.
    * @param taskId - the task.
@@ -161,7 +162,7 @@ export class RouterBoardController {
    * @param value - its optional `value`.
    * @returns undefined on success, else the human-readable failure.
    */
-  async control(taskId: string, action: ControlAction, value?: string): Promise<string | undefined> {
+  async control(taskId: string, action: ControlAction, value?: string, extra?: ControlExtra): Promise<string | undefined> {
     const source = this.source
     if (source.control === undefined) return 'task_control is not wired on this source'
     const before = this.state.board
@@ -177,7 +178,7 @@ export class RouterBoardController {
       })
     }
     try {
-      await source.control(taskId, action, value)
+      await source.control(taskId, action, value, extra)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (before !== null) this.emit({ ...this.state, board: before })
@@ -192,6 +193,21 @@ export class RouterBoardController {
       // The action itself succeeded; the next poll or change event re-reads.
     }
     return undefined
+  }
+
+  /** Whether the source can list partition files (the 工作区 page). */
+  get canListFiles(): boolean {
+    return typeof this.source.listFiles === 'function'
+  }
+
+  /**
+   * List one directory level of one partition.
+   * @throws {Error} when the source cannot list files or the Host refuses.
+   */
+  async listFiles(partition: string, path: string): Promise<FileListingView> {
+    const source = this.source
+    if (source.listFiles === undefined) throw new Error('listing files is not wired on this source')
+    return source.listFiles(partition, path)
   }
 
   /** Clear the publish banner after the view has shown it. */

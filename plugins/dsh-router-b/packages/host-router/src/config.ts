@@ -165,6 +165,14 @@ export interface RouterConfig {
   readonly resumeDelayMs?: number
   /** Credential references whose presence the board reports. Default {@link DEFAULT_CREDENTIAL_REFS}. */
   readonly credentialRefs?: readonly CredentialRefConfig[]
+  /**
+   * Post a short 【进度提醒】 into the 作战室 when a task is suspended or
+   * continued, when a prerequisite fails, and when a held-back stage starts.
+   * Default true.
+   */
+  readonly progressNotices?: boolean
+  /** Notices arriving within this window are posted as one message. Default 3000 ms. */
+  readonly progressNoticeDelayMs?: number
 }
 
 /** Why a task landed where it did; recorded so a human can audit routing. */
@@ -700,6 +708,19 @@ export function partitionBrief(partition: Partition, options: { readonly verify:
     '- Exactly one step is in_progress at any time.',
     '- Before your final answer, call `todo_write` once more with every step completed.',
   ]
+  lines.push(
+    '',
+    'Partition rules (hard requirement):',
+    `- Only create, edit or delete files under ${partition.dir}${partition.include === undefined ? '' : ' that match the member globs below'}.`
+      + ' Reading elsewhere is fine; changing elsewhere is not.',
+    '- If the task cannot be finished without a change outside this partition, or without work another task must',
+    '  do first, do not do that work and do not guess. Call `task_suspend` with your task id'
+      + (options.taskId === undefined ? '' : ` ("${options.taskId}")`) + ', a one-line `reason`,',
+    '  and a self-contained `prerequisite` describing exactly what must be done first (add `partition` when it',
+    '  belongs to another partition). Then end your turn. The router continues this same session with the',
+    '  prerequisite\'s result once it is done; you keep your history and todo list.',
+    '- List every path you changed, relative to the partition root, under `touched:` in your report.',
+  )
   if (partition.include !== undefined) {
     lines.push(`Member files are selected by: ${partition.include.join(', ')}.`)
   }
