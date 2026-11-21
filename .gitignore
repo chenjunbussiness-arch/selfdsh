@@ -1,0 +1,58 @@
+# dsh-warroom .gitignore（2026-11-21 更新：加 dsh-secrets 运行态与证书类排除）
+
+# 依赖目录：任何层级都不入库（含 vendor/**/node_modules/）
+node_modules/
+
+# safe-build / safe-restart 中间态与回滚副本
+lib.prev/
+lib.next/
+lib.failed/
+_backup/
+*.bak-*
+
+# 构建缓存
+*.tsbuildinfo
+dist/
+# 例外：vendor 里的上游预打包产物是运行必需品（exa-mcp-server 的 stdio 入口）
+!vendor/exa-mcp-server/dist/
+# 注意：各插件 lib/ 是 profile 直接加载的运行产物（main/exports 指向 lib/），必须入库，不要忽略 lib/
+
+# 任务产物目录
+.dsh-artifacts/
+
+# vendor/exa-mcp-server：第三方 npm 包 exa-mcp-server@3.5.1 的 tarball 解包（MIT，含 LICENSE，19 文件 / 1.9M），
+# 2026-11-21 起**纳入仓库**，用于离线跑 Exa stdio MCP；node_modules 仍然排除（见上）。
+# 来源与安装方式见 docs/MANIFEST.md 第 6 节。
+
+# 日志
+*.log
+
+# ── 密钥与凭据 ──────────────────────────────────────────────────────────────
+# 证书 / 私钥 / 密钥库：一律不入库（文档里出现 client.p12 只是文件名说明，不含证书内容）
+*.pem
+*.key
+*.p12
+*.jks
+*.jceks
+*.pfx
+
+# 环境变量文件
+.env
+.env*
+
+# dsh-secrets 运行态：加密保险库、vault 目录、vault key 与口令文件
+vault/
+secrets.vault
+*.vault
+*passphrase*
+keys/
+
+# 其它 token / 凭据缓存
+*.token
+credentials*
+# 否定规则：把同名源码救回来（旧包曾因 credentials* 规则误排 4 个源码文件）
+!credentials.ts
+!Credentials.tsx
+!**/credentials.d.ts
+!**/Credentials.d.ts
+!**/credentials.js

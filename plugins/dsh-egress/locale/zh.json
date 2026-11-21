@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "模型出口",
+    "description": "为每个模型端点选择出站代理（http、https、socks5 或直连）。失败即断：出口不通就让请求失败，绝不悄悄回退直连。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

@@ -1,0 +1,106 @@
+# dsh-router-b — bundle patch layer
+#
+# Mounts the two halves of the partition router:
+#
+#   host-router        the board, the partitions, dispatch, settlement, and the
+#                      same-origin HTTP bridge at /api/router/*
+#   client-ui-router   the Web client panel; its host half is intentionally empty
+#
+# Both rows name packages this bundle depends on, so they resolve from the
+# profile's node_modules (this profile installs with pnpm's hoisted linker, so a
+# transitive dependency of a bundle lands at the profile root).
+#
+# No `peerDependencies` are declared on the bundle, and none of the rows names an
+# `@deepseek-ai/dsh-*` peer: the boot-time compatibility preflight
+# (`dsh-app-boot/src/plugin-compatibility.ts:55-74`) only checks
+# `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` peers, and an unmet one silently
+# disables the row before it is imported. The two packages import no
+# `@deepseek-ai` module at runtime, which is what keeps that check vacuous.
+#
+# Partition roots must be absolute. `workers` is the concurrency allowed inside
+# that partition; `verify` is the acceptance command list — a task with no
+# acceptance command can only ever reach `reported`, never `verified`, until a
+# human rules on it from the panel.
+#
+# `boardDir` is intentionally omitted: the plugin defaults to `<DSH home>/router`.
+# Do not write `boardDir: null` here — the config is read as `undefined` or a
+# path, and `null` would reach `resolve(null)`.
+
+- insert:
+    - id: host-router
+      name: dsh-host-router
+      config:
+        manager: true
+        # 0 = no router-side worker cap. The real ceiling is dsh-subagent's
+        # maxActiveSubagents (64, set in the profile patch) on this 2-core / 3.5G box.
+        maxWorkers: 0
+        autoVerify: false
+        partitions:
+          - name: rca-ab-test
+            root: /srv/workspace/rca-ab-test
+            description: >-
+              RCA 根因分析平台（运维故障根因定位）。单仓库三个服务：rca-front（React + Vite 前端：运维台、
+              原子库工作台、编排编辑器、路由页面），rca-state（Go/Kratos 控制面与 MCP server），
+              rca-openjiuwen-agent（Python/FastAPI + openjiuwen 的 agent 角色与提示词）。
+            exclude:
+              - '**/node_modules/**'
+              - '**/vendor/**'
+              - '**/.venv/**'
+              - '**/.git/**'
+            keywords:
+              - rca
+              - jiuwen
+              - openjiuwen
+              - rca-front
+              - rca-state
+              - rca-openjiuwen-agent
+              - 前端
+              - react
+              - vite
+              - golang
+              - kratos
+              - mcp
+              - python
+              - fastapi
+              - 提示词
+            workers: 0
+          - name: google-tend
+            root: "/srv/workspace/google tend"
+            description: >-
+              个人小项目集合：工具站与 SEO（ai-tool-business 隐私优先浏览器本地工具站、parasite-seo、
+              passport-photo-rules 护照/签证照片规格、bgr-demo 护照照片制作、cloud-cutout 抠图），
+              以及 platform（showpara 本机面板）、dashboard、ledger 台账、subscriptions 订阅额度巡检、
+              jobs-radar/campus-jobs 校招雷达、xianyu-shop、muse2api、gemini-gateway、lumen-companion-harness、
+              prompt-lab、moli-eval、Open-Anti-Browser-main、tools（kiro-relay 等）。
+            exclude:
+              - '**/node_modules/**'
+              - '**/.git/**'
+              - '**/.venv/**'
+            keywords:
+              - google
+              - trend
+              - trends
+              - 工具站
+              - seo
+              - 关键词
+              - kiro-relay
+              - showpara
+            workers: 0
+          - name: deepseek-harness
+            root: /srv/workspace/deepseek-harness
+            description: >-
+              DeepSeek Harness（DSH）插件源码：dsh-router-b（分区路由插件 host-router + 路由面板 client-ui-router），
+              dsh-egress（出口代理插件：host-egress + 面板 client-ui-egress，为模型端点选择代理），
+              dsh-vpn（openfortivpn VPN 管理插件 host-vpn + client-ui-vpn 页面）。
+            exclude:
+              - '**/node_modules/**'
+            keywords:
+              - dsh
+              - harness
+              - router
+              - egress
+              - vpn
+              - 插件
+            workers: 0
+    - id: client-ui-router
+      name: dsh-client-ui-router

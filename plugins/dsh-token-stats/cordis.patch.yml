@@ -1,0 +1,25 @@
+# dsh-token-stats — bundle patch layer
+#
+# Mounts the two halves of the sidebar token panel:
+#
+#   host-token-stats         read-only aggregator over ~/.dsh/sessions/**/*.jsonl.zstd
+#                            (daily x model usage), its stat-based incremental cache,
+#                            and the same-origin GET route /api/token-stats/summary
+#   client-ui-token-stats    the compact card in `sidebar.footer.action` plus the
+#                            expandable 7/30-day popover; its host half is empty
+#
+# Nothing is written: the session logs are only read. Every key under `config` is
+# optional.
+#   sessionsDir       session log root (default <DSH home>/sessions)
+#   ttlMs             how long a computed document is served without re-statting
+#                     the tree (default 4000)
+#   warmupDelayMs     delay before the off-boot-path warm-up scan (default 800)
+
+- insert:
+    - id: host-token-stats
+      name: dsh-host-token-stats
+      config:
+        ttlMs: 4000
+        warmupDelayMs: 800
+    - id: client-ui-token-stats
+      name: dsh-client-ui-token-stats

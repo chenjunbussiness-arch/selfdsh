@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "VPN",
+    "description": "Manages the VPN used to reach the internal git server: split-tunnel openfortivpn profiles (password or token URL), a connection watchdog, and a read-only status tool for agents.",
+    "detail": "docs/VPN.md"
+  }
+}

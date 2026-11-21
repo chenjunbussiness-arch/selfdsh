@@ -1,0 +1,32 @@
+{
+  "name": "dsh-host-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "File partitions, a per-partition manager, and continuable worker sessions for DeepSeek Harness: durable task board, two-level routing, and one progress document for the UI",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/*.js",
+    "lib/*.d.ts",
+    "src",
+    "docs",
+    "README.md"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test tests/bridge.test.mjs tests/router.test.mjs"
+  }
+}
