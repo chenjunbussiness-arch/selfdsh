@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Model Egress",
+    "description": "Pick the proxy (http, https, socks5 or direct) that each model endpoint leaves the server through. Fail-closed: a broken exit stops the request, it never falls back to a direct connection.",
+    "detail": "docs/DETAIL.md"
+  }
+}

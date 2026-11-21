@@ -1,0 +1,23 @@
+{
+  "name": "dsh-host-token-stats",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only token-usage aggregator for DeepSeek Harness: daily x model usage from ~/.dsh session logs, served on a same-origin GET route with a stat-based incremental cache",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./scanner": "./scanner.js",
+    "./bridge": "./bridge.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "scanner.js",
+    "bridge.js"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}

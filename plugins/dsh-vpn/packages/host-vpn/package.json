@@ -1,0 +1,30 @@
+{
+  "name": "dsh-host-vpn",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VPN manager for DeepSeek Harness: split-tunnel openfortivpn profiles, a connection watchdog, an HTTP bridge for the Web page and a read-only status tool for agents",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js",
+    "lib/*.d.ts",
+    "src",
+    "README.md"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test tests/vpn.test.mjs"
+  }
+}
