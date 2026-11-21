@@ -224,7 +224,7 @@
 |---|---|---|---|---|---|
 | `docs/UPGRADE.md` | 151 | **最接近移植手册**：换机/换 DSH 版本的步骤、7 个外部接口点、seams 自检、回滚、9 条坑 | **是**（`:33-38,59-63,125-131` 三段 bash） | 是（`:142` `/srv/dsh-router-b/...`） | 无文件名引用；内容被 §1/§6 采纳 |
 | `docs/HANDOFF.md` | 163 | 交接备忘：这是什么、代码在哪、已装状态、重装顺序、验证、已知限制 | 是（`:71-79` 有命令块） | 是（多处 profile 路径） | 无 |
-| `docs/INTEGRATION.md` | 347 | host×client 接线的全部决定：seam、HTTP 契约、状态/字段映射、改动清单、验证结果 | 部分（`:276-` "只写不执行"的安装命令） | 是（`C:\Users\<user>\...` 证据路径） | 无 |
+| `docs/INTEGRATION.md` | 347 | host×client 接线的全部决定：seam、HTTP 契约、状态/字段映射、改动清单、验证结果 | 部分（`:276-` "只写不执行"的安装命令） | 是（`C:\Users\<你>\...` 证据路径） | 无 |
 | `docs/REQUIREMENTS-v2.md` | 276 | 需求 v2 口述→规格 + 已实施项 + 部署记录（含硬链接坑） | 部分（`:227-228` 构建命令） | 是（`:147-152,172,215`） | 无 |
 | `docs/API-0.2.2-rc.3.md` | 1241 | rc.3 插件 API 事实核定（每条带 asar 证据行号），写代码时的参考 | 否（纯事实表） | 是（`C:\...\app.asar\...`） | 无 |
 | `docs/DETAIL.md` / `docs/DETAIL.zh.md` | 48 / 40 | 插件管理器"详情"页正文（英/中） | 否 | 否 | **是**：`locale/en.json:5`、`locale/zh.json:5` |
@@ -236,7 +236,7 @@
 | `packages/client-ui-router/docs/CONTRACT.md` | 371 | client 期望 host 提供什么（字段级） | 否 | 否 | 被 `src/bridge.ts:87` 注释引用 |
 | `packages/client-ui-router/docs/NATIVE-ENTRYPOINTS.md` | 153 | rc.3 原生入口（上传/下载/API key）落点，说明不要重造 | 否 | 是（`C:\...`） | 被 `src/client/*.tsx` 多处注释引用 |
 
-> 安全提醒：`deploy/ACCESS.md:15`（`密码 <REDACTED>`）、`deploy/41-verify-public.sh:3`（同一口令明文）、`deploy/ACCESS.md:87,94`（`C:\Users\<user>\.ssh\server-key.pem`）属于**凭据/身份信息**。`deploy/82-scrub-secrets.sh` 说明作者知道这件事但只清了 `google tend` 那边。搬机器/进 git 之前必须删或脱敏。
+> 安全提醒：`deploy/ACCESS.md:15`（`密码 <REDACTED>`）、`deploy/41-verify-public.sh:3`（同一口令明文）、`deploy/ACCESS.md:87,94`（`C:\Users\<你>\.ssh\<你的私钥>.pem`）属于**凭据/身份信息**。`deploy/82-scrub-secrets.sh` 说明作者知道这件事但只清了 `google tend` 那边。搬机器/进 git 之前必须删或脱敏。
 
 ### 2.9 `_backup/`、`*.bak-*`、`lib.prev` 等
 

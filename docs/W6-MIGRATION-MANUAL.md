@@ -560,7 +560,7 @@ P0 表示不处理就起不来，或者核心功能消失。共 **12 条**，其
 | 1 | Router、Egress、VPN、Token 面板全部消失，日志报 `cannot resolve profile bundle` | `/root/.dsh/profiles/web/package.json:5-16` 的 `link:/srv/dsh-router-b`、`/srv/dsh-egress`、`/srv/dsh-vpn`、`/srv/workspace/deepseek-harness/dsh-token-stats`，以及 `profiles/web/node_modules` 的 12 个软链 | §4.2：按顺序重跑 4 个 install.mjs；兼容旧写法就建 `/srv/dsh-*` 跳板 | W1、W3、W5 |
 | 2 | `client-ui-router` 注册报 `single slot ... already has a registration`，作战室品牌和面板起不来 | profile `cordis.patch.yml:159-161` 的 `ui-brand-official disabled: true` 丢失 | 运行 `install.mjs --disable-brand`，或者带上旧的覆盖层 | W1 A.3 |
 | 3 | dsh-web.service 起不来，ExecStartPre 返回 exit 1（`dsh-web not found` 或 `no zod in store`） | `/usr/local/bin/dsh-fix-zod` 写死了 `/usr/local/pnpm-global/store/v11/links/@deepseek-ai/dsh-web` 和 `/usr/local/pnpm-global/store/v11/links/@/zod` | 保持 `PNPM_HOME=/usr/local/pnpm-global` 和 pnpm 11；store 路径不同就改脚本，或删掉 ExecStartPre | W2 §1.6 |
-| 4 | 浏览器能过 basic auth，但 DSH 拒绝请求（Host 校验） | unit 里的 `--trusted-host 192.0.2.10:8443`，nginx 里的 `server_name 192.0.2.10;` | §7.1、§7.3 一起改成新的 host | W2 §4.1/5.1 |
+| 4 | 浏览器能过 basic auth，但 DSH 拒绝请求（Host 校验） | unit 里的 `--trusted-host <服务器IP>:8443`，nginx 里的 `server_name <服务器IP>;` | §7.1、§7.3 一起改成新的 host | W2 §4.1/5.1 |
 | 5 | 外网完全打不开 8443 | 云安全组 | 控制台放行 `8443/tcp` | W2 §2.1 |
 | 6 | 全站 500 | `/etc/nginx/.dsh-auth` 权限不是 `root:www-data 640` | 执行 `chown root:www-data` 和 `chmod 640` | W2 §3.2 |
 | 7 | 每次重启 DSH 后书签失效，要求输入 token | 没装 `dsh-web-gate.service` 或 `/usr/local/bin/dsh-web-gate.mjs`，或者 nginx 直接反代到 42443 | §7.2；nginx 的 `proxy_pass` 指向 `http://127.0.0.1:42444` | W2 §1.3 |

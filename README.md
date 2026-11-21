@@ -86,15 +86,15 @@ dsh-warroom/
 
 ## 5. 从本机 clone 怎么开始
 
-仓库托管在本机 Gitea（私有仓 `dev/dsh-warroom`，地址 `https://192.0.2.10:8444/dev/dsh-warroom.git`）。
+仓库托管在本机 Gitea（私有仓 `dev/dsh-warroom`，地址 `https://<服务器IP>:8444/dev/dsh-warroom.git`）。
 证书是自签的，git 默认会拒绝，需要跳过一次校验或先导入 CA；认证用 Gitea 用户名 + token。
 
 ```bash
 # 二选一：一次性跳过校验（仅本次）
-GIT_SSL_NO_VERIFY=true git clone https://192.0.2.10:8444/dev/dsh-warroom.git
+GIT_SSL_NO_VERIFY=true git clone https://<服务器IP>:8444/dev/dsh-warroom.git
 
 # 或导入自签证书后正常 clone（推荐，见 CLONE 文档第 2 节）
-git clone https://192.0.2.10:8444/dev/dsh-warroom.git
+git clone https://<服务器IP>:8444/dev/dsh-warroom.git
 ```
 
 完整清单（前提、证书、凭据、更新、故障排查）见 **[docs/CLONE-ON-WORKSTATION.md](docs/CLONE-ON-WORKSTATION.md)**。
@@ -119,7 +119,7 @@ git clone https://192.0.2.10:8444/dev/dsh-warroom.git
 2. **profile 与 patch 里有源机绝对路径**：`profile/package.json` 的 `link:`、`cordis.patch.yml` 的分区根与 MCP 路径。
    不要直接沿用，按 `docs/README-MIGRATE.md` 2.5 / 2.6 重跑 `install.mjs` 并改分区根。
 3. **自签证书 + 非标准端口**：Gitea 在 `8444`（nginx → 127.0.0.1:3000），`8444` 还强制 **mTLS**（客户端证书）。
-   证书是迁移前地址签发的，SAN 只有那个旧 IP 与 `127.0.0.1`，**不含 `192.0.2.10`**，有效期至 2036-11-17；
+   证书是迁移前地址签发的，SAN 只有那个旧 IP 与 `127.0.0.1`，**不含 `<服务器IP>`**，有效期至 2036-11-17；
    所以 clone 必须 `GIT_SSL_NO_VERIFY` / `-c http.sslVerify=false`，或换成带新地址 SAN 的证书后再导入 CA。
    同时阿里云安全组要放行 TCP `8444`。详见 `docs/nginx/README.md`。
 4. **插件 host 侧构建依赖本机工具链**：`safe-build-host.sh` 里的 `tsc` 路径、host-router 的 `typeRoots` 指向源机 pnpm store，
