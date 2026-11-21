@@ -10,6 +10,7 @@ import { useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import type { BindingView, EgressState, ExitInput, ExitView, RingEntry, Translate } from './contract.ts'
 import type { EgressController } from './controller.ts'
+import { hostFromInput, parseProxyInput } from './input.ts'
 
 /** Props of {@link EgressPanel}. */
 export interface EgressPanelProps {
@@ -19,6 +20,9 @@ export interface EgressPanelProps {
   readonly initialForm?: 'new' | { readonly edit: string }
   readonly initialLogOpen?: boolean
 }
+
+/** Log rows drawn when the request log is open. */
+const LOG_ROWS = 30
 
 /** Types the form offers. */
 const TYPES = ['http', 'https', 'socks5'] as const
@@ -83,6 +87,18 @@ function ExitForm({ exit, t, saving, onSave, onCancel }: {
   const [clearAuth, setClearAuth] = useState(false)
   const [error, setError] = useState<string | undefined>()
 
+  /** Fill the form from a pasted proxy URL (`socks5://user:pass@host:1080`, `host:3128`). */
+  const absorb = (text: string): boolean => {
+    const parsed = parseProxyInput(text)
+    if (parsed === undefined) return false
+    setHost(parsed.host)
+    if (parsed.type !== undefined) setType(parsed.type)
+    if (parsed.port !== undefined) setPort(parsed.port)
+    if (parsed.username !== undefined) { setUsername(parsed.username); setClearAuth(false) }
+    if (parsed.password !== undefined) setPassword(parsed.password)
+    return true
+  }
+
   const submit = (): void => {
     const portNumber = /^[0-9]{1,5}$/.test(port.trim()) ? Number(port.trim()) : 0
     if (name.trim() === '') return setError(t('form.err.name'))
@@ -99,7 +115,11 @@ function ExitForm({ exit, t, saving, onSave, onCancel }: {
   }
 
   return (
-    <form className="dshe-form" onSubmit={(event) => { event.preventDefault(); submit() }}>
+    <form
+      className="dshe-form"
+      onSubmit={(event) => { event.preventDefault(); submit() }}
+      onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); onCancel() } }}
+    >
       <div className="dshe-form-title">{t(exit === undefined ? 'form.new' : 'form.edit')}</div>
       <div className="dshe-form-grid">
         <label className="dshe-field" style={{ gridColumn: 'span 2' }}>
@@ -114,7 +134,12 @@ function ExitForm({ exit, t, saving, onSave, onCancel }: {
         </label>
         <label className="dshe-field" style={{ gridColumn: 'span 2' }}>
           <span>{t('form.host')}</span>
-          <input className="dshe-input" value={host} onChange={(e) => { setHost(e.target.value) }} placeholder="proxy.example.com" spellCheck={false} />
+          <input
+            className="dshe-input" value={host} placeholder="proxy.example.com" spellCheck={false} title={t('form.hint.paste')}
+            onChange={(e) => { setHost(e.target.value) }}
+            onPaste={(e) => { if (absorb(e.clipboardData.getData('text'))) e.preventDefault() }}
+            onBlur={() => { absorb(host) }}
+          />
         </label>
         <label className="dshe-field">
           <span>{t('form.port')}</span>
@@ -204,7 +229,8 @@ function ExitSelect({ exits, value, onChange, label }: { exits: readonly ExitVie
 function Bindings({ data, t, now, onBind }: { data: EgressState; t: Translate; now: number; onBind: (host: string, exit: string | null) => void }): ReactNode {
   const [host, setHost] = useState('')
   const add = (): void => {
-    const value = host.trim().toLowerCase()
+    // A pasted endpoint URL (`https://api.example.com/v1`) binds its host name.
+    const value = hostFromInput(host)
     if (value === '') return
     onBind(value, data.defaultExit)
     setHost('')
@@ -255,12 +281,12 @@ function RequestLog({ entries, t, now, initialOpen }: { entries: readonly RingEn
         <h2>{t('log.title')}</h2>
         <span className="dshe-section-sub">{t('log.hint')}</span>
         <span className="dshe-fill" />
-        <button type="button" className="dshe-link" aria-expanded={open} onClick={() => { setOpen(!open) }}>{t(open ? 'log.hide' : 'log.show')} ({entries.length})</button>
+        <button type="button" className="dshe-link" aria-expanded={open} onClick={() => { setOpen(!open) }}>{t(open ? 'log.hide' : 'log.show')} ({entries.length > LOG_ROWS ? t('log.count', { shown: LOG_ROWS, total: entries.length }) : entries.length})</button>
       </header>
       {open && (entries.length === 0
         ? <div className="dshe-empty">{t('log.empty')}</div>
         : <ul className="dshe-log">
-          {entries.slice(0, 30).map((entry, index) => (
+          {entries.slice(0, LOG_ROWS).map((entry, index) => (
             <li key={`${entry.at}-${String(index)}`} data-ok={entry.ok}>
               <span className="dshe-log-dot" aria-hidden="true" />
               <code>{entry.host}</code>
@@ -291,7 +317,7 @@ export function EgressPanel({ controller, t, initialForm, initialLogOpen = false
   const editing = typeof form === 'object' ? data.exits.find(exit => exit.id === form.edit) : undefined
   const save = (input: ExitInput): void => {
     setSaving(true)
-    void controller.saveExit(input, t('form.save')).then((ok) => { setSaving(false); if (ok) setForm(undefined) })
+    void controller.saveExit(input, t(input.id === undefined ? 'done.exitAdded' : 'done.exitSaved', { name: input.name })).then((ok) => { setSaving(false); if (ok) setForm(undefined) })
   }
 
   return (
@@ -303,7 +329,9 @@ export function EgressPanel({ controller, t, initialForm, initialLogOpen = false
             <p className="dshe-sub">{t('panel.subtitle')}</p>
           </div>
           <span className="dshe-fill" />
-          <button type="button" className="dshe-btn" onClick={() => { void controller.refresh() }}>{t('refresh')}</button>
+          <button type="button" className="dshe-btn" disabled={state.refreshing === true} onClick={() => { void controller.refresh() }}>
+            {t(state.refreshing === true ? 'refreshing' : 'refresh')}
+          </button>
         </header>
 
         <StatusBar data={data} origin={state.origin} bridgeError={state.bridgeError} t={t} />
@@ -330,14 +358,23 @@ export function EgressPanel({ controller, t, initialForm, initialLogOpen = false
                 key={exit.id} exit={exit} isDefault={data.defaultExit === exit.id} probing={state.probing.includes(exit.id)} now={now} t={t}
                 onProbe={() => { void controller.probe(exit.id) }}
                 onEdit={() => { setForm({ edit: exit.id }) }}
-                onDelete={() => { void controller.removeExit(exit.id, t('exit.delete')) }}
+                onDelete={() => { void controller.removeExit(exit.id, t('done.exitDeleted', { name: exit.name })) }}
               />
             ))}
           </ul>
           {data.exits.length === 1 && <div className="dshe-empty">{t('exits.empty')}</div>}
         </section>
 
-        <Bindings data={data} t={t} now={now} onBind={(host, exit) => { void controller.bind(host, exit, t('bind.title')) }} />
+        <Bindings
+          data={data} t={t} now={now}
+          onBind={(host, exit) => {
+            const exitName = data.exits.find(entry => entry.id === exit)?.name ?? ''
+            const text = exit === null ? t('done.unbound', { host })
+              : host === '*' ? t('done.default', { exit: exitName })
+                : t('done.bound', { host, exit: exitName })
+            void controller.bind(host, exit, text)
+          }}
+        />
         <RequestLog entries={data.recent} t={t} now={now} initialOpen={initialLogOpen} />
       </div>
     </div>

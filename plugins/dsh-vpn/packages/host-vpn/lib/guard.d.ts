@@ -30,7 +30,7 @@ export declare function parseRouteTable(text: string): RouteEntry[];
  * DHCP renewals change `metric` and `proto` without moving traffic, so only
  * `via` and `dev` are compared.
  * @param text - `ip -4 route show default` output.
- * @returns e.g. `via <默认网关> dev eth0`, or an empty string when there is no default route.
+ * @returns e.g. `via 198.18.31.253 dev eth0`, or an empty string when there is no default route.
  */
 export declare function defaultRouteKey(text: string): string;
 /** An address the server must keep reaching, with a human label. */

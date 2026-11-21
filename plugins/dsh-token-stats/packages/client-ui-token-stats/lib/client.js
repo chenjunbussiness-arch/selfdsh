@@ -41,6 +41,8 @@ var zh = {
   "daily.title7": "\u6BCF\u65E5\u7528\u91CF\uFF08\u8FD1 7 \u5929\uFF0C\u6309\u6A21\u578B\u7740\u8272\uFF09",
   "daily.title30": "\u6BCF\u65E5\u7528\u91CF\uFF08\u8FD1 30 \u5929\uFF0C\u6309\u6A21\u578B\u7740\u8272\uFF09",
   "refresh": "\u7ACB\u5373\u5237\u65B0",
+  "refreshing": "\u5237\u65B0\u4E2D\u2026",
+  "stale": "\u5237\u65B0\u5931\u8D25\uFF0C\u4E0B\u9762\u662F {time} \u7684\u6570\u636E",
   "title": "Token \u7528\u91CF",
   "unit": "tok",
   "today.label": "\u4ECA\u65E5\u603B\u91CF",
@@ -79,6 +81,8 @@ var en = {
   "daily.title7": "Daily usage (7 days, coloured by model)",
   "daily.title30": "Daily usage (30 days, coloured by model)",
   "refresh": "Refresh now",
+  "refreshing": "Refreshing\u2026",
+  "stale": "Refresh failed; showing data from {time}",
   "title": "Token usage",
   "unit": "tok",
   "today.label": "Today",
@@ -224,6 +228,8 @@ var TOKEN_STATS_CSS = `
 .dst-retry:hover, .dst-refresh:hover { background: var(--dst-hover); }
 .dst-pop-foot { display: flex; flex-direction: column; gap: 1px; flex: none; padding: 7px 12px 8px; border-top: 1px solid var(--dst-line); }
 .dst-foot-line { font-size: 10px; line-height: 1.35; color: var(--dst-caption); overflow-wrap: anywhere; }
+.dst-foot-line[data-bad] { color: var(--dst-bad); }
+.dst-refresh:disabled { opacity: .55; cursor: default; }
 @media (prefers-reduced-motion: reduce) { .dst-card, .dst-rail { transition: none; } }
 `;
 function installStyles() {
@@ -321,6 +327,7 @@ function useSummary() {
   const load = (0, import_react.useCallback)((force = false) => {
     const mine = ticket.current + 1;
     ticket.current = mine;
+    if (force) setState((previous) => ({ ...previous, refreshing: true }));
     fetchSummary(force).then(
       (data) => {
         if (mine === ticket.current) setState({ status: "ready", data });
@@ -328,7 +335,7 @@ function useSummary() {
       (error) => {
         if (mine !== ticket.current) return;
         const message = error instanceof Error ? error.message : String(error);
-        setState((previous) => previous.data === void 0 ? { status: "error", error: message } : { status: "ready", data: previous.data });
+        setState((previous) => previous.data === void 0 ? { status: "error", error: message } : { status: "ready", data: previous.data, staleError: message });
       }
     );
   }, []);
@@ -382,6 +389,9 @@ function dayRowsOf(data, range, colors) {
     const parts = Object.entries(day?.models ?? {}).filter(([, tokens]) => tokens > 0).sort((a, b) => b[1] - a[1]).map(([model, tokens]) => ({ model, percent: billed > 0 ? tokens / billed * 100 : 0, color: colors.get(model) ?? "#64748b" }));
     return { date, billed, today, percent, parts };
   });
+}
+function exact(value) {
+  return `${Math.round(value).toLocaleString()} tokens`;
 }
 function width(share) {
   return `${Math.max(2, Math.round(share * 100))}%`;
@@ -458,22 +468,22 @@ function TokenStats({ wide = true, t }) {
         ] }),
         state.status === "error" && data === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-note", "data-bad": "", children: t("error.short") }) : data === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-note", children: t("loading") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "dst-big-row", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-big", children: totalText }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-big", title: exact(data.today.billed), children: totalText }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-big-label", children: t("today.short") }),
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-spark", "aria-hidden": true, title: t("spark.title"), children: week.map((row) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("i", { "data-today": row.today ? "true" : void 0, style: { height: `${Math.max(row.percent, row.billed > 0 ? 8 : 4)}%` } }, row.date)) })
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "dst-split", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { title: exact(data.today.uncachedInput), children: [
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)("b", { children: formatTokens(data.today.uncachedInput) }),
               " ",
               t("split.input")
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { title: exact(data.today.cacheRead), children: [
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)("b", { children: formatTokens(data.today.cacheRead) }),
               " ",
               t("split.cache")
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { title: exact(data.today.output), children: [
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)("b", { children: formatTokens(data.today.output) }),
               " ",
               t("split.output")
@@ -519,22 +529,22 @@ function TokenStats({ wide = true, t }) {
       value
     )) }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-hero", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "dst-hero-value", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "dst-hero-value", title: exact(rangeSplit.total), children: [
         formatTokens(rangeSplit.total),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-hero-unit", children: "tokens" })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-hero-note", children: t("hero.note", { range: rangeTitle, time: timeOfDay(data.generatedAt) }) })
     ] }),
     range === 1 ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-cells", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-cell", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-cell", title: exact(data.today.uncachedInput), children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("split.input") }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("b", { children: formatTokens(data.today.uncachedInput) })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-cell", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-cell", title: exact(data.today.cacheRead), children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("split.cache") }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("b", { children: formatTokens(data.today.cacheRead) })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-cell", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-cell", title: exact(data.today.output), children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("split.output") }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("b", { children: formatTokens(data.today.output) })
       ] }),
@@ -549,7 +559,7 @@ function TokenStats({ wide = true, t }) {
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-model-row-head", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-swatch", style: { background: model.color } }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-model-name", title: model.model, children: model.model }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-model-tok", children: formatTokens(model.tokens) }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-model-tok", title: exact(model.tokens), children: formatTokens(model.tokens) }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-model-share", children: formatPercent(model.share) })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-track", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-fill", style: { width: width(model.share), background: model.color } }) })
@@ -560,7 +570,7 @@ function TokenStats({ wide = true, t }) {
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dst-days", children: dayRows.map((row) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-day", "data-today": row.today ? "true" : void 0, "data-zero": row.billed === 0 ? "true" : void 0, children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-day-date", children: shortDate(row.date) }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-day-track", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-day-bar", style: { width: `${row.percent}%` }, children: row.parts.map((part) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("i", { title: part.model, style: { width: `${part.percent}%`, background: part.color } }, part.model)) }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-day-tok", children: row.billed > 0 ? formatTokens(row.billed) : t("value.none") })
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-day-tok", title: row.billed > 0 ? exact(row.billed) : void 0, children: row.billed > 0 ? formatTokens(row.billed) : t("value.none") })
       ] }, row.date)) })
     ] })
   ] }) : state.status === "error" && data === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-error", children: [
@@ -575,9 +585,10 @@ function TokenStats({ wide = true, t }) {
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-empty-hint", children: t("empty.hint") })
   ] });
   const footer = data === void 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-pop-foot", children: [
+    state.staleError !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-foot-line", "data-bad": "", title: state.staleError, children: t("stale", { time: timeOfDay(data.generatedAt) }) }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-foot-line", children: t("foot.scope") }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dst-foot-line", children: t("foot.updated", { time: timeOfDay(data.generatedAt), files: data.source.sessionFiles, events: data.source.usageEvents }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "dst-refresh", onClick: () => reload(true), children: t("refresh") })
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "dst-refresh", disabled: state.refreshing === true, onClick: () => reload(true), children: state.refreshing === true ? t("refreshing") : t("refresh") })
   ] });
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dst-root", ref: rootRef, children: [
     card,

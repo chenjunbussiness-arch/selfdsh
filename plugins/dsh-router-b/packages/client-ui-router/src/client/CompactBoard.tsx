@@ -440,6 +440,11 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-tab:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-tab:active{background:var(--c-press)}
 .dshrc-tab[data-on]{background:var(--c-pill);color:var(--c-text);font-weight:600}
+.dshrc-tab-n{margin-left:var(--sp-1);font-weight:500;color:var(--c-text3);font-variant-numeric:tabular-nums}
+.dshrc-tab-flag{display:inline-block;width:6px;height:6px;margin-left:var(--sp-1);vertical-align:middle;border-radius:50%;background:var(--st-blocked-dot)}
+.dshrc-ico[data-busy] svg{animation:dshrc-spin .8s linear infinite}
+@keyframes dshrc-spin{to{transform:rotate(360deg)}}
+.dshrc-row[data-link]:focus-visible{outline:2px solid var(--c-focus);outline-offset:-2px}
 .dshrc-list{flex:1 1 auto;min-height:0;overflow:auto;padding:0 var(--sp-1) 24px;scrollbar-width:thin}
 .dshrc-group{margin-top:var(--sp-4)}
 .dshrc-group+.dshrc-group{padding-top:var(--sp-3);margin-top:var(--sp-1);border-top:1px solid var(--c-line-soft)}
@@ -588,6 +593,13 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     const timer = setTimeout(() => { setArming(null) }, 4000)
     return () => { clearTimeout(timer) }
   }, [arming])
+  // A hand-triggered refresh spins its icon until the read settles.
+  const [refreshing, setRefreshing] = useState(false)
+  const refresh = (): void => {
+    if (refreshing) return
+    setRefreshing(true)
+    void controller.load().finally(() => { setRefreshing(false) })
+  }
 
   useEffect(() => {
     if (notice === null) return
@@ -717,15 +729,42 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     return { live, nameOf, workerName, titleOf, groupFams, counts, anyLive }
   }, [board, query])
 
-  // Checklists are not in the board file: poll while something runs.
+  // Checklists are not in the board file: poll while something runs. A hidden
+  // browser tab skips its polls and catches up the moment it is shown again.
   useEffect(() => {
     if (!model.anyLive) return
-    const timer = setInterval(() => {
+    const hidden = (): boolean => typeof document !== 'undefined' && document.visibilityState === 'hidden'
+    const tick = (): void => {
+      if (hidden()) return
       setNow(Date.now())
       void controller.load()
-    }, POLL_MS)
-    return () => { clearInterval(timer) }
+    }
+    const timer = setInterval(tick, POLL_MS)
+    document.addEventListener('visibilitychange', tick)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', tick)
+    }
   }, [model.anyLive, controller])
+
+  // Families per tab, for the counts on the segment strip.
+  const tabCounts = useMemo(() => {
+    const counts = new Map<BoardTab, number>()
+    for (const item of TABS) counts.set(item.id, TAB_GROUPS[item.id].reduce((sum, group) => sum + (model.counts.get(group) ?? 0), 0))
+    return counts
+  }, [model])
+  const waiting = model.counts.get('blocked') ?? 0
+
+  // The first board lands on 进行中; when that tab is empty but another one has
+  // work, open that one instead, once, so the panel never opens on a blank list.
+  const [landed, setLanded] = useState(false)
+  useEffect(() => {
+    if (board === null || landed) return
+    setLanded(true)
+    if ((tabCounts.get(tab) ?? 0) > 0) return
+    const next = TABS.find(item => (tabCounts.get(item.id) ?? 0) > 0)
+    if (next !== undefined) setTab(next.id)
+  }, [board, landed, tabCounts, tab])
 
   const toggle = (id: string): void => {
     setOpen((previous) => {
@@ -796,6 +835,18 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   const openOf = (task: TaskView): (() => void) | undefined =>
     task.workerSessionId !== undefined && onOpenSession !== undefined ? () => { onOpenSession(task.workerSessionId!) } : undefined
 
+  /** A row that opens a Session is a button for the keyboard too: Tab to it, Enter or Space opens. */
+  const linkProps = (click: (() => void) | undefined) => click === undefined ? {} : {
+    'data-link': '',
+    role: 'button',
+    tabIndex: 0,
+    onClick: click,
+    onKeyDown: (event: { key: string; target: unknown; currentTarget: unknown; preventDefault(): void }) => {
+      if (event.target !== event.currentTarget) return
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); click() }
+    },
+  }
+
   const workerNameOf = (task: TaskView): string =>
     (task.workerId === undefined ? undefined : model.workerName.get(task.workerId) ?? task.workerId) ?? ''
 
@@ -832,7 +883,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     return (
       <div key={task.id} className="dshrc-child" data-child={task.id}>
         <div className="dshrc-row dshrc-sub" data-group={group} data-task={task.id}
-          data-link={click === undefined ? undefined : ''} onClick={click} title={tooltipOf(task, group, orderLines(task))}>
+          {...linkProps(click)} title={tooltipOf(task, group, orderLines(task))}>
           <span className="dshrc-rt">{task.title}</span>
           {task.stage !== undefined && <span className="dshrc-tag" data-tone="stage">{t('order.stage', { n: task.stage })}</span>}
           <span className="dshrc-rm">{metaOf(task, group)}</span>
@@ -1006,7 +1057,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     return (
       <div key={family.key} className="dshrc-family" data-family={family.key} data-group={group}>
         <div className="dshrc-row" data-group={group} data-task={family.root.id}
-          data-link={click === undefined ? undefined : ''} onClick={click} title={tooltipOf(family.root, group, extra)}>
+          {...linkProps(click)} title={tooltipOf(family.root, group, extra)}>
           <span className="dshrc-main">
             <span className="dshrc-rt">{family.root.title}</span>
             <span className="dshrc-meta">
@@ -1172,8 +1223,8 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
       <header className="dshrc-head">
         <h2 className="dshrc-title">{t('board.title')}</h2>
         <div className="dshrc-acts">
-          <button type="button" className="dshrc-ico" onClick={() => { void controller.load() }}
-            title={t('board.refresh')} aria-label={t('board.refresh')}>
+          <button type="button" className="dshrc-ico" onClick={refresh} data-busy={refreshing ? '' : undefined}
+            title={t(refreshing ? 'board.refreshing' : 'board.refresh')} aria-label={t(refreshing ? 'board.refreshing' : 'board.refresh')}>
             <Icon d={ICON_REFRESH} />
           </button>
           {onOpenWarRoom !== undefined && (
@@ -1196,6 +1247,10 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
             data-on={tab === item.id ? '' : undefined} aria-selected={tab === item.id}
             onClick={() => { setTab(item.id) }}>
             {t(item.key)}
+            {(tabCounts.get(item.id) ?? 0) > 0 && <span className="dshrc-tab-n">{tabCounts.get(item.id)}</span>}
+            {item.id === 'active' && waiting > 0 && (
+              <span className="dshrc-tab-flag" title={t('seg.waiting', { n: waiting })} aria-label={t('seg.waiting', { n: waiting })} />
+            )}
           </button>
         ))}
         <input className="dshrc-find" type="search" value={query} placeholder={t('board.find')} aria-label={t('board.find')}
@@ -1208,7 +1263,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
             <span className="dshrc-err-msg">{t('board.error', { message: state.error ?? '' })}</span>
             {lastOk !== '' && <span className="dshrc-err-stale">{t('board.lastOk', { time: lastOk })}</span>}
           </span>
-          <button type="button" className="dshrc-err-btn" onClick={() => { void controller.load() }}>
+          <button type="button" className="dshrc-err-btn" onClick={refresh} disabled={refreshing}>
             {t('board.retry')}
           </button>
         </div>

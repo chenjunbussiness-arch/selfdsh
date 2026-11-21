@@ -18,7 +18,7 @@ import type { Translate } from './locales.ts'
 import { fetchSummary } from './source.ts'
 
 /** What the plugin injects into the component (besides the slot's owner props). */
-export interface TokenStatsFace {
+export type TokenStatsFace = {
   t: Translate
 }
 
@@ -31,6 +31,10 @@ interface ViewState {
   status: 'loading' | 'ready' | 'error'
   data?: Summary
   error?: string
+  /** True while a hand-triggered refresh is in flight. */
+  refreshing?: boolean
+  /** Set when a refresh failed while older data is still on screen. */
+  staleError?: string
 }
 
 type Range = 1 | 7 | 30
@@ -56,12 +60,17 @@ function useSummary(): { state: ViewState; reload: (force?: boolean) => void } {
   const load = useCallback((force = false) => {
     const mine = ticket.current + 1
     ticket.current = mine
+    // A hand-triggered refresh says so on its button; background polls stay quiet.
+    if (force) setState(previous => ({ ...previous, refreshing: true }))
     fetchSummary(force).then(
       data => { if (mine === ticket.current) setState({ status: 'ready', data }) },
       (error: unknown) => {
         if (mine !== ticket.current) return
         const message = error instanceof Error ? error.message : String(error)
-        setState(previous => previous.data === undefined ? { status: 'error', error: message } : { status: 'ready', data: previous.data })
+        // Keep the old numbers on screen, but say they are old instead of failing silently.
+        setState(previous => previous.data === undefined
+          ? { status: 'error', error: message }
+          : { status: 'ready', data: previous.data, staleError: message })
       },
     )
   }, [])
@@ -120,6 +129,11 @@ function dayRowsOf(data: Summary, range: number, colors: Map<string, string>): D
       .map(([model, tokens]) => ({ model, percent: billed > 0 ? (tokens / billed) * 100 : 0, color: colors.get(model) ?? '#64748b' }))
     return { date, billed, today, percent, parts }
   })
+}
+
+/** Exact count for the hover tooltip, e.g. `1,234,567 tokens`. */
+function exact(value: number): string {
+  return `${Math.round(value).toLocaleString()} tokens`
 }
 
 function width(share: number): string {
@@ -206,7 +220,7 @@ export function TokenStats({ wide = true, t }: TokenStatsProps) {
           : (
             <>
               <span className="dst-big-row">
-                <span className="dst-big">{totalText}</span>
+                <span className="dst-big" title={exact(data.today.billed)}>{totalText}</span>
                 <span className="dst-big-label">{t('today.short')}</span>
                 <span className="dst-spark" aria-hidden title={t('spark.title')}>
                   {week.map(row => (
@@ -215,9 +229,9 @@ export function TokenStats({ wide = true, t }: TokenStatsProps) {
                 </span>
               </span>
               <span className="dst-split">
-                <span><b>{formatTokens(data.today.uncachedInput)}</b> {t('split.input')}</span>
-                <span><b>{formatTokens(data.today.cacheRead)}</b> {t('split.cache')}</span>
-                <span><b>{formatTokens(data.today.output)}</b> {t('split.output')}</span>
+                <span title={exact(data.today.uncachedInput)}><b>{formatTokens(data.today.uncachedInput)}</b> {t('split.input')}</span>
+                <span title={exact(data.today.cacheRead)}><b>{formatTokens(data.today.cacheRead)}</b> {t('split.cache')}</span>
+                <span title={exact(data.today.output)}><b>{formatTokens(data.today.output)}</b> {t('split.output')}</span>
               </span>
               {todayModels.length === 0
                 ? <span className="dst-note">{t('empty.short')}</span>
@@ -274,14 +288,14 @@ export function TokenStats({ wide = true, t }: TokenStatsProps) {
           ))}
         </div>
         <div className="dst-hero">
-          <span className="dst-hero-value">{formatTokens(rangeSplit.total)}<span className="dst-hero-unit">tokens</span></span>
+          <span className="dst-hero-value" title={exact(rangeSplit.total)}>{formatTokens(rangeSplit.total)}<span className="dst-hero-unit">tokens</span></span>
           <span className="dst-hero-note">{t('hero.note', { range: rangeTitle, time: timeOfDay(data.generatedAt) })}</span>
         </div>
         {range === 1 ? (
           <div className="dst-cells">
-            <div className="dst-cell"><span>{t('split.input')}</span><b>{formatTokens(data.today.uncachedInput)}</b></div>
-            <div className="dst-cell"><span>{t('split.cache')}</span><b>{formatTokens(data.today.cacheRead)}</b></div>
-            <div className="dst-cell"><span>{t('split.output')}</span><b>{formatTokens(data.today.output)}</b></div>
+            <div className="dst-cell" title={exact(data.today.uncachedInput)}><span>{t('split.input')}</span><b>{formatTokens(data.today.uncachedInput)}</b></div>
+            <div className="dst-cell" title={exact(data.today.cacheRead)}><span>{t('split.cache')}</span><b>{formatTokens(data.today.cacheRead)}</b></div>
+            <div className="dst-cell" title={exact(data.today.output)}><span>{t('split.output')}</span><b>{formatTokens(data.today.output)}</b></div>
             <div className="dst-cell"><span>{t('split.calls')}</span><b>{data.today.events}</b></div>
           </div>
         ) : null}
@@ -294,7 +308,7 @@ export function TokenStats({ wide = true, t }: TokenStatsProps) {
                 <div className="dst-model-row-head">
                   <span className="dst-swatch" style={{ background: model.color }} />
                   <span className="dst-model-name" title={model.model}>{model.model}</span>
-                  <span className="dst-model-tok">{formatTokens(model.tokens)}</span>
+                  <span className="dst-model-tok" title={exact(model.tokens)}>{formatTokens(model.tokens)}</span>
                   <span className="dst-model-share">{formatPercent(model.share)}</span>
                 </div>
                 <span className="dst-track"><span className="dst-fill" style={{ width: width(model.share), background: model.color }} /></span>
@@ -312,7 +326,7 @@ export function TokenStats({ wide = true, t }: TokenStatsProps) {
                     {row.parts.map(part => <i key={part.model} title={part.model} style={{ width: `${part.percent}%`, background: part.color }} />)}
                   </span>
                 </span>
-                <span className="dst-day-tok">{row.billed > 0 ? formatTokens(row.billed) : t('value.none')}</span>
+                <span className="dst-day-tok" title={row.billed > 0 ? exact(row.billed) : undefined}>{row.billed > 0 ? formatTokens(row.billed) : t('value.none')}</span>
               </div>
             ))}
           </div>
@@ -338,9 +352,14 @@ export function TokenStats({ wide = true, t }: TokenStatsProps) {
 
   const footer = data === undefined ? null : (
     <div className="dst-pop-foot">
+      {state.staleError !== undefined && (
+        <span className="dst-foot-line" data-bad="" title={state.staleError}>{t('stale', { time: timeOfDay(data.generatedAt) })}</span>
+      )}
       <span className="dst-foot-line">{t('foot.scope')}</span>
       <span className="dst-foot-line">{t('foot.updated', { time: timeOfDay(data.generatedAt), files: data.source.sessionFiles, events: data.source.usageEvents })}</span>
-      <button type="button" className="dst-refresh" onClick={() => reload(true)}>{t('refresh')}</button>
+      <button type="button" className="dst-refresh" disabled={state.refreshing === true} onClick={() => reload(true)}>
+        {state.refreshing === true ? t('refreshing') : t('refresh')}
+      </button>
     </div>
   )
 
