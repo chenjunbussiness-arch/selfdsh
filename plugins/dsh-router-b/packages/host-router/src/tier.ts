@@ -43,11 +43,23 @@ export interface TierDecision {
   readonly reason: string
 }
 
+/**
+ * Model of every partition manager.
+ *
+ * - absent or `'strongest'`: the saved `hard` route, else the strongest model the
+ *   runtime advertises (see `strongestRoute`), at its highest reasoning effort;
+ * - `'inherit'`: the dispatcher's own model (the old behaviour);
+ * - a route: exactly that model.
+ */
+export type ManagerModel = 'strongest' | 'inherit' | TierRoute
+
 /** Persisted user choice. */
 export interface TierSettings {
   /** `false` means every task inherits the dispatcher's model (the old behaviour). */
   readonly auto: boolean
   readonly tiers: Partial<Record<Tier, TierRoute>>
+  /** Manager model; absent means `'strongest'`. Applies whether or not `auto` is on. */
+  readonly manager?: ManagerModel
 }
 
 /** One model offered to the panel. */
@@ -195,6 +207,82 @@ export function defaultTiers(models: readonly ModelOption[], fallback: TierRoute
   }
 }
 
+/** Capability wording: the flagship of a family. */
+const STRONG = /opus|ultra|(?:^|[^a-z])max(?:$|[^a-z])|reasoner|thinking|(?:^|[^a-z])pro(?:$|[^a-z])|(?:^|[^a-z])r1(?:$|[^a-z])|large/
+
+/** Higher is stronger: flagship wording up, cheap wording down. */
+export function strength(name: string): number {
+  const lower = name.toLowerCase()
+  return (STRONG.test(lower) ? 4 : 0) - cheapness(lower) * 2
+}
+
+/** The largest version number in a model name (`claude-opus-5.5` -> 5.5), 0 when none. */
+export function versionOf(name: string): number {
+  let best = 0
+  for (const match of name.matchAll(/(\d+(?:\.\d+)?)/g)) {
+    const value = Number(match[1])
+    // Dates and sizes (20250514, 70b) are not versions.
+    if (Number.isFinite(value) && value < 100 && value > best) best = value
+  }
+  return best
+}
+
+/**
+ * The strongest advertised model, at its highest reasoning effort.
+ *
+ * Ranked by flagship wording, then version number, then how many reasoning
+ * efforts it offers. Ties keep the profile's default model when it is among
+ * them, so an install with one family and no flagship wording simply keeps its
+ * default. Returns the fallback when nothing is advertised.
+ */
+export function strongestRoute(models: readonly ModelOption[], fallback: TierRoute | undefined): TierRoute | undefined {
+  if (models.length === 0) return fallback
+  const score = (option: ModelOption): readonly number[] => {
+    const name = `${option.model} ${option.name}`
+    return [strength(name), versionOf(name), option.efforts?.length ?? 0]
+  }
+  const better = (left: readonly number[], right: readonly number[]): number => {
+    for (let index = 0; index < left.length; index++) {
+      if (left[index]! !== right[index]!) return left[index]! - right[index]!
+    }
+    return 0
+  }
+  let best: ModelOption | undefined
+  for (const option of models) {
+    if (best === undefined) { best = option; continue }
+    const order = better(score(option), score(best))
+    const isDefault = fallback !== undefined && option.provider === fallback.provider && option.model === fallback.model
+    if (order > 0 || (order === 0 && isDefault)) best = option
+  }
+  const effort = best!.efforts?.at(-1)
+  return { provider: best!.provider, model: best!.model, ...effort === undefined ? {} : { reasoningEffort: effort } }
+}
+
+/** Raise a route to the highest reasoning effort its model offers. */
+export function atTopEffort(route: TierRoute, models: readonly ModelOption[]): TierRoute {
+  const option = models.find(item => item.provider === route.provider && item.model === route.model)
+  const effort = option?.efforts?.at(-1)
+  return effort === undefined ? route : { ...route, reasoningEffort: effort }
+}
+
+/**
+ * Resolve the manager's model route and say where it came from.
+ * @returns `route` undefined means inherit the dispatcher's model.
+ */
+export function managerRouteOf(
+  settings: TierSettings,
+  models: readonly ModelOption[],
+  fallback: TierRoute | undefined,
+): { readonly route?: TierRoute; readonly source: 'saved' | 'hard' | 'strongest' | 'inherit' } {
+  const choice = settings.manager ?? 'strongest'
+  if (choice === 'inherit') return { source: 'inherit' }
+  if (typeof choice === 'object') return { route: choice, source: 'saved' }
+  const hard = settings.tiers.hard
+  if (hard !== undefined) return { route: hard.reasoningEffort === undefined ? atTopEffort(hard, models) : hard, source: 'hard' }
+  const strongest = strongestRoute(models, fallback)
+  return strongest === undefined ? { source: 'inherit' } : { route: strongest, source: 'strongest' }
+}
+
 /** Durable tier settings in one JSON file. */
 export class TierStore {
   private settings: TierSettings = { auto: true, tiers: {} }
@@ -242,5 +330,19 @@ export function normaliseSettings(raw: Partial<TierSettings> | undefined): TierS
       }
     }
   }
-  return { auto: raw?.auto !== false, tiers }
+  const manager = normaliseManager(raw?.manager)
+  return { auto: raw?.auto !== false, tiers, ...manager === undefined ? {} : { manager } }
+}
+
+/** Validate a manager model choice; anything unreadable means the default. */
+export function normaliseManager(raw: unknown): ManagerModel | undefined {
+  if (raw === 'inherit' || raw === 'strongest') return raw
+  if (raw === null || typeof raw !== 'object') return undefined
+  const route = raw as Partial<TierRoute>
+  if (typeof route.provider !== 'string' || route.provider === '' || typeof route.model !== 'string' || route.model === '') return undefined
+  return {
+    provider: route.provider,
+    model: route.model,
+    ...typeof route.reasoningEffort === 'string' && route.reasoningEffort !== '' ? { reasoningEffort: route.reasoningEffort } : {},
+  }
 }

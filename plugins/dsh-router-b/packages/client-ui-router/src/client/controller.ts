@@ -9,7 +9,11 @@
 
 import type { BoardSnapshot, PublishResult, TaskState } from './contract.ts'
 import type { BoardSource, ControlAction, ControlExtra } from './source.ts'
-import type { FileListingView } from './contract.ts'
+import type { FileListingView, MemoryNoteView, PartitionMemoryView } from './contract.ts'
+
+
+/** Host states a stop leaves alone. */
+const CLOSED_HOST: ReadonlySet<string> = new Set(['done', 'verified', 'reported', 'failed', 'cancelled'])
 
 /** What the panel renders. */
 export interface RouterPanelState {
@@ -153,6 +157,7 @@ export class RouterBoardController {
   /**
    * Run one `task_control` action, then re-read the board.
    *
+   * `cancel` / `cancel_tree` move the rows to 已取消 the same way.
    * `resume` is applied optimistically: the row is moved to `running` in the
    * local snapshot before the request, so it leaves 已暂停 at once. A fresh read
    * (not a join of an older in-flight one) follows a success; a failure restores
@@ -166,6 +171,29 @@ export class RouterBoardController {
     const source = this.source
     if (source.control === undefined) return 'task_control is not wired on this source'
     const before = this.state.board
+    if ((action === 'cancel' || action === 'cancel_tree') && before !== null) {
+      // A stop shows at once: the row (and, for a whole request, every open row
+      // under it) moves to 已取消 before the Host answers.
+      const ids = new Set([taskId])
+      if (action === 'cancel_tree') {
+        let grew = true
+        while (grew) {
+          grew = false
+          for (const task of before.tasks) {
+            if (task.parentId !== undefined && ids.has(task.parentId) && !ids.has(task.id)) { ids.add(task.id); grew = true }
+          }
+        }
+      }
+      this.emit({
+        ...this.state,
+        board: {
+          ...before,
+          tasks: before.tasks.map(task => !ids.has(task.id) || CLOSED_HOST.has(task.hostState ?? '') ? task : {
+            ...task, state: 'rejected' as const, hostState: 'cancelled' as const,
+          }),
+        },
+      })
+    }
     if (action === 'resume' && before !== null) {
       this.emit({
         ...this.state,
@@ -208,6 +236,32 @@ export class RouterBoardController {
     const source = this.source
     if (source.listFiles === undefined) throw new Error('listing files is not wired on this source')
     return source.listFiles(partition, path)
+  }
+
+  /** Whether the source can read partition memory. */
+  get canReadMemory(): boolean {
+    return typeof this.source.readMemory === 'function'
+  }
+
+  /** Read one partition's memory. */
+  async readMemory(partition: string): Promise<PartitionMemoryView> {
+    const source = this.source
+    if (source.readMemory === undefined) throw new Error('partition memory is not wired on this source')
+    return source.readMemory(partition)
+  }
+
+  /** Add a note to one partition's memory. */
+  async addMemoryNote(partition: string, text: string): Promise<MemoryNoteView> {
+    const source = this.source
+    if (source.addMemoryNote === undefined) throw new Error('partition memory is not wired on this source')
+    return source.addMemoryNote(partition, text)
+  }
+
+  /** Remove a note from one partition's memory. */
+  async removeMemoryNote(partition: string, id: string): Promise<void> {
+    const source = this.source
+    if (source.removeMemoryNote === undefined) throw new Error('partition memory is not wired on this source')
+    await source.removeMemoryNote(partition, id)
   }
 
   /** Clear the publish banner after the view has shown it. */

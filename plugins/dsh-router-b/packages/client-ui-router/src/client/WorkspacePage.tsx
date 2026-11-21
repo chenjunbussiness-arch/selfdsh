@@ -7,8 +7,10 @@
  * partition's include/exclude rules leave out are dimmed and say so.
  *
  * Right: that partition's root, its include/exclude rules, any configuration
- * problem the Host found at boot, the rules every worker brief carries, and the
- * partition's open tasks (with what each one waits for).
+ * problem the Host found at boot, the rules every worker brief carries, the
+ * partition's open tasks (with what each one waits for, and 停止全部), and its
+ * memory: the model its manager runs on, standing notes, recent work and the
+ * worker sessions the manager can read or continue.
  *
  * Only names, kinds, sizes and times cross the bridge, never file contents.
  *
@@ -16,7 +18,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import type { FileEntryView, FileListingView, PartitionView, TaskView } from './contract.ts'
+import type { FileEntryView, FileListingView, PartitionMemoryView, PartitionView, TaskView } from './contract.ts'
 import type { RouterBoardController } from './controller.ts'
 import { groupOf, statusKeyOf } from './CompactBoard.tsx'
 import { bytes, relativeTime } from './format.ts'
@@ -83,6 +85,19 @@ button.dshws-node:hover{background:var(--c-hover)}
 .dshws-note[data-tone="error"]{color:var(--st-failed-text)}
 .dshws-sec{margin:0 0 var(--sp-4)}
 .dshws-sec h3{margin:0 0 var(--sp-2);font-size:12px;font-weight:600;color:var(--c-text2)}
+.dshws-sech{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);margin-bottom:var(--sp-2)}
+.dshws-sech h3{margin:0}
+.dshws-btn[data-tone="stop"]:hover{color:var(--st-failed-text)}
+.dshws-btn[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
+.dshws-h4{margin:var(--sp-3) 0 var(--sp-1);font-size:11px;font-weight:600;color:var(--c-text3)}
+.dshws-notes{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
+.dshws-mnote{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:0 var(--sp-2);padding:var(--sp-1) var(--sp-2);border-radius:var(--r-ctl);background:var(--c-line-soft);font-size:12px}
+.dshws-mtext{grid-column:1;overflow-wrap:anywhere}
+.dshws-mmeta{grid-column:1;font-size:11px;color:var(--c-text3)}
+.dshws-x{grid-column:2;grid-row:1/3;width:20px;height:20px;padding:0;border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text3);cursor:pointer}
+.dshws-x:hover{background:var(--c-hover);color:var(--st-failed-text)}
+.dshws-addnote{display:flex;gap:var(--sp-2);margin-top:var(--sp-2)}
+.dshws-addnote input{flex:1 1 auto;min-width:0;height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px}
 .dshws-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--sp-1) var(--sp-3);margin:0;font-size:12px}
 .dshws-kv dt{color:var(--c-text3)}
 .dshws-kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
@@ -169,6 +184,43 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
     void loadDir(partitionId, '')
   }, [partitionId, dirs, loadDir, controller])
 
+  /** The selected partition's memory, keyed by partition so a switch never shows stale notes. */
+  const [memory, setMemory] = useState<{ readonly partition: string; readonly view?: PartitionMemoryView; readonly error?: string } | null>(null)
+  const [noteText, setNoteText] = useState('')
+  const [noteBusy, setNoteBusy] = useState(false)
+  const [stopArmed, setStopArmed] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [message, setMessage] = useState<{ readonly tone: 'ok' | 'bad'; readonly text: string } | null>(null)
+
+  const loadMemory = useCallback(async (partition: string): Promise<void> => {
+    if (!controller.canReadMemory) return
+    try {
+      const view = await controller.readMemory(partition)
+      setMemory({ partition, view })
+    } catch (error) {
+      setMemory({ partition, error: error instanceof Error ? error.message : String(error) })
+    }
+  }, [controller])
+
+  useEffect(() => {
+    if (partitionId === undefined) return
+    setNoteText('')
+    setStopArmed(false)
+    void loadMemory(partitionId)
+  }, [partitionId, loadMemory])
+
+  useEffect(() => {
+    if (!stopArmed) return
+    const timer = setTimeout(() => { setStopArmed(false) }, 4000)
+    return () => { clearTimeout(timer) }
+  }, [stopArmed])
+
+  useEffect(() => {
+    if (message === null) return
+    const timer = setTimeout(() => { setMessage(null) }, 4000)
+    return () => { clearTimeout(timer) }
+  }, [message])
+
   const toggleDir = (partition: string, path: string): void => {
     const key = dirKey(partition, path)
     const opening = !expanded.has(key)
@@ -184,6 +236,7 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
   /** Re-read the root and every open folder of the current partition. */
   const refresh = (): void => {
     void controller.load()
+    if (partitionId !== undefined) void loadMemory(partitionId)
     if (partitionId === undefined || !controller.canListFiles) return
     const open = [...expanded].filter(key => key.startsWith(`${partitionId}\u0000`)).map(key => key.slice(partitionId.length + 1))
     for (const path of ['', ...open]) void loadDir(partitionId, path)
@@ -299,6 +352,156 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
     )
   }
 
+  /**
+   * 停止全部: stop every open request in this partition. Each top-most open row
+   * goes as one `cancel_tree`, so a manager and its workers stop together.
+   */
+  const stopAll = async (): Promise<void> => {
+    if (!stopArmed) { setStopArmed(true); return }
+    setStopArmed(false)
+    const openIds = new Set(tasks.map(row => row.task.id))
+    const tops = tasks.map(row => row.task).filter(task => task.parentId === undefined || !openIds.has(task.parentId))
+    setStopping(true)
+    const failures: string[] = []
+    for (const task of tops) {
+      const failure = await controller.control(task.id, 'cancel_tree')
+      if (failure !== undefined) failures.push(`${task.title}: ${failure}`)
+    }
+    setStopping(false)
+    setMessage(failures.length === 0
+      ? { tone: 'ok', text: t('ws.stopAllDone', { n: tops.length }) }
+      : { tone: 'bad', text: t('ws.stopAllFailed', { message: failures.join('；') }) })
+    if (partitionId !== undefined) void loadMemory(partitionId)
+  }
+
+  const addNote = async (): Promise<void> => {
+    const text = noteText.trim()
+    if (partitionId === undefined || text === '' || noteBusy) return
+    setNoteBusy(true)
+    try {
+      await controller.addMemoryNote(partitionId, text)
+      setNoteText('')
+      await loadMemory(partitionId)
+    } catch (error) {
+      setMessage({ tone: 'bad', text: t('ws.mem.failed', { message: error instanceof Error ? error.message : String(error) }) })
+    } finally {
+      setNoteBusy(false)
+    }
+  }
+
+  const forgetNote = async (id: string): Promise<void> => {
+    if (partitionId === undefined) return
+    try {
+      await controller.removeMemoryNote(partitionId, id)
+      await loadMemory(partitionId)
+    } catch (error) {
+      setMessage({ tone: 'bad', text: t('ws.mem.failed', { message: error instanceof Error ? error.message : String(error) }) })
+    }
+  }
+
+  const MANAGER_SOURCE: Readonly<Record<string, string>> = {
+    strongest: t('ws.mem.src.strongest'),
+    hard: t('ws.mem.src.hard'),
+    saved: t('ws.mem.src.saved'),
+    inherit: t('ws.mem.src.inherit'),
+  }
+
+  /** 分区记忆 section: manager model, notes, recent work, worker sessions. */
+  const memorySection = () => {
+    if (!controller.canReadMemory) return null
+    const read = memory !== null && memory.partition === partitionId ? memory : undefined
+    const view = read?.view
+    return (
+      <section className="dshws-sec" data-router-memory>
+        <h3>{t('ws.mem.title')}</h3>
+        {read === undefined
+          ? <div className="dshws-note">{t('ws.loading')}</div>
+          : read.error !== undefined
+            ? <div className="dshws-note" data-tone="error">{t('ws.error', { message: read.error })}</div>
+            : view !== undefined && (
+                <>
+                  <dl className="dshws-kv">
+                    <dt>{t('ws.mem.manager')}</dt>
+                    <dd>
+                      {!view.manager.enabled
+                        ? t('ws.mem.noManager')
+                        : view.manager.route === undefined
+                          ? MANAGER_SOURCE[view.manager.source] ?? view.manager.source
+                          : `${view.manager.route.model}${view.manager.route.reasoningEffort === undefined ? '' : ` · ${view.manager.route.reasoningEffort}`}（${MANAGER_SOURCE[view.manager.source] ?? view.manager.source}）`}
+                    </dd>
+                  </dl>
+                  <h4 className="dshws-h4">{t('ws.mem.notes', { n: view.notes.length })}</h4>
+                  {view.notes.length === 0
+                    ? <div className="dshws-note">{t('ws.mem.noNotes')}</div>
+                    : (
+                        <ul className="dshws-notes">
+                          {view.notes.map(note => (
+                            <li key={note.id} className="dshws-mnote">
+                              <span className="dshws-mtext">{note.text}</span>
+                              <span className="dshws-mmeta">{t(`ws.mem.by.${note.by}`)} · {relativeTime(note.at, now)}</span>
+                              <button type="button" className="dshws-x" title={t('ws.mem.forget')} aria-label={t('ws.mem.forget')}
+                                onClick={() => { void forgetNote(note.id) }}>×</button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                  <form className="dshws-addnote" onSubmit={(event) => { event.preventDefault(); void addNote() }}>
+                    <input value={noteText} maxLength={600} placeholder={t('ws.mem.placeholder')}
+                      onChange={(event) => { setNoteText(event.target.value) }} />
+                    <button type="submit" className="dshws-btn" disabled={noteBusy || noteText.trim() === ''}>{t('ws.mem.add')}</button>
+                  </form>
+                  <h4 className="dshws-h4">{t('ws.mem.work', { n: view.logTotal })}</h4>
+                  {view.log.length === 0
+                    ? <div className="dshws-note">{t('ws.mem.noWork')}</div>
+                    : (
+                        <ul className="dshws-tasks">
+                          {view.log.slice(0, 12).map(entry => {
+                            const open = entry.sessionId !== undefined && onOpenSession !== undefined
+                              ? () => { onOpenSession(entry.sessionId!) }
+                              : undefined
+                            return (
+                              <li key={`${entry.taskId}-${entry.at}`} className="dshws-task" data-link={open === undefined ? undefined : ''}
+                                onClick={open}>
+                                <div className="dshws-tt">
+                                  <span className="dshws-tn">{entry.subject}</span>
+                                  <span className="dshws-ts" data-tone={entry.state === 'failed' || entry.state === 'cancelled' ? 'blocked' : undefined}>
+                                    {t(`ws.mem.state.${entry.state}`)}
+                                  </span>
+                                </div>
+                                <span className="dshws-tm">
+                                  {[relativeTime(entry.at, now), entry.level === 'manager' ? 'manager' : entry.model, entry.summary ?? entry.error]
+                                    .filter(part => part !== undefined && part !== '').join(' · ')}
+                                </span>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      )}
+                  <h4 className="dshws-h4">{t('ws.mem.sessions', { n: view.sessions.length })}</h4>
+                  {view.sessions.length === 0
+                    ? <div className="dshws-note">{t('ws.mem.noSessions')}</div>
+                    : (
+                        <ul className="dshws-tasks">
+                          {view.sessions.slice(0, 12).map((ref) => {
+                            const open = onOpenSession !== undefined ? () => { onOpenSession(ref.sessionId) } : undefined
+                            return (
+                              <li key={ref.sessionId} className="dshws-task" data-link={open === undefined ? undefined : ''} onClick={open}>
+                                <div className="dshws-tt">
+                                  <span className="dshws-tn">{ref.subject}</span>
+                                  <span className="dshws-ts">{t(`ws.mem.state.${ref.state}`)}</span>
+                                </div>
+                                <span className="dshws-tm">{[ref.taskId, relativeTime(ref.updatedAt, now), ref.summary].filter(part => part !== undefined && part !== '').join(' · ')}</span>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      )}
+                </>
+              )}
+      </section>
+    )
+  }
+
   const rootListing = partitionId === undefined ? undefined : dirs.get(dirKey(partitionId, ''))
   const include = current?.include ?? (rootListing?.status === 'ok' ? rootListing.listing.include : undefined)
   const exclude = current?.exclude ?? (rootListing?.status === 'ok' ? rootListing.listing.exclude : undefined)
@@ -375,11 +578,21 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
                       </ol>
                     </section>
                     <section className="dshws-sec">
-                      <h3>{t('ws.tasks')}</h3>
+                      <div className="dshws-sech">
+                        <h3>{t('ws.tasks')}</h3>
+                        {tasks.length > 0 && controller.canControl && (
+                          <button type="button" className="dshws-btn" data-tone="stop" data-armed={stopArmed ? '' : undefined}
+                            disabled={stopping} title={t('ws.stopAllHint')} onClick={() => { void stopAll() }}>
+                            {stopping ? t('ws.stopping') : stopArmed ? t('ws.stopAllConfirm', { n: tasks.length }) : t('ws.stopAll')}
+                          </button>
+                        )}
+                      </div>
+                      {message !== null && <div className="dshws-note" data-tone={message.tone === 'bad' ? 'error' : undefined} role="status">{message.text}</div>}
                       {tasks.length === 0
                         ? <span className="dshws-sub">{t('ws.noTasks')}</span>
                         : <ul className="dshws-tasks">{tasks.map(taskRow)}</ul>}
                     </section>
+                    {memorySection()}
                   </div>
                 </div>
               )}

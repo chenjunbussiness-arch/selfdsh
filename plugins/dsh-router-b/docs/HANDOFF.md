@@ -185,3 +185,15 @@ Copy-Item "$bak\*" "C:\Users\13558\.dsh\profiles\desktop\" -Force
 
 ### 生效方式
 宿主侧改的是 `packages/host-router/src`，`lib/` 没动：在 Windows 上跑 `scripts/safe-build-host.sh` 生成 `lib.next/`，再跑 `scripts/safe-restart.sh`。界面的 `lib/client.js` 已经重新打包。
+
+## routing → manager → session → worker（第一期整体改造）
+
+整体方案和后续分期见 [ROADMAP.md](./ROADMAP.md)。本期改动：
+
+- **路由快速转发**：作战室只识别分区，用户原话加上下文按分区各发一条 `route_task`，跨分区用 `depends_on`。只有标「无 manager」的分区由路由自己拆。
+- **分区记忆**（`host-router/src/memory.ts`，存于 `<boardDir>/memory/<分区>.json`）：常驻笔记（最多 80 条）和工作日志（最多 300 条）。任务结束时自动记录，首次启动时用已结束的任务回填。每次派 manager 都把「本分区记得什么」注入提示词。
+- **manager 新工具**：`session_list`、`session_read`（只读本路由派出的 session）、`partition_memory`（read / note / forget）。
+- **manager 模型**：`tiers.json` 新增 `manager` 字段，默认 `strongest`。取值顺序：面板指定的模型 → 已保存的「高级」档（用最高推理档）→ 运行时可用模型里按名字最强的一个（opus/ultra/max/pro/reasoner/thinking/r1/large，其次比版本号、推理档数）→ 跟随默认模型。实际用的模型写在任务行的 `tierReason` 里，面板「模型档位」的 Manager 一行也会显示。
+- **控制面**：`task_control` 新增 `cancel_tree`（停止该任务和它下面所有没结束的任务，先停上层）。面板发出的 `cancel` 和 `cancel_tree` 会标「人工停止」，并通知还在跑的上级 manager 不要重派。面板「停止」和「停止整个需求」要点两次确认，界面先变，失败再回滚。工作区页有「停止全部」。已停止的任务可以重试。
+- **HTTP**：`GET/POST/DELETE /api/router/memory`（读分区记忆、加笔记、删笔记）。
+- **部署**：host 的 `lib/` 不在仓库里重建，合并后执行 `scripts/safe-build-host.sh`，再执行 `scripts/safe-restart.sh`。client 的 `lib/client.js` 已重建并提交。

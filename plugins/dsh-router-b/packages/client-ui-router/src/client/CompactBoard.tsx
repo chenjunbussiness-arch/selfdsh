@@ -435,6 +435,7 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-ico svg{width:16px;height:16px;display:block}
 .dshrc-tabs{display:flex;align-items:center;gap:var(--sp-1);flex:none;padding:var(--sp-1) var(--sp-3) var(--sp-2) var(--sp-4);overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--c-line-soft)}
 .dshrc-tabs::-webkit-scrollbar{display:none}
+.dshrc-find{flex:0 1 160px;min-width:72px;height:24px;margin-left:auto;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px}
 .dshrc-tab{flex:none;height:var(--h-ctl);padding:0 var(--sp-3);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text2);font-size:12px;font-weight:500;line-height:var(--h-ctl);cursor:pointer;white-space:nowrap;transition:background-color .12s ease,color .12s ease}
 .dshrc-tab:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-tab:active{background:var(--c-press)}
@@ -500,9 +501,11 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-notice[data-tone="bad"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
 .dshrc-empty{padding:36px var(--sp-4);color:var(--c-text3);text-align:center;font-size:12px}
 /* Row actions: hidden until the row is hovered or focused, so a quiet list stays quiet. */
-.dshrc-acts-row{flex:none;display:flex;align-items:center;gap:2px;opacity:0;transition:opacity .12s ease}
+.dshrc-acts-row{flex:none;display:flex;align-items:center;gap:2px;opacity:.55;transition:opacity .12s ease}
 .dshrc-row:hover .dshrc-acts-row,.dshrc-row:focus-within .dshrc-acts-row,.dshrc-acts-row[data-busy]{opacity:1}
 .dshrc-act{height:22px;margin-block:-3px;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:var(--dsw-alias-bg-base,transparent);color:var(--c-text2);font-size:11px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.dshrc-act[data-tone="stop"]:hover{color:var(--st-failed-text)}
+.dshrc-act[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
 .dshrc-act:hover:not(:disabled){color:var(--c-text);background:var(--c-hover)}
 .dshrc-act:active:not(:disabled){background:var(--c-press)}
 .dshrc-wait{display:flex;align-items:center;gap:var(--sp-2);min-width:0;margin:-4px 0 var(--sp-1);padding:0 var(--sp-3) 0 28px;font-size:12px;line-height:16px;color:var(--c-text3)}
@@ -554,6 +557,8 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   const sessionFace = sessions ?? NO_SESSIONS
   const sessionList = useSyncExternalStore(sessionFace.list.subscribe, sessionFace.list.getSnapshot, sessionFace.list.getSnapshot)
   const [tab, setTab] = useState<BoardTab>('active')
+  // Filter text: a family stays when any of its tasks matches by title, id or workspace.
+  const [query, setQuery] = useState('')
   // Families the user folded by hand. Empty means every family is open, so the
   // worker rows are visible the moment the tree renders — no click per family.
   // The set holds `f:` keys and outlives re-renders, so a board poll can never
@@ -575,6 +580,14 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   const [formReason, setFormReason] = useState('')
   const [formPrereq, setFormPrereq] = useState('')
   const [formError, setFormError] = useState('')
+  // The stop button armed by a first click (`${taskId}:${action}`); it disarms by itself.
+  const [arming, setArming] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (arming === null) return
+    const timer = setTimeout(() => { setArming(null) }, 4000)
+    return () => { clearTimeout(timer) }
+  }, [arming])
 
   useEffect(() => {
     if (notice === null) return
@@ -686,7 +699,10 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     // One row per task family, not one per task: a manager and the workers it
     // dispatched are one piece of work, and the caption count must agree with
     // the rows actually drawn.
-    const families = buildFamilies(tasks, live)
+    const needle = query.trim().toLowerCase()
+    const matches = (task: TaskView): boolean => [task.title, task.id, nameOf.get(task.partitionId) ?? '']
+      .some(text => text.toLowerCase().includes(needle))
+    const families = buildFamilies(tasks, live).filter(family => needle === '' || family.members.some(matches))
     const groupFams = new Map<Group, Family[]>()
     for (const group of Object.keys(TAB_GROUPS).flatMap(id => TAB_GROUPS[id as BoardTab])) groupFams.set(group, [])
     for (const family of families) {
@@ -695,9 +711,11 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     }
     const counts = new Map<Group, number>()
     for (const [group, list] of groupFams) counts.set(group, list.length)
-    const anyLive = [...counts].some(([group, count]) => count > 0 && isLive(group))
+    const anyShown = [...counts].some(([group, count]) => count > 0 && isLive(group))
+    // `anyLive` drives polling, so it reads the whole board, not the filtered rows.
+    const anyLive = needle === '' ? anyShown : buildFamilies(tasks, live).some(family => isLive(family.group))
     return { live, nameOf, workerName, titleOf, groupFams, counts, anyLive }
-  }, [board])
+  }, [board, query])
 
   // Checklists are not in the board file: poll while something runs.
   useEffect(() => {
@@ -842,25 +860,57 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     return lines
   }
 
+  /** Whether any other row names this one as its parent. */
+  const hasChildren = (task: TaskView): boolean => (board?.tasks ?? []).some(other => other.parentId === task.id)
+
   /**
-   * Hover actions of one row: 挂起 for live work, 重试 for a failure. They act
-   * on that row's own task, so a family row acts on its headline task and each
-   * worker row on its worker.
+   * A stop asks twice: the first click arms the button (it turns red and says
+   * 确认停止?), the second within a few seconds sends it.
+   */
+  const stop = (task: TaskView, action: 'cancel' | 'cancel_tree'): void => {
+    const key = `${task.id}:${action}`
+    if (arming !== key) { setArming(key); return }
+    setArming(null)
+    void act(task, action)
+  }
+
+  /**
+   * Actions of one row: 停止 and 挂起 for open work, 停止整个需求 on a row
+   * that has tasks under it, 重试 for a failure or a stop. They act on that
+   * row's own task, so a family row acts on its headline task and each worker
+   * row on its worker.
    */
   const rowActs = (task: TaskView, group: Group) => {
     if (!controller.canControl) return null
+    const open = group === 'running' || group === 'queued' || group === 'blocked' || group === 'suspended'
     const canSuspend = group === 'running' || group === 'queued'
-    const canRetry = group === 'failed'
-    if (!canSuspend && !canRetry) return null
+    const canRetry = group === 'failed' || group === 'cancelled'
+    const canStopTree = open && hasChildren(task)
+    if (!open && !canRetry) return null
     const anyBusy = [...busy].some(key => key.startsWith(`${task.id}:`))
+    const armed = (action: string): boolean => arming === `${task.id}:${action}`
     return (
-      <span className="dshrc-acts-row" data-busy={anyBusy || suspending === task.id ? '' : undefined}
+      <span className="dshrc-acts-row" data-busy={anyBusy || suspending === task.id || arming?.startsWith(`${task.id}:`) === true ? '' : undefined}
         onClick={(event) => { event.stopPropagation() }}>
         {canSuspend && (
           <button type="button" className="dshrc-act" title={t('act.suspendHint')}
             aria-expanded={suspending === task.id} disabled={anyBusy}
             onClick={() => { openSuspend(task) }}>
             {t('act.suspend')}
+          </button>
+        )}
+        {open && (
+          <button type="button" className="dshrc-act" data-tone="stop" data-armed={armed('cancel') ? '' : undefined}
+            title={t('act.stopHint')} disabled={anyBusy}
+            onClick={() => { stop(task, 'cancel') }}>
+            {armed('cancel') ? t('act.confirmStop') : t('act.cancel')}
+          </button>
+        )}
+        {canStopTree && (
+          <button type="button" className="dshrc-act" data-tone="stop" data-armed={armed('cancel_tree') ? '' : undefined}
+            title={t('act.stopTreeHint')} disabled={anyBusy}
+            onClick={() => { stop(task, 'cancel_tree') }}>
+            {armed('cancel_tree') ? t('act.confirmStop') : t('act.cancel_tree')}
           </button>
         )}
         {canRetry && (
@@ -1148,6 +1198,9 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
             {t(item.key)}
           </button>
         ))}
+        <input className="dshrc-find" type="search" value={query} placeholder={t('board.find')} aria-label={t('board.find')}
+          onChange={(event) => { setQuery(event.target.value) }}
+          onKeyDown={(event) => { if (event.key === 'Escape') setQuery('') }} />
       </div>
       {failed && (
         <div className="dshrc-err" role="alert" data-router-error>

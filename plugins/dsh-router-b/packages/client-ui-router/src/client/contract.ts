@@ -376,6 +376,59 @@ export interface FileListingView {
   readonly exclude: readonly string[]
 }
 
+/** One standing fact a partition remembers. */
+export interface MemoryNoteView {
+  readonly id: string
+  readonly at: string
+  readonly text: string
+  /** Who wrote it: the partition's manager, a human from the panel, or the router. */
+  readonly by: 'manager' | 'human' | 'router'
+  readonly taskId?: string
+}
+
+/** One finished task in a partition's work log. */
+export interface WorkEntryView {
+  readonly at: string
+  readonly taskId: string
+  readonly rootId?: string
+  readonly level: 'manager' | 'worker'
+  readonly subject: string
+  readonly state: string
+  readonly summary?: string
+  readonly touched?: readonly string[]
+  readonly left?: string
+  readonly error?: string
+  readonly sessionId?: string
+  readonly model?: string
+}
+
+/** One worker session of a partition. */
+export interface SessionRefView {
+  readonly taskId: string
+  readonly sessionId: string
+  readonly state: string
+  readonly subject: string
+  readonly updatedAt: string
+  readonly summary?: string
+}
+
+/** What a partition's manager knows: `GET /api/router/memory?partition=`. */
+export interface PartitionMemoryView {
+  readonly partition: string
+  readonly notes: readonly MemoryNoteView[]
+  /** Newest first, at most 60. */
+  readonly log: readonly WorkEntryView[]
+  readonly logTotal: number
+  /** Worker sessions, newest first. */
+  readonly sessions: readonly SessionRefView[]
+  readonly manager: {
+    readonly enabled: boolean
+    /** `strongest | hard | saved | inherit`. */
+    readonly source: string
+    readonly route?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+  }
+}
+
 /** A produced file the user may download. */
 export interface ArtifactRef {
   /** Display file name. */
