@@ -22,6 +22,7 @@
  */
 
 import type { RouterTask, TaskState } from './board.ts'
+import type { GroupProgress } from './order.ts'
 import type { Partition } from './config.ts'
 import type { LoggerService, SessionEventLike, SessionQueryService } from './types.ts'
 
@@ -155,6 +156,17 @@ export interface TaskView {
   readonly error?: string
   /** Why a `blocked` row is parked (`task_control block` value). */
   readonly resumeNote?: string
+  /** Explicit prerequisites (`depends_on`). */
+  readonly dependsOn?: readonly string[]
+  /** Ordered phase among siblings. */
+  readonly stage?: number
+  /** A queued row held back by its order: the open prerequisites it waits for. */
+  readonly waitingFor?: readonly string[]
+  /** A suspended row: why, and what it waits for. */
+  readonly suspendReason?: string
+  readonly waitingOn?: readonly string[]
+  /** Root task of the request this row belongs to. */
+  readonly rootId?: string
   /** Difficulty tier chosen before dispatch (`easy | medium | hard`). */
   readonly tier?: 'easy' | 'medium' | 'hard'
   /** How the tier was decided and why. */
@@ -184,6 +196,10 @@ export interface RouterSnapshot {
     readonly queued: number
   }[]
   readonly tasks: readonly TaskView[]
+  /** Progress per request (root task). */
+  readonly groups?: readonly GroupProgress[]
+  /** Recent progress notices, newest first. */
+  readonly notices?: readonly { readonly at: string; readonly text: string }[]
 }
 
 /** Coarse progress per state; the UI shows a bar, the todo ratio refines it. */
@@ -198,6 +214,7 @@ const STATE_PROGRESS: Readonly<Record<TaskState, number>> = {
   blocked: 1,
   cancelled: 1,
   interrupted: 0.4,
+  suspended: 0.5,
 }
 
 /** Fold `todo/write` events into the worker's latest list. */
@@ -283,6 +300,14 @@ export interface SnapshotDeps {
   readonly isLive: (task: RouterTask) => boolean
   /** Read a log at most once per cache window. */
   readonly readLog: (sessionId: string) => Promise<readonly SessionEventLike[]>
+  /** Open prerequisites of a queued row, or undefined when it may start. */
+  readonly waitingFor?: (task: RouterTask) => readonly string[] | undefined
+  /** Root task id of a row. */
+  readonly rootOf?: (task: RouterTask) => string
+  /** Per-request progress, computed after corrections. */
+  readonly progress?: () => readonly GroupProgress[]
+  /** Recent notices. */
+  readonly notices?: () => readonly { readonly at: string; readonly text: string }[]
   /** Persist a state correction discovered while folding. */
   readonly correctState?: (task: RouterTask, change: { state: TaskState; result?: string; error?: string }) => Promise<void>
 }
@@ -365,6 +390,7 @@ async function viewOf(task: RouterTask, deps: SnapshotDeps): Promise<TaskView> {
     }
   }
   const todos = facts?.todos ?? { todos: null, done: 0, total: 0, ratio: '0/0' }
+  const waitingFor = state === 'queued' ? deps.waitingFor?.(task) : undefined
   // With a todo list, the ratio is a finer signal than the state bar.
   const progress = state === 'running' && todos.total > 0
     ? Math.max(STATE_PROGRESS.running, 0.4 + 0.5 * (todos.done / todos.total))
@@ -389,6 +415,12 @@ async function viewOf(task: RouterTask, deps: SnapshotDeps): Promise<TaskView> {
     ...task.verifyOutput === undefined ? {} : { verifyOutput: task.verifyOutput },
     ...task.error === undefined ? {} : { error: task.error },
     ...task.resumeNote === undefined ? {} : { resumeNote: task.resumeNote },
+    ...(task.dependsOn?.length ?? 0) === 0 ? {} : { dependsOn: task.dependsOn! },
+    ...task.stage === undefined ? {} : { stage: task.stage },
+    ...waitingFor === undefined || waitingFor.length === 0 ? {} : { waitingFor },
+    ...task.state !== 'suspended' || task.suspendReason === undefined ? {} : { suspendReason: task.suspendReason },
+    ...task.state !== 'suspended' || (task.waitingOn?.length ?? 0) === 0 ? {} : { waitingOn: task.waitingOn! },
+    ...deps.rootOf === undefined ? {} : { rootId: deps.rootOf(task) },
     ...task.tier === undefined ? {} : { tier: task.tier },
     ...task.tierSource === undefined ? {} : { tierSource: task.tierSource },
     ...task.tierReason === undefined ? {} : { tierReason: task.tierReason },
@@ -447,5 +479,7 @@ export async function buildSnapshot(
     counts,
     partitions,
     tasks: views,
+    ...deps.progress === undefined ? {} : { groups: deps.progress() },
+    ...deps.notices === undefined ? {} : { notices: deps.notices() },
   }
 }
