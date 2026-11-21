@@ -71,6 +71,15 @@ export function VpnPage({ controller, t, initialEdit }: VpnPageProps): ReactNode
   const running = current === 'connecting' || current === 'connected'
   const install = status?.install
   const blockedByInstall = selected !== undefined && selected.type !== 'custom' && install !== undefined && (!install.installed || (selected.type === 'token-url' && !install.cookieSupport))
+  // Why 连接 is greyed out, in words: a disabled button alone does not say what to fix.
+  const connectBlocker = selected === undefined
+    ? t('connect.noProfile')
+    : !selected.secretConfigured && selected.type !== 'custom'
+      ? t(selected.type === 'token-url' ? 'connect.noUrl' : 'connect.noPassword')
+      : blockedByInstall
+        ? t(install?.installed === true ? 'connect.oldClient' : 'connect.noClient')
+        : undefined
+  const [copied, setCopied] = useState(false)
 
   const run = async (action: () => Promise<string | undefined>): Promise<void> => {
     setActionError(undefined)
@@ -79,10 +88,13 @@ export function VpnPage({ controller, t, initialEdit }: VpnPageProps): ReactNode
   }
 
   const logRef = useRef<HTMLDivElement | null>(null)
+  // Follow new lines only while the reader is at the bottom; scrolling up to read
+  // an older line must not be yanked back down by the next poll.
+  const following = useRef(true)
   const lastLog = snapshot?.logs[snapshot.logs.length - 1]?.t
   useEffect(() => {
     const element = logRef.current
-    if (element !== null) element.scrollTop = element.scrollHeight
+    if (element !== null && following.current) element.scrollTop = element.scrollHeight
   }, [lastLog])
 
   return (
@@ -152,21 +164,23 @@ export function VpnPage({ controller, t, initialEdit }: VpnPageProps): ReactNode
                   {running
                     ? (
                       <button type="button" className="dshv-btn" data-kind="danger" disabled={state.busy} onClick={() => { void run(() => controller.disconnect()) }}>
-                        {current === 'connecting' ? t('action.disconnect') : t('action.disconnect')}
+                        {state.busy ? t('action.disconnecting') : t('action.disconnect')}
                       </button>
                     )
                     : (
                       <button
                         type="button" className="dshv-btn" data-kind="primary"
-                        disabled={state.busy || selected === undefined || !selected.secretConfigured && selected.type !== 'custom' || blockedByInstall}
+                        disabled={state.busy || connectBlocker !== undefined}
+                        title={connectBlocker}
                         onClick={() => { if (selected !== undefined) void run(() => controller.connect(selected.id)) }}
                       >
-                        {selected === undefined ? t('action.connect') : t('action.connect.profile', { name: selected.name })}
+                        {state.busy ? t('action.connecting') : selected === undefined ? t('action.connect') : t('action.connect.profile', { name: selected.name })}
                       </button>
                     )}
                 </div>
               </div>
 
+              {!running && connectBlocker !== undefined && selected !== undefined && <p className="dshv-hint">{connectBlocker}</p>}
               {actionError !== undefined && <p className="dshv-form-error" role="alert">{t('action.failed', { message: actionError })}</p>}
 
               {current === 'failed' && status.error !== undefined && (
@@ -179,7 +193,7 @@ export function VpnPage({ controller, t, initialEdit }: VpnPageProps): ReactNode
                   <span>{t('install.missing.body')}</span>
                   <div className="dshv-alert-row">
                     <pre>{install.hint}</pre>
-                    <button type="button" className="dshv-btn" data-size="sm" onClick={() => { void navigator.clipboard?.writeText(install.hint) }}>{t('install.copy')}</button>
+                    <button type="button" className="dshv-btn" data-size="sm" onClick={() => { void navigator.clipboard?.writeText(install.hint).then(() => { setCopied(true); setTimeout(() => { setCopied(false) }, 1500) }, () => undefined) }}>{t(copied ? 'install.copied' : 'install.copy')}</button>
                   </div>
                 </div>
               )}
@@ -246,7 +260,13 @@ export function VpnPage({ controller, t, initialEdit }: VpnPageProps): ReactNode
               <span className="dshv-block-title">{t('logs.title')}</span>
               <span className="dshv-hint">{t('logs.hint', { count: 200 })}</span>
             </div>
-            <div className="dshv-log-body" ref={logRef} role="log" aria-live="off">
+            <div
+              className="dshv-log-body" ref={logRef} role="log" aria-live="off"
+              onScroll={(event) => {
+                const element = event.currentTarget
+                following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24
+              }}
+            >
               {(snapshot?.logs.length ?? 0) === 0
                 ? <span className="dshv-log-empty">{t('logs.empty')}</span>
                 : snapshot?.logs.map((line, index) => (

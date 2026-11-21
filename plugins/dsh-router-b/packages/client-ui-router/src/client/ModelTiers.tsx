@@ -211,6 +211,12 @@ export function ModelTiers({ wide = true }: { wide?: boolean }) {
     }
   }, [])
   useEffect(() => { void load() }, [load])
+  // A confirmation fades back to the footer's standing hint; an error stays put.
+  useEffect(() => {
+    if (msg === null || msg.bad === true || busy) return
+    const timer = setTimeout(() => { setMsg(previous => (previous === msg ? null : previous)) }, 4000)
+    return () => { clearTimeout(timer) }
+  }, [msg, busy])
   useEffect(() => { if (open) void load() }, [open, load])
 
   const save = useCallback(async (body: Record<string, unknown>, done: string) => {
@@ -223,8 +229,11 @@ export function ModelTiers({ wide = true }: { wide?: boolean }) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const value = await response.json() as TierDoc & { error?: { message: string } }
-      if (!response.ok) throw new Error(value.error?.message ?? `HTTP ${String(response.status)}`)
+      // A proxy error page is HTML, not JSON: report its status, not a parse error.
+      const text = await response.text()
+      let value: (TierDoc & { error?: { message: string } }) | undefined
+      try { value = JSON.parse(text) as TierDoc & { error?: { message: string } } } catch { value = undefined }
+      if (!response.ok || value === undefined) throw new Error(value?.error?.message ?? `HTTP ${String(response.status)}`)
       setDoc(value)
       setMsg({ text: done })
     } catch (error) {

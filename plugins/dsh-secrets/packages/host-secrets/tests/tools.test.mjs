@@ -320,3 +320,14 @@ test('leak scan: no fake value in any return, render, log, or error across all t
   assert.ok((await readdir(home)).every(file => !file.includes('.tmp-') && !file.endsWith('.lock')))
   await chmod(home, 0o700)
 })
+
+test('a missing name suggests close stored names, and only names', async () => {
+  const { notFound } = await import('../tools.js')
+  const entries = { GITHUB_TOKEN: { value: 'v1' }, OPENAI_KEY: { value: 'v2' }, B: { value: 'v3' } }
+  assert.equal(notFound('github_token', entries).message, 'secret not found: github_token (did you mean GITHUB_TOKEN?)')
+  assert.equal(notFound('GITHUB_TOKN', entries).message, 'secret not found: GITHUB_TOKN (did you mean GITHUB_TOKEN?)')
+  assert.equal(notFound('OPENAI', entries).message, 'secret not found: OPENAI (did you mean OPENAI_KEY?)')
+  assert.equal(notFound('NOPE', entries).message, 'secret not found: NOPE')
+  assert.equal(notFound('A', entries).message, 'secret not found: A')
+  assert.doesNotMatch(notFound('GITHUB', entries).message, /v1|v2|v3/)
+})
