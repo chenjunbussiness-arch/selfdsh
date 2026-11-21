@@ -5,7 +5,7 @@
 > 未 restart / enable / disable 任何服务，未改动 unit、nginx 配置，未 reload nginx，未 kill 进程。
 > 除本报告外无任何写操作。
 > 主机：Ubuntu 22.04.5 LTS（jammy），kernel `5.15.0-198-generic`，hostname `iZ7xv8t4x0ib6a8rktjo0eZ`，
-> 网卡地址 `172.23.18.35/20`（eth0），公网入口 `8.134.170.38`（见下）。
+> 网卡地址 `<内网地址>/20`（eth0），公网入口 `8.134.170.38`（见下）。
 > 审计时间：2026-11-20 15:17–15:30 CST。
 
 **一句话结论**：这台机器上 DSH 的入口是四层叠加的
@@ -596,7 +596,7 @@ EOF
 | 项 | 原因 |
 |---|---|
 | 云安全组是否放行 8443 | 控制台信息，机器内部无 API/凭据可查；`8.134.170.38` 不在任何本机网卡上，判断为 EIP/NAT |
-| `8.134.170.38` 的绑定方式（EIP / NAT / SLB） | 同上，仅从 `ip addr` 看到内网 `172.23.18.35` |
+| `8.134.170.38` 的绑定方式（EIP / NAT / SLB） | 同上，仅从 `ip addr` 看到内网 `<内网地址>` |
 | `dsh-fix-zod` 在新机的必要性 | 取决于新机 pnpm store 版本与 @deepseek-ai/dsh-web 的依赖布局，需装完实测 |
 | `.credentials.yaml` / `.env` 的具体密钥值 | 按只读与脱敏要求未读取/未打印 |
 | `dsh-web-gate.mjs` 是否会随 DSH 升级失效 | 它依赖 dsh web 日志格式（`dsh web: http://...?token=...`）；DSH 若改日志格式，gate 需同步改 |

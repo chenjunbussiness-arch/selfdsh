@@ -29,6 +29,8 @@ module.exports = __toCommonJS(client_exports);
 var import_react2 = require("react");
 
 // src/client/controller.ts
+var OK_NOTICE_MS = 3e3;
+var hidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
 var INITIAL = { data: null, origin: "mock", status: "loading", probing: [] };
 var EgressController = class {
   /**
@@ -47,6 +49,7 @@ var EgressController = class {
   active;
   mock;
   timer;
+  noticeTimer;
   disposed = false;
   /** Current state; stable between changes. */
   getSnapshot = () => this.state;
@@ -69,9 +72,12 @@ var EgressController = class {
   /** First read, then poll. */
   start() {
     void this.refresh();
-    if (this.pollMs > 0) this.timer = setInterval(() => {
-      void this.refresh(true);
-    }, this.pollMs);
+    if (this.pollMs > 0) {
+      this.timer = setInterval(() => {
+        if (!hidden()) void this.refresh(true);
+      }, this.pollMs);
+      if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onVisible);
+    }
     return () => {
       this.dispose();
     };
@@ -80,14 +86,20 @@ var EgressController = class {
   dispose() {
     this.disposed = true;
     if (this.timer !== void 0) clearInterval(this.timer);
+    if (this.noticeTimer !== void 0) clearTimeout(this.noticeTimer);
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onVisible);
     this.listeners.clear();
   }
+  onVisible = () => {
+    if (!hidden()) void this.refresh(true);
+  };
   /**
    * Read the state, preferring the real bridge.
    * @param quiet - true for background polls: do not flash the loading state.
    */
   async refresh(quiet = false) {
     if (!quiet && this.state.data === null) this.set({ status: "loading" });
+    if (!quiet) this.set({ refreshing: true });
     try {
       const data = await this.host.load();
       this.active = this.host;
@@ -103,16 +115,30 @@ var EgressController = class {
       } else {
         this.set({ bridgeError: message });
       }
+    } finally {
+      if (!quiet) this.set({ refreshing: false });
+    }
+  }
+  /** Show one toast line; a success clears itself after a moment. */
+  notify(notice) {
+    if (this.noticeTimer !== void 0) clearTimeout(this.noticeTimer);
+    this.noticeTimer = void 0;
+    this.set({ notice });
+    if (notice.kind === "ok") {
+      this.noticeTimer = setTimeout(() => {
+        if (this.state.notice === notice) this.dismissNotice();
+      }, OK_NOTICE_MS);
     }
   }
   /** Run one write and fold its answer (or error) into the state. */
   async act(run, okText) {
     try {
       const data = await run();
-      this.set({ data, notice: { kind: "ok", text: okText } });
+      this.set({ data });
+      this.notify({ kind: "ok", text: okText });
       return true;
     } catch (error) {
-      this.set({ notice: { kind: "error", text: error instanceof Error ? error.message : String(error) } });
+      this.notify({ kind: "error", text: error instanceof Error ? error.message : String(error) });
       return false;
     }
   }
@@ -146,7 +172,7 @@ var EgressController = class {
       const { state } = await this.active.probe(id);
       this.set({ data: state });
     } catch (error) {
-      this.set({ notice: { kind: "error", text: error instanceof Error ? error.message : String(error) } });
+      this.notify({ kind: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
       this.set({ probing: this.state.probing.filter((entry) => entry !== id) });
     }
@@ -164,7 +190,45 @@ function EgressIcon({ size = 18, active = false }) {
 
 // src/client/EgressPanel.tsx
 var import_react = require("react");
+
+// src/client/input.ts
+function hostFromInput(raw) {
+  const text = raw.trim();
+  if (text === "") return "";
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `http://${text}`;
+  try {
+    const host = new URL(withScheme).hostname;
+    if (host !== "") return host.replace(/^\[|\]$/g, "").toLowerCase();
+  } catch {
+  }
+  return text.toLowerCase();
+}
+function parseProxyInput(raw) {
+  const text = raw.trim();
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text);
+  const hasPort = /:[0-9]{1,5}\/?$/.test(text) && !/^[0-9a-f:]+$/i.test(text);
+  if (!hasScheme && !hasPort && !text.includes("@")) return void 0;
+  let url;
+  try {
+    url = new URL(hasScheme ? text : `http://${text}`);
+  } catch {
+    return void 0;
+  }
+  if (url.hostname === "") return void 0;
+  const scheme = url.protocol.replace(/:$/, "").toLowerCase();
+  const type = scheme === "socks5" || scheme === "socks5h" || scheme === "socks" ? "socks5" : scheme === "https" ? "https" : scheme === "http" ? "http" : void 0;
+  return {
+    ...hasScheme && type !== void 0 ? { type } : {},
+    host: url.hostname.replace(/^\[|\]$/g, ""),
+    ...url.port === "" ? {} : { port: url.port },
+    ...url.username === "" ? {} : { username: decodeURIComponent(url.username) },
+    ...url.password === "" ? {} : { password: decodeURIComponent(url.password) }
+  };
+}
+
+// src/client/EgressPanel.tsx
 var import_jsx_runtime2 = require("react/jsx-runtime");
+var LOG_ROWS = 30;
 var TYPES = ["http", "https", "socks5"];
 function age(iso, now) {
   if (iso === void 0) return "";
@@ -215,6 +279,19 @@ function ExitForm({ exit, t, saving, onSave, onCancel }) {
   const [password, setPassword] = (0, import_react.useState)("");
   const [clearAuth, setClearAuth] = (0, import_react.useState)(false);
   const [error, setError] = (0, import_react.useState)();
+  const absorb = (text) => {
+    const parsed = parseProxyInput(text);
+    if (parsed === void 0) return false;
+    setHost(parsed.host);
+    if (parsed.type !== void 0) setType(parsed.type);
+    if (parsed.port !== void 0) setPort(parsed.port);
+    if (parsed.username !== void 0) {
+      setUsername(parsed.username);
+      setClearAuth(false);
+    }
+    if (parsed.password !== void 0) setPassword(parsed.password);
+    return true;
+  };
   const submit = () => {
     const portNumber = /^[0-9]{1,5}$/.test(port.trim()) ? Number(port.trim()) : 0;
     if (name.trim() === "") return setError(t("form.err.name"));
@@ -232,74 +309,103 @@ function ExitForm({ exit, t, saving, onSave, onCancel }) {
       ...!clearAuth && password !== "" ? { password } : {}
     });
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("form", { className: "dshe-form", onSubmit: (event) => {
-    event.preventDefault();
-    submit();
-  }, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshe-form-title", children: t(exit === void 0 ? "form.new" : "form.edit") }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshe-form-grid", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", style: { gridColumn: "span 2" }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.name") }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { className: "dshe-input", value: name, maxLength: 40, onChange: (e) => {
-          setName(e.target.value);
-        }, placeholder: "Tokyo", autoFocus: exit === void 0 })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.type") }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("select", { className: "dshe-input", value: type, onChange: (e) => {
-          setType(e.target.value);
-        }, children: TYPES.map((value) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value, children: value === "socks5" ? "socks5 (socks5h)" : value }, value)) })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", style: { gridColumn: "span 2" }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.host") }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { className: "dshe-input", value: host, onChange: (e) => {
-          setHost(e.target.value);
-        }, placeholder: "proxy.example.com", spellCheck: false })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.port") }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { className: "dshe-input", value: port, inputMode: "numeric", onChange: (e) => {
-          setPort(e.target.value);
-        }, placeholder: "1080" })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
-          t("form.username"),
-          " ",
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("em", { children: t("form.optional") })
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
+    "form",
+    {
+      className: "dshe-form",
+      onSubmit: (event) => {
+        event.preventDefault();
+        submit();
+      },
+      onKeyDown: (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          onCancel();
+        }
+      },
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshe-form-title", children: t(exit === void 0 ? "form.new" : "form.edit") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshe-form-grid", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", style: { gridColumn: "span 2" }, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.name") }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { className: "dshe-input", value: name, maxLength: 40, onChange: (e) => {
+              setName(e.target.value);
+            }, placeholder: "Tokyo", autoFocus: exit === void 0 })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.type") }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("select", { className: "dshe-input", value: type, onChange: (e) => {
+              setType(e.target.value);
+            }, children: TYPES.map((value) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value, children: value === "socks5" ? "socks5 (socks5h)" : value }, value)) })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", style: { gridColumn: "span 2" }, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.host") }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+              "input",
+              {
+                className: "dshe-input",
+                value: host,
+                placeholder: "proxy.example.com",
+                spellCheck: false,
+                title: t("form.hint.paste"),
+                onChange: (e) => {
+                  setHost(e.target.value);
+                },
+                onPaste: (e) => {
+                  if (absorb(e.clipboardData.getData("text"))) e.preventDefault();
+                },
+                onBlur: () => {
+                  absorb(host);
+                }
+              }
+            )
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: t("form.port") }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { className: "dshe-input", value: port, inputMode: "numeric", onChange: (e) => {
+              setPort(e.target.value);
+            }, placeholder: "1080" })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
+              t("form.username"),
+              " ",
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("em", { children: t("form.optional") })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { className: "dshe-input", value: username, autoComplete: "off", disabled: clearAuth, onChange: (e) => {
+              setUsername(e.target.value);
+            }, placeholder: exit?.hasAuth === true ? t("form.hasAuth") : "", spellCheck: false })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
+              t("form.password"),
+              " ",
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("em", { children: t("form.optional") })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { className: "dshe-input", type: "password", value: password, autoComplete: "new-password", disabled: clearAuth, onChange: (e) => {
+              setPassword(e.target.value);
+            }, placeholder: exit?.hasAuth === true ? t("form.keep") : "" })
+          ] }),
+          exit?.hasAuth === true && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-check", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { type: "checkbox", checked: clearAuth, onChange: (e) => {
+              setClearAuth(e.target.checked);
+            } }),
+            " ",
+            t("form.clearAuth")
+          ] })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { className: "dshe-input", value: username, autoComplete: "off", disabled: clearAuth, onChange: (e) => {
-          setUsername(e.target.value);
-        }, placeholder: exit?.hasAuth === true ? t("form.hasAuth") : "", spellCheck: false })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-field", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
-          t("form.password"),
-          " ",
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("em", { children: t("form.optional") })
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshe-form-note", children: [
+          type === "socks5" ? `${t("form.hint.socks5")} \xB7 ` : "",
+          t("form.hint.secret")
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { className: "dshe-input", type: "password", value: password, autoComplete: "new-password", disabled: clearAuth, onChange: (e) => {
-          setPassword(e.target.value);
-        }, placeholder: exit?.hasAuth === true ? t("form.keep") : "" })
-      ] }),
-      exit?.hasAuth === true && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "dshe-check", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { type: "checkbox", checked: clearAuth, onChange: (e) => {
-          setClearAuth(e.target.checked);
-        } }),
-        " ",
-        t("form.clearAuth")
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshe-form-note", children: [
-      type === "socks5" ? `${t("form.hint.socks5")} \xB7 ` : "",
-      t("form.hint.secret")
-    ] }),
-    error !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshe-form-error", children: error }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshe-form-actions", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "submit", className: "dshe-btn", "data-tone": "primary", disabled: saving, children: t(saving ? "form.saving" : "form.save") }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dshe-btn", onClick: onCancel, children: t("form.cancel") })
-    ] })
-  ] });
+        error !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshe-form-error", children: error }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshe-form-actions", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "submit", className: "dshe-btn", "data-tone": "primary", disabled: saving, children: t(saving ? "form.saving" : "form.save") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dshe-btn", onClick: onCancel, children: t("form.cancel") })
+        ] })
+      ]
+    }
+  );
 }
 function ExitRow({ exit, isDefault, probing, now, t, onProbe, onEdit, onDelete }) {
   const [confirm, setConfirm] = (0, import_react.useState)(false);
@@ -350,7 +456,7 @@ function ExitSelect({ exits, value, onChange, label }) {
 function Bindings({ data, t, now, onBind }) {
   const [host, setHost] = (0, import_react.useState)("");
   const add = () => {
-    const value = host.trim().toLowerCase();
+    const value = hostFromInput(host);
     if (value === "") return;
     onBind(value, data.defaultExit);
     setHost("");
@@ -418,11 +524,11 @@ function RequestLog({ entries, t, now, initialOpen }) {
       }, children: [
         t(open ? "log.hide" : "log.show"),
         " (",
-        entries.length,
+        entries.length > LOG_ROWS ? t("log.count", { shown: LOG_ROWS, total: entries.length }) : entries.length,
         ")"
       ] })
     ] }),
-    open && (entries.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshe-empty", children: t("log.empty") }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dshe-log", children: entries.slice(0, 30).map((entry, index) => /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("li", { "data-ok": entry.ok, children: [
+    open && (entries.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshe-empty", children: t("log.empty") }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dshe-log", children: entries.slice(0, LOG_ROWS).map((entry, index) => /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("li", { "data-ok": entry.ok, children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dshe-log-dot", "aria-hidden": "true" }),
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("code", { children: entry.host }),
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { className: "dshe-log-exit", children: [
@@ -446,7 +552,7 @@ function EgressPanel({ controller, t, initialForm, initialLogOpen = false }) {
   const editing = typeof form === "object" ? data.exits.find((exit) => exit.id === form.edit) : void 0;
   const save = (input) => {
     setSaving(true);
-    void controller.saveExit(input, t("form.save")).then((ok) => {
+    void controller.saveExit(input, t(input.id === void 0 ? "done.exitAdded" : "done.exitSaved", { name: input.name })).then((ok) => {
       setSaving(false);
       if (ok) setForm(void 0);
     });
@@ -458,9 +564,9 @@ function EgressPanel({ controller, t, initialForm, initialLogOpen = false }) {
         /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dshe-sub", children: t("panel.subtitle") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dshe-fill" }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dshe-btn", onClick: () => {
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dshe-btn", disabled: state.refreshing === true, onClick: () => {
         void controller.refresh();
-      }, children: t("refresh") })
+      }, children: t(state.refreshing === true ? "refreshing" : "refresh") })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(StatusBar, { data, origin: state.origin, bridgeError: state.bridgeError, t }),
     state.notice !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dshe-notice", "data-kind": state.notice.kind, role: "status", children: [
@@ -498,16 +604,26 @@ function EgressPanel({ controller, t, initialForm, initialLogOpen = false }) {
             setForm({ edit: exit.id });
           },
           onDelete: () => {
-            void controller.removeExit(exit.id, t("exit.delete"));
+            void controller.removeExit(exit.id, t("done.exitDeleted", { name: exit.name }));
           }
         },
         exit.id
       )) }),
       data.exits.length === 1 && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshe-empty", children: t("exits.empty") })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Bindings, { data, t, now, onBind: (host, exit) => {
-      void controller.bind(host, exit, t("bind.title"));
-    } }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+      Bindings,
+      {
+        data,
+        t,
+        now,
+        onBind: (host, exit) => {
+          const exitName = data.exits.find((entry) => entry.id === exit)?.name ?? "";
+          const text = exit === null ? t("done.unbound", { host }) : host === "*" ? t("done.default", { exit: exitName }) : t("done.bound", { host, exit: exitName });
+          void controller.bind(host, exit, text);
+        }
+      }
+    ),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(RequestLog, { entries: data.recent, t, now, initialOpen: initialLogOpen })
   ] }) });
 }
@@ -520,6 +636,15 @@ var zh = {
   "badge.mock": "\u793A\u4F8B\u6570\u636E",
   "badge.mock.hint": "\u5BBF\u4E3B\u4FA7\u7684\u51FA\u53E3\u6865\u6CA1\u6709\u63A5\u901A\uFF0C\u4E0B\u9762\u662F\u5185\u7F6E\u793A\u4F8B\u6570\u636E\uFF0C\u6539\u52A8\u4E0D\u4F1A\u4FDD\u5B58",
   "refresh": "\u5237\u65B0",
+  "refreshing": "\u5237\u65B0\u4E2D\u2026",
+  "done.exitAdded": "\u5DF2\u6DFB\u52A0\u51FA\u53E3\u300C{name}\u300D",
+  "done.exitSaved": "\u5DF2\u4FDD\u5B58\u51FA\u53E3\u300C{name}\u300D",
+  "done.exitDeleted": "\u5DF2\u5220\u9664\u51FA\u53E3\u300C{name}\u300D",
+  "done.bound": "{host} \u6539\u8D70\u300C{exit}\u300D\uFF0C\u4E0B\u4E00\u6761\u8BF7\u6C42\u751F\u6548",
+  "done.unbound": "{host} \u5DF2\u53D6\u6D88\u7ED1\u5B9A\uFF0C\u6539\u8D70\u9ED8\u8BA4\u51FA\u53E3",
+  "done.default": "\u9ED8\u8BA4\u51FA\u53E3\u5DF2\u6539\u4E3A\u300C{exit}\u300D",
+  "form.hint.paste": "\u53EF\u4EE5\u76F4\u63A5\u7C98\u8D34\u6574\u6761\u4EE3\u7406\u5730\u5740\uFF0C\u4F8B\u5982 socks5://\u7528\u6237:\u5BC6\u7801@\u4E3B\u673A:1080",
+  "log.count": "\u663E\u793A {shown}/{total}",
   "retry": "\u91CD\u8BD5",
   "loading": "\u6B63\u5728\u8BFB\u53D6\u2026",
   "error.load": "\u8BFB\u53D6\u5931\u8D25\uFF1A{message}",
@@ -595,6 +720,15 @@ var en = {
   "badge.mock": "Sample data",
   "badge.mock.hint": "The host egress bridge is not reachable. This is built-in sample data and changes are not saved.",
   "refresh": "Refresh",
+  "refreshing": "Refreshing\u2026",
+  "done.exitAdded": 'Added exit "{name}"',
+  "done.exitSaved": 'Saved exit "{name}"',
+  "done.exitDeleted": 'Deleted exit "{name}"',
+  "done.bound": '{host} now uses "{exit}" from the next request',
+  "done.unbound": "{host} unbound; it follows the default exit",
+  "done.default": 'Default exit is now "{exit}"',
+  "form.hint.paste": "You can paste a whole proxy URL, e.g. socks5://user:pass@host:1080",
+  "log.count": "{shown} of {total}",
   "retry": "Retry",
   "loading": "Loading\u2026",
   "error.load": "Could not load: {message}",

@@ -2267,6 +2267,11 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-tab:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-tab:active{background:var(--c-press)}
 .dshrc-tab[data-on]{background:var(--c-pill);color:var(--c-text);font-weight:600}
+.dshrc-tab-n{margin-left:var(--sp-1);font-weight:500;color:var(--c-text3);font-variant-numeric:tabular-nums}
+.dshrc-tab-flag{display:inline-block;width:6px;height:6px;margin-left:var(--sp-1);vertical-align:middle;border-radius:50%;background:var(--st-blocked-dot)}
+.dshrc-ico[data-busy] svg{animation:dshrc-spin .8s linear infinite}
+@keyframes dshrc-spin{to{transform:rotate(360deg)}}
+.dshrc-row[data-link]:focus-visible{outline:2px solid var(--c-focus);outline-offset:-2px}
 .dshrc-list{flex:1 1 auto;min-height:0;overflow:auto;padding:0 var(--sp-1) 24px;scrollbar-width:thin}
 .dshrc-group{margin-top:var(--sp-4)}
 .dshrc-group+.dshrc-group{padding-top:var(--sp-3);margin-top:var(--sp-1);border-top:1px solid var(--c-line-soft)}
@@ -2401,6 +2406,14 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       clearTimeout(timer);
     };
   }, [arming]);
+  const [refreshing, setRefreshing] = (0, import_react3.useState)(false);
+  const refresh = () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    void controller.load().finally(() => {
+      setRefreshing(false);
+    });
+  };
   (0, import_react3.useEffect)(() => {
     if (notice === null) return;
     const timer = setTimeout(() => {
@@ -2512,14 +2525,33 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   }, [board, query]);
   (0, import_react3.useEffect)(() => {
     if (!model.anyLive) return;
-    const timer = setInterval(() => {
+    const hidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
+    const tick = () => {
+      if (hidden()) return;
       setNow(Date.now());
       void controller.load();
-    }, POLL_MS);
+    };
+    const timer = setInterval(tick, POLL_MS);
+    document.addEventListener("visibilitychange", tick);
     return () => {
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", tick);
     };
   }, [model.anyLive, controller]);
+  const tabCounts = (0, import_react3.useMemo)(() => {
+    const counts = /* @__PURE__ */ new Map();
+    for (const item of TABS) counts.set(item.id, TAB_GROUPS[item.id].reduce((sum, group) => sum + (model.counts.get(group) ?? 0), 0));
+    return counts;
+  }, [model]);
+  const waiting = model.counts.get("blocked") ?? 0;
+  const [landed, setLanded] = (0, import_react3.useState)(false);
+  (0, import_react3.useEffect)(() => {
+    if (board === null || landed) return;
+    setLanded(true);
+    if ((tabCounts.get(tab) ?? 0) > 0) return;
+    const next = TABS.find((item) => (tabCounts.get(item.id) ?? 0) > 0);
+    if (next !== void 0) setTab(next.id);
+  }, [board, landed, tabCounts, tab]);
   const toggle = (id) => {
     setOpen((previous) => {
       const next = new Set(previous);
@@ -2569,6 +2601,19 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const openOf = (task) => task.workerSessionId !== void 0 && onOpenSession !== void 0 ? () => {
     onOpenSession(task.workerSessionId);
   } : void 0;
+  const linkProps = (click) => click === void 0 ? {} : {
+    "data-link": "",
+    role: "button",
+    tabIndex: 0,
+    onClick: click,
+    onKeyDown: (event) => {
+      if (event.target !== event.currentTarget) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        click();
+      }
+    }
+  };
   const workerNameOf = (task) => (task.workerId === void 0 ? void 0 : model.workerName.get(task.workerId) ?? task.workerId) ?? "";
   const tooltipOf = (task, group, extra = []) => {
     const who = group === "running" || group === "queued" || group === "blocked" ? workerNameOf(task) : "";
@@ -2600,8 +2645,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           className: "dshrc-row dshrc-sub",
           "data-group": group,
           "data-task": task.id,
-          "data-link": click === void 0 ? void 0 : "",
-          onClick: click,
+          ...linkProps(click),
           title: tooltipOf(task, group, orderLines(task)),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-rt", children: task.title }),
@@ -2810,8 +2854,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           className: "dshrc-row",
           "data-group": group,
           "data-task": family.root.id,
-          "data-link": click === void 0 ? void 0 : "",
-          onClick: click,
+          ...linkProps(click),
           title: tooltipOf(family.root, group, extra),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("span", { className: "dshrc-main", children: [
@@ -2979,11 +3022,10 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           {
             type: "button",
             className: "dshrc-ico",
-            onClick: () => {
-              void controller.load();
-            },
-            title: t("board.refresh"),
-            "aria-label": t("board.refresh"),
+            onClick: refresh,
+            "data-busy": refreshing ? "" : void 0,
+            title: t(refreshing ? "board.refreshing" : "board.refresh"),
+            "aria-label": t(refreshing ? "board.refreshing" : "board.refresh"),
             children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(Icon, { d: ICON_REFRESH })
           }
         ),
@@ -3012,7 +3054,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-tabs", role: "tablist", "aria-label": t("panel.title"), children: [
-      TABS.map((item) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+      TABS.map((item) => /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
         "button",
         {
           type: "button",
@@ -3023,7 +3065,11 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           onClick: () => {
             setTab(item.id);
           },
-          children: t(item.key)
+          children: [
+            t(item.key),
+            (tabCounts.get(item.id) ?? 0) > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-tab-n", children: tabCounts.get(item.id) }),
+            item.id === "active" && waiting > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-tab-flag", title: t("seg.waiting", { n: waiting }), "aria-label": t("seg.waiting", { n: waiting }) })
+          ]
         },
         item.id
       )),
@@ -3049,9 +3095,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
         /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-err-msg", children: t("board.error", { message: state.error ?? "" }) }),
         lastOk !== "" && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-err-stale", children: t("board.lastOk", { time: lastOk }) })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { type: "button", className: "dshrc-err-btn", onClick: () => {
-        void controller.load();
-      }, children: t("board.retry") })
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { type: "button", className: "dshrc-err-btn", onClick: refresh, disabled: refreshing, children: t("board.retry") })
     ] }),
     board !== null && board.origin === "mock" && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-sample", "data-router-sample": true, title: t("board.mock.hint"), children: t("board.mock") }),
     notice !== null && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-notice", role: "status", "data-tone": notice.tone, children: notice.text }),
@@ -3822,6 +3866,15 @@ function ModelTiers({ wide = true }) {
     void load();
   }, [load]);
   (0, import_react6.useEffect)(() => {
+    if (msg === null || msg.bad === true || busy) return;
+    const timer = setTimeout(() => {
+      setMsg((previous) => previous === msg ? null : previous);
+    }, 4e3);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [msg, busy]);
+  (0, import_react6.useEffect)(() => {
     if (open) void load();
   }, [open, load]);
   const save = (0, import_react6.useCallback)(async (body, done) => {
@@ -3834,8 +3887,14 @@ function ModelTiers({ wide = true }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body)
       });
-      const value = await response.json();
-      if (!response.ok) throw new Error(value.error?.message ?? `HTTP ${String(response.status)}`);
+      const text = await response.text();
+      let value;
+      try {
+        value = JSON.parse(text);
+      } catch {
+        value = void 0;
+      }
+      if (!response.ok || value === void 0) throw new Error(value?.error?.message ?? `HTTP ${String(response.status)}`);
       setDoc(value);
       setMsg({ text: done });
     } catch (error) {
@@ -4103,10 +4162,12 @@ var zh = {
   "panel.subtitle": "{partitions} \u4E2A\u5206\u533A \xB7 {workers} \u4E2A worker",
   "board.updated": "\u66F4\u65B0\u4E8E {time}",
   "board.mock": "\u793A\u4F8B\u6570\u636E",
-  "board.mock.hint": "\u5BBF\u4E3B side \u7684 router \u672A\u63A5\u5165\uFF0C\u4E0B\u9762\u662F\u5185\u7F6E\u793A\u4F8B\u6570\u636E",
+  "board.mock.hint": "\u5BBF\u4E3B\u4FA7\u7684 router \u672A\u63A5\u5165\uFF0C\u4E0B\u9762\u662F\u5185\u7F6E\u793A\u4F8B\u6570\u636E",
   "board.error": "\u8BFB\u53D6\u5931\u8D25\uFF1A{message}",
   "board.retry": "\u91CD\u8BD5",
   "board.refresh": "\u5237\u65B0",
+  "board.refreshing": "\u5237\u65B0\u4E2D\u2026",
+  "seg.waiting": "\u6709 {n} \u4E2A\u4EFB\u52A1\u5728\u7B49\u4F60\u8F93\u5165",
   "board.loading": "\u6B63\u5728\u8BFB\u53D6\u4EFB\u52A1\u677F\u2026",
   "board.find": "\u641C\u7D22\u4EFB\u52A1 / \u7F16\u53F7 / \u5DE5\u4F5C\u533A",
   "board.empty": "\u8FD9\u4E2A\u72B6\u6001\u6682\u65F6\u6CA1\u6709\u4EFB\u52A1",
@@ -4210,7 +4271,7 @@ var zh = {
   "compact.failed": "\u5931\u8D25/\u53D6\u6D88",
   "compact.history": "\u5386\u53F2 {n} \u6761",
   "compact.staleGroup": "\u5DF2\u5931\u6548\u5206\u533A",
-  "compact.calls": "\u7B2C {n} \u6B21\u8C03\u7528",
+  "compact.calls": "\u5DF2\u8C03\u7528\u5DE5\u5177 {n} \u6B21",
   "compact.warroom": "\u4F5C\u6218\u5BA4",
   "compact.noWorker": "\u6CA1\u6709\u6D3E\u51FA worker",
   "compact.noWorkerYet": "\u6B63\u5728\u6D3E worker\u2026",
@@ -4378,6 +4439,8 @@ var en = {
   "board.error": "read failed: {message}",
   "board.retry": "Retry",
   "board.refresh": "Refresh",
+  "board.refreshing": "Refreshing\u2026",
+  "seg.waiting": "{n} task(s) waiting on your input",
   "board.loading": "Reading the board\u2026",
   "board.find": "Find task / id / workspace",
   "board.empty": "Nothing in this state",
@@ -4481,7 +4544,7 @@ var en = {
   "compact.failed": "Failed/cancelled",
   "compact.history": "History ({n})",
   "compact.staleGroup": "Removed partitions",
-  "compact.calls": "call #{n}",
+  "compact.calls": "{n} tool calls",
   "compact.warroom": "War room",
   "compact.noWorker": "No worker dispatched",
   "compact.noWorkerYet": "Dispatching a worker\u2026",
