@@ -94,6 +94,8 @@ export type HostTaskState =
   | 'cancelled'
   /** The harness restarted mid-flight; the router resumes this session from its log. */
   | 'interrupted'
+  /** Put aside until a prerequisite finishes; the router wakes it again. */
+  | 'suspended'
 
 /**
  * One entry of a worker's checklist.
@@ -183,6 +185,22 @@ export interface PartitionView {
   readonly manager: ManagerView
   /** Workers this manager can hand tasks to. */
   readonly workers: readonly WorkerView[]
+  /** Suspended rows in this partition. */
+  readonly suspendedCount?: number
+  /** Include globs (relative to the root); absent means everything. */
+  readonly include?: readonly string[]
+  /** Exclude globs (relative to the root). */
+  readonly exclude?: readonly string[]
+  /** One-line description from the config. */
+  readonly description?: string
+  /** Configuration problems the Host found at boot. */
+  readonly problems?: readonly PartitionProblemView[]
+}
+
+/** One partition configuration problem a person should fix. */
+export interface PartitionProblemView {
+  readonly level: 'error' | 'warning'
+  readonly message: string
 }
 
 /**
@@ -302,6 +320,60 @@ export interface TaskView {
     readonly ratio: string
     readonly current?: string
   }
+  /** Explicit prerequisites: task ids that must finish first. */
+  readonly dependsOn?: readonly string[]
+  /** Ordered phase among siblings; a lower stage finishes first. */
+  readonly stage?: number
+  /** A queued row held back by these unfinished prerequisites. */
+  readonly waitingFor?: readonly string[]
+  /** A suspended row: why it was put aside. */
+  readonly suspendReason?: string
+  /** A suspended (or dependency-blocked) row: what it waits for. */
+  readonly waitingOn?: readonly string[]
+  /** The request (root task) this row belongs to. */
+  readonly rootId?: string
+}
+
+/** Progress of one request: its root task and the rows under it. */
+export interface GroupProgressView {
+  readonly rootId: string
+  readonly subject: string
+  readonly total: number
+  readonly finished: number
+  readonly running: number
+  readonly waiting: number
+  readonly suspended: number
+  readonly failed: number
+  readonly complete: boolean
+}
+
+/** One progress notice the router sent to the war room. */
+export interface NoticeView {
+  readonly at: string
+  readonly text: string
+}
+
+/** One entry of a workspace listing (`GET /api/router/files`). */
+export interface FileEntryView {
+  readonly name: string
+  /** Path relative to the partition root, `/`-separated. */
+  readonly path: string
+  readonly kind: 'dir' | 'file' | 'link'
+  readonly size?: number
+  readonly modifiedAt?: string
+  /** Whether the partition's include/exclude rules put it in scope. */
+  readonly inScope: boolean
+}
+
+/** One directory level of one partition. */
+export interface FileListingView {
+  readonly partition: string
+  readonly root: string
+  readonly path: string
+  readonly entries: readonly FileEntryView[]
+  readonly omitted: number
+  readonly include: readonly string[]
+  readonly exclude: readonly string[]
 }
 
 /** A produced file the user may download. */
@@ -353,6 +425,10 @@ export interface BoardSnapshot {
    * the rail says so instead of guessing.
    */
   readonly credentials?: readonly CredentialView[]
+  /** Progress per request, when the Host computes it. */
+  readonly groups?: readonly GroupProgressView[]
+  /** Recent progress notices, newest first. */
+  readonly notices?: readonly NoticeView[]
 }
 
 /**
