@@ -21,6 +21,7 @@
  * @module host-router/snapshot
  */
 import type { RouterTask, TaskState } from './board.ts';
+import type { GroupProgress } from './order.ts';
 import type { Partition } from './config.ts';
 import type { LoggerService, SessionEventLike, SessionQueryService } from './types.ts';
 /** One worker todo item, exactly as `dsh-tool-todo` records it. */
@@ -100,6 +101,19 @@ export interface TaskView {
     readonly result?: string;
     readonly verifyOutput?: string;
     readonly error?: string;
+    /** Why a `blocked` row is parked (`task_control block` value). */
+    readonly resumeNote?: string;
+    /** Explicit prerequisites (`depends_on`). */
+    readonly dependsOn?: readonly string[];
+    /** Ordered phase among siblings. */
+    readonly stage?: number;
+    /** A queued row held back by its order: the open prerequisites it waits for. */
+    readonly waitingFor?: readonly string[];
+    /** A suspended row: why, and what it waits for. */
+    readonly suspendReason?: string;
+    readonly waitingOn?: readonly string[];
+    /** Root task of the request this row belongs to. */
+    readonly rootId?: string;
     /** Difficulty tier chosen before dispatch (`easy | medium | hard`). */
     readonly tier?: 'easy' | 'medium' | 'hard';
     /** How the tier was decided and why. */
@@ -109,6 +123,15 @@ export interface TaskView {
     readonly provider?: string;
     readonly model?: string;
     readonly reasoningEffort?: string;
+    /** 改派: the row that took this one over, and the row this one took over. */
+    readonly reassignedTo?: string;
+    readonly reassignedFrom?: string;
+    /** Pull request this row published. */
+    readonly pr?: {
+        readonly number: number;
+        readonly url: string;
+        readonly provider: string;
+    };
     readonly createdAt: string;
     readonly updatedAt: string;
 }
@@ -128,6 +151,13 @@ export interface RouterSnapshot {
         readonly queued: number;
     }[];
     readonly tasks: readonly TaskView[];
+    /** Progress per request (root task). */
+    readonly groups?: readonly GroupProgress[];
+    /** Recent progress notices, newest first. */
+    readonly notices?: readonly {
+        readonly at: string;
+        readonly text: string;
+    }[];
 }
 /** Fold `todo/write` events into the worker's latest list. */
 export declare function foldTodos(events: readonly SessionEventLike[]): TodoProgress;
@@ -146,6 +176,17 @@ export interface SnapshotDeps {
     readonly isLive: (task: RouterTask) => boolean;
     /** Read a log at most once per cache window. */
     readonly readLog: (sessionId: string) => Promise<readonly SessionEventLike[]>;
+    /** Open prerequisites of a queued row, or undefined when it may start. */
+    readonly waitingFor?: (task: RouterTask) => readonly string[] | undefined;
+    /** Root task id of a row. */
+    readonly rootOf?: (task: RouterTask) => string;
+    /** Per-request progress, computed after corrections. */
+    readonly progress?: () => readonly GroupProgress[];
+    /** Recent notices. */
+    readonly notices?: () => readonly {
+        readonly at: string;
+        readonly text: string;
+    }[];
     /** Persist a state correction discovered while folding. */
     readonly correctState?: (task: RouterTask, change: {
         state: TaskState;

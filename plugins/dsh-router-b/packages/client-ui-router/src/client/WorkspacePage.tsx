@@ -23,6 +23,7 @@ import type { RouterBoardController } from './controller.ts'
 import { groupOf, statusKeyOf } from './CompactBoard.tsx'
 import { bytes, relativeTime } from './format.ts'
 import { BOARD_TOKENS_CSS } from './styles.ts'
+import { ThemeButton, useBoardTheme } from './theme.tsx'
 
 /** Props supplied by the main-panel registration. */
 export interface WorkspacePageProps {
@@ -41,16 +42,19 @@ type DirState =
 const dirKey = (partition: string, path: string): string => `${partition}\u0000${path}`
 
 const STYLE = `${BOARD_TOKENS_CSS}
-.dshws{--c-text:var(--dsw-alias-label-primary,#0f1115);--c-text2:var(--dsw-alias-label-secondary,#61666b);--c-text3:var(--c-meta);--c-line:var(--dsw-alias-border-l2,rgba(0,0,0,.1));--c-line-soft:var(--dsw-alias-border-l1,rgba(0,0,0,.04));--c-pill:var(--dsw-alias-interactive-bg-hover-solid,#f1f3f5);--f-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw-alias-bg-base,transparent);color:var(--c-text);font-size:13px;line-height:1.45;text-align:left}
+.dshws{display:flex;flex-direction:column;height:100%;min-height:0;background:var(--c-bg);color:var(--c-text);font-size:13px;line-height:1.47;letter-spacing:-.003em;text-align:left;transition:background-color var(--dur) var(--ease),color var(--dur) var(--ease)}
 .dshws *{box-sizing:border-box}
 :where(.dshws button){font:inherit}
 .dshws button:focus-visible{outline:2px solid var(--st-running-dot);outline-offset:1px}
 .dshws-head{display:flex;align-items:center;gap:var(--sp-3);flex:none;padding:var(--sp-4) var(--sp-4) var(--sp-3);border-bottom:1px solid var(--c-line-soft)}
 .dshws-ht{flex:1 1 auto;min-width:0}
-.dshws-title{margin:0;font-size:15px;font-weight:600;line-height:22px}
+.dshws-title{margin:0;font-size:21px;font-weight:600;line-height:26px;letter-spacing:-.022em}
 .dshws-sub{margin:2px 0 0;font-size:12px;color:var(--c-text3)}
-.dshws-btn{flex:none;height:var(--h-ctl);padding:0 var(--sp-3);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px;cursor:pointer}
+.dshws-btn{flex:none;height:var(--h-ctl);padding:0 14px;border:0;border-radius:var(--r-pill);background:var(--c-pill);color:var(--c-text);font-size:12px;font-weight:500;cursor:pointer;transition:background-color var(--dur) var(--ease)}
+.dshws-btn:hover{background:var(--c-hover)}
+.dshws-theme{flex:none;display:flex;align-items:center;justify-content:center;width:var(--h-ctl);height:var(--h-ctl);padding:0;border:0;border-radius:50%;background:transparent;color:var(--c-text2);cursor:pointer}
+.dshws-theme:hover{background:var(--c-hover);color:var(--c-text)}
+.dshws-theme svg{width:16px;height:16px}
 .dshws-btn:hover{background:var(--c-hover)}
 .dshws-btn:active{background:var(--c-press)}
 .dshws-body{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(240px,340px) minmax(0,1fr)}
@@ -149,6 +153,7 @@ const OPEN_ORDER: readonly string[] = ['running', 'blocked', 'suspended', 'queue
 export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePageProps) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
   const board = state.board
+  const theme = useBoardTheme()
   const partitions: readonly PartitionView[] = board?.partitions ?? []
   const [selected, setSelected] = useState<string | null>(null)
   const [dirs, setDirs] = useState<ReadonlyMap<string, DirState>>(() => new Map())
@@ -180,9 +185,11 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
 
   useEffect(() => {
     if (partitionId === undefined || !controller.canListFiles) return
+    // 快任务 has no files of its own (its root is the home directory).
+    if (partitions.find(partition => partition.id === partitionId)?.quick === true) return
     if (dirs.has(dirKey(partitionId, ''))) return
     void loadDir(partitionId, '')
-  }, [partitionId, dirs, loadDir, controller])
+  }, [partitionId, partitions, dirs, loadDir, controller])
 
   /** The selected partition's memory, keyed by partition so a switch never shows stale notes. */
   const [memory, setMemory] = useState<{ readonly partition: string; readonly view?: PartitionMemoryView; readonly error?: string } | null>(null)
@@ -319,7 +326,7 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
         title={partition.path ?? partition.repo ?? partition.name}>
         <span className="dshws-pmain">
           <span className="dshws-pn">{partition.name}{partition.enabled === false ? ` · ${t('ws.disabled')}` : ''}</span>
-          <span className="dshws-pp">{partition.path ?? partition.repo ?? ''}</span>
+          <span className="dshws-pp">{partition.quick === true ? t('ws.quickHint') : partition.path ?? partition.repo ?? ''}</span>
         </span>
         {worst !== undefined && <span className="dshws-badge" data-tone={worst} title={problems.map(problem => problem.message).join('\n')}>!</span>}
         {running > 0 && <span className="dshws-badge" data-tone="running">{running}</span>}
@@ -509,13 +516,14 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
 
   return (
     <div className="dshws-wrap">
-      <div className="dshrc dshws" data-router-workspace>
+      <div className="dshrc dshws" data-router-workspace data-theme={theme.mode}>
         <style>{STYLE}</style>
         <header className="dshws-head">
           <div className="dshws-ht">
             <h2 className="dshws-title">{t('ws.title')}</h2>
             <p className="dshws-sub">{t('ws.subtitle')}</p>
           </div>
+          <ThemeButton className="dshws-theme" pref={theme.pref} setPref={theme.setPref} t={t} />
           <button type="button" className="dshws-btn" onClick={refresh}>{t('ws.refresh')}</button>
         </header>
         {board === null
@@ -529,9 +537,11 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
                     <div className="dshws-parts">{partitions.map(partitionRow)}</div>
                     <span className="dshws-cap">{current.name}</span>
                     <div className="dshws-tree" role="tree" aria-label={current.name}>
-                      {controller.canListFiles
-                        ? dirBody(current.id, '', 0)
-                        : <div className="dshws-note">{t('ws.notWired')}</div>}
+                      {current.quick === true
+                        ? <div className="dshws-note">{t('ws.quickNoFiles')}</div>
+                        : controller.canListFiles
+                          ? dirBody(current.id, '', 0)
+                          : <div className="dshws-note">{t('ws.notWired')}</div>}
                     </div>
                   </div>
                   <div className="dshws-right">
@@ -544,7 +554,9 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
                         <dd>
                           {include === undefined || (include.length === 1 && include[0] === '**')
                             ? t('ws.all')
-                            : <span className="dshws-globs">{include.map(glob => <span key={glob} className="dshws-glob">{glob}</span>)}</span>}
+                            : include.length === 0
+                              ? t('ws.none')
+                              : <span className="dshws-globs">{include.map(glob => <span key={glob} className="dshws-glob">{glob}</span>)}</span>}
                         </dd>
                         <dt>{t('ws.exclude')}</dt>
                         <dd>
@@ -571,11 +583,21 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
                     </section>
                     <section className="dshws-sec">
                       <h3>{t('ws.rules')}</h3>
-                      <ol className="dshws-rules">
-                        <li>{t('ws.rule1')}</li>
-                        <li>{t('ws.rule2')}</li>
-                        <li>{t('ws.rule3')}</li>
-                      </ol>
+                      {current.quick === true
+                        ? (
+                            <ol className="dshws-rules">
+                              <li>{t('ws.quickRule1')}</li>
+                              <li>{t('ws.quickRule2')}</li>
+                              <li>{t('ws.quickRule3')}</li>
+                            </ol>
+                          )
+                        : (
+                            <ol className="dshws-rules">
+                              <li>{t('ws.rule1')}</li>
+                              <li>{t('ws.rule2')}</li>
+                              <li>{t('ws.rule3')}</li>
+                            </ol>
+                          )}
                     </section>
                     <section className="dshws-sec">
                       <div className="dshws-sech">

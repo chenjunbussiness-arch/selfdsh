@@ -52,4 +52,4 @@ export interface ProjectRailProps {
  * @param props - roster, credential status, and the host-wired actions.
  * @returns the project rail.
  */
-export declare function ProjectRail({ id, open, partitions, selectedId, onSelect, totalTasks, t, credentials, credentialsWritable, onSaveCredential, onCredentialsChanged, onTogglePartition, onCreatePartition, onClose, }: ProjectRailProps): import("react/jsx-runtime").JSX.Element;
+export declare function ProjectRail({ id, open, partitions, selectedId, onSelect, totalTasks, t, credentials, credentialsWritable, onSaveCredential, onCredentialsChanged, onTogglePartition, onCreatePartition, onClose, }: ProjectRailProps): import("react").JSX.Element;

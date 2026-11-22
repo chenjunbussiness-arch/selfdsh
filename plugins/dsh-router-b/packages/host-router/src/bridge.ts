@@ -56,6 +56,11 @@ export const TIERS_PATH = `${BRIDGE_BASE}/tiers`
 export const FILES_PATH = `${BRIDGE_BASE}/files`
 /** `GET|POST|DELETE` one partition's memory (notes and recent work). */
 export const MEMORY_PATH = `${BRIDGE_BASE}/memory`
+export const APPROVALS_PATH = `${BRIDGE_BASE}/approvals`
+export const AUDIT_PATH = `${BRIDGE_BASE}/audit`
+export const LIVE_PATH = `${BRIDGE_BASE}/live`
+export const REASSIGN_PATH = `${BRIDGE_BASE}/reassign`
+export const BATCH_PATH = `${BRIDGE_BASE}/batch`
 
 /** Request body ceiling: demands and verdicts are small by construction. */
 const MAX_BODY_BYTES = 256 * 1024
@@ -150,6 +155,8 @@ export interface UiManagerView {
 export interface UiPartitionView {
   readonly id: string
   readonly name: string
+  /** The built-in 快任务 group: jobs outside every workspace, on the fast model, with its own slots. */
+  readonly quick?: boolean
   /** Absolute partition root. `repo` is the client contract's name for the same value. */
   readonly repo: string
   /** Same absolute root, under the name the rail's subtitle reads. */
@@ -239,6 +246,10 @@ export interface UiTaskView {
   readonly provider?: string
   readonly model?: string
   readonly reasoningEffort?: string
+  /** 改派 links and the published pull request. */
+  readonly reassignedTo?: string
+  readonly reassignedFrom?: string
+  readonly pr?: { readonly number: number; readonly url: string; readonly provider: string }
 }
 
 /** One demand and the task it produced. */
@@ -373,6 +384,8 @@ export interface PartitionSource {
   readonly dir: string
   readonly slots: number
   readonly managerEnabled: boolean
+  /** The built-in 快任务 partition. */
+  readonly quick?: boolean
   readonly include?: readonly string[]
   readonly exclude?: readonly string[]
   readonly description?: string
@@ -405,6 +418,25 @@ export interface BridgeDeps {
   ) => Promise<{ id: string; state: TaskState; text: string }>
   /** One directory level of a partition; absent means the route answers 404. */
   readonly files?: (partition: string, path: string | undefined) => Promise<unknown>
+  /**
+   * Outlets and the wider control surface: the approval queue, the audit log,
+   * a worker's live output, reassigning a task, and batch actions. Absent means
+   * these routes answer 404.
+   */
+  readonly desk?: {
+    readonly approvals: () => Promise<unknown>
+    readonly decide: (id: string, decision: 'approve' | 'reject', note: string | undefined) => Promise<unknown>
+    readonly audit: (limit: number) => Promise<unknown>
+    readonly live: (taskId: string, after: number) => Promise<unknown>
+    readonly reassign: (input: {
+      readonly taskId: string
+      readonly partition?: string
+      readonly model?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+      readonly keepProgress: boolean
+      readonly note?: string
+    }) => Promise<unknown>
+    readonly batch: (taskIds: readonly string[], action: string, value: string | undefined) => Promise<unknown>
+  }
   /** Partition memory; absent means the route answers 404. */
   readonly memory?: {
     readonly read: (partition: string) => Promise<unknown>
@@ -554,6 +586,9 @@ function taskOf(task: TaskView): UiTaskView {
     ...task.provider === undefined ? {} : { provider: task.provider },
     ...task.model === undefined ? {} : { model: task.model },
     ...task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort },
+    ...task.reassignedTo === undefined ? {} : { reassignedTo: task.reassignedTo },
+    ...task.reassignedFrom === undefined ? {} : { reassignedFrom: task.reassignedFrom },
+    ...task.pr === undefined ? {} : { pr: task.pr },
   }
 }
 
@@ -593,7 +628,8 @@ export function boardDocument(input: {
     const scopedViews = tasks.filter(task => task.partitionId === partition.name)
     return {
       id: partition.name,
-      name: partition.name,
+      name: partition.quick === true ? '快任务' : partition.name,
+      ...partition.quick === true ? { quick: true } : {},
       repo: partition.dir,
       path: partition.dir,
       enabled: input.isEnabled(partition.name),
@@ -915,6 +951,119 @@ async function memoryRoute(req: IncomingMessage, res: ServerResponse, deps: Brid
   sendMethodNotAllowed(res, 'GET, POST, DELETE')
 }
 
+/** Run a desk call; an ordinary error is a refused action (409), not a server fault. */
+async function deskCall(run: () => Promise<unknown>): Promise<unknown> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof BridgeError) throw error
+    throw new BridgeError(409, 'conflict', error instanceof Error ? error.message : String(error))
+  }
+}
+
+/** `GET /api/router/approvals` lists; `POST {id, decision, note?}` approves or rejects one. */
+async function approvalsRoute(req: IncomingMessage, res: ServerResponse, deps: BridgeDeps): Promise<void> {
+  const desk = deps.desk
+  if (desk === undefined) throw new BridgeError(404, 'not-found', 'approvals are not available')
+  if (req.method === 'GET') {
+    sendJson(res, 200, await desk.approvals())
+    return
+  }
+  if (req.method === 'POST') {
+    const body = objectOf(await readJsonBody(req), 'body')
+    const id = typeof body['id'] === 'string' ? body['id'].trim() : ''
+    if (id === '') throw new BridgeError(400, 'bad-request', 'id must be a non-empty string')
+    if (body['decision'] !== 'approve' && body['decision'] !== 'reject') {
+      throw new BridgeError(400, 'bad-request', 'decision must be "approve" or "reject"')
+    }
+    if (body['note'] !== undefined && typeof body['note'] !== 'string') throw new BridgeError(400, 'bad-request', 'note must be a string')
+    const decision = body['decision']
+    sendJson(res, 200, await deskCall(() => desk.decide(id, decision, body['note'] as string | undefined)))
+    return
+  }
+  sendMethodNotAllowed(res, 'GET, POST')
+}
+
+/** `GET /api/router/audit?limit=` — newest audit lines. */
+async function auditRoute(req: IncomingMessage, res: ServerResponse, deps: BridgeDeps): Promise<void> {
+  if (deps.desk === undefined) throw new BridgeError(404, 'not-found', 'audit is not available')
+  if (req.method !== 'GET') {
+    sendMethodNotAllowed(res, 'GET')
+    return
+  }
+  const url = new URL(req.url ?? '/', 'http://router.invalid')
+  const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? '100') || 100))
+  sendJson(res, 200, await deps.desk.audit(limit))
+}
+
+/** `GET /api/router/live?taskId=&after=` — a worker's output since segment `after`. */
+async function liveRoute(req: IncomingMessage, res: ServerResponse, deps: BridgeDeps): Promise<void> {
+  const desk = deps.desk
+  if (desk === undefined) throw new BridgeError(404, 'not-found', 'live output is not available')
+  if (req.method !== 'GET') {
+    sendMethodNotAllowed(res, 'GET')
+    return
+  }
+  const url = new URL(req.url ?? '/', 'http://router.invalid')
+  const taskId = url.searchParams.get('taskId')?.trim() ?? ''
+  if (taskId === '') throw new BridgeError(400, 'bad-request', 'taskId is required')
+  const after = Number(url.searchParams.get('after') ?? '-1')
+  sendJson(res, 200, await deskCall(() => desk.live(taskId, Number.isFinite(after) ? after : -1)))
+}
+
+/** `POST /api/router/reassign {taskId, partition?, model?, keepProgress?, note?}`. */
+async function reassignRoute(req: IncomingMessage, res: ServerResponse, deps: BridgeDeps): Promise<void> {
+  const desk = deps.desk
+  if (desk === undefined) throw new BridgeError(404, 'not-found', 'reassign is not available')
+  if (req.method !== 'POST') {
+    sendMethodNotAllowed(res, 'POST')
+    return
+  }
+  const body = objectOf(await readJsonBody(req), 'body')
+  const taskId = typeof body['taskId'] === 'string' ? body['taskId'].trim() : ''
+  if (taskId === '') throw new BridgeError(400, 'bad-request', 'taskId must be a non-empty string')
+  if (body['partition'] !== undefined && typeof body['partition'] !== 'string') throw new BridgeError(400, 'bad-request', 'partition must be a string')
+  let model: { provider: string; model: string; reasoningEffort?: string } | undefined
+  if (body['model'] !== undefined && body['model'] !== null) {
+    const raw = objectOf(body['model'], 'model')
+    if (typeof raw['provider'] !== 'string' || typeof raw['model'] !== 'string') {
+      throw new BridgeError(400, 'bad-request', 'model must be {provider, model, reasoningEffort?}')
+    }
+    model = {
+      provider: raw['provider'], model: raw['model'],
+      ...typeof raw['reasoningEffort'] === 'string' ? { reasoningEffort: raw['reasoningEffort'] } : {},
+    }
+  }
+  const partition = typeof body['partition'] === 'string' && body['partition'].trim() !== '' ? body['partition'].trim() : undefined
+  const note = typeof body['note'] === 'string' && body['note'].trim() !== '' ? body['note'].trim() : undefined
+  sendJson(res, 200, await deskCall(() => desk.reassign({
+    taskId,
+    ...partition === undefined ? {} : { partition },
+    ...model === undefined ? {} : { model },
+    keepProgress: body['keepProgress'] !== false,
+    ...note === undefined ? {} : { note },
+  })))
+}
+
+/** `POST /api/router/batch {taskIds, action, value?}` — one action over many rows. */
+async function batchRoute(req: IncomingMessage, res: ServerResponse, deps: BridgeDeps): Promise<void> {
+  const desk = deps.desk
+  if (desk === undefined) throw new BridgeError(404, 'not-found', 'batch actions are not available')
+  if (req.method !== 'POST') {
+    sendMethodNotAllowed(res, 'POST')
+    return
+  }
+  const body = objectOf(await readJsonBody(req), 'body')
+  const ids = body['taskIds']
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 200 || ids.some(id => typeof id !== 'string' || id.trim() === '')) {
+    throw new BridgeError(400, 'bad-request', 'taskIds must be 1..200 task ids')
+  }
+  if (typeof body['action'] !== 'string' || body['action'].trim() === '') throw new BridgeError(400, 'bad-request', 'action is required')
+  if (body['value'] !== undefined && typeof body['value'] !== 'string') throw new BridgeError(400, 'bad-request', 'value must be a string')
+  const action = body['action'].trim()
+  sendJson(res, 200, await deskCall(() => desk.batch([...new Set((ids as string[]).map(id => id.trim()))], action, body['value'] as string | undefined)))
+}
+
 /**
  * `GET /api/router/events` — server-sent change notifications.
  *
@@ -1019,6 +1168,11 @@ export function createRoutes(deps: BridgeDeps): readonly WebRouteLike[] {
     { kind: 'exact', path: PARTITION_PATH, handler: guard(deps, PARTITION_PATH, (req, res) => partitionRoute(req, res, deps)) },
     { kind: 'exact', path: TIERS_PATH, handler: guard(deps, TIERS_PATH, (req, res) => tiersRoute(req, res, deps)) },
     { kind: 'exact', path: FILES_PATH, handler: guard(deps, FILES_PATH, (req, res) => filesRoute(req, res, deps)) },
+    { kind: 'exact', path: APPROVALS_PATH, handler: guard(deps, APPROVALS_PATH, (req, res) => approvalsRoute(req, res, deps)) },
+    { kind: 'exact', path: AUDIT_PATH, handler: guard(deps, AUDIT_PATH, (req, res) => auditRoute(req, res, deps)) },
+    { kind: 'exact', path: LIVE_PATH, handler: guard(deps, LIVE_PATH, (req, res) => liveRoute(req, res, deps)) },
+    { kind: 'exact', path: REASSIGN_PATH, handler: guard(deps, REASSIGN_PATH, (req, res) => reassignRoute(req, res, deps)) },
+    { kind: 'exact', path: BATCH_PATH, handler: guard(deps, BATCH_PATH, (req, res) => batchRoute(req, res, deps)) },
     { kind: 'exact', path: MEMORY_PATH, handler: guard(deps, MEMORY_PATH, (req, res) => memoryRoute(req, res, deps)) },
     { kind: 'exact', path: EVENTS_PATH, handler: guard(deps, EVENTS_PATH, async (req, res) => { eventsRoute(req, res, deps) }) },
   ]

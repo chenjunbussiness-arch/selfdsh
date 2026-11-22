@@ -20,4 +20,4 @@ export interface RouterPanelButtonProps {
  * @param props - controller, translate, and the open action.
  * @returns the button.
  */
-export declare function RouterPanelButton({ controller, t, open }: RouterPanelButtonProps): import("react/jsx-runtime").JSX.Element;
+export declare function RouterPanelButton({ controller, t, open }: RouterPanelButtonProps): import("react").JSX.Element;

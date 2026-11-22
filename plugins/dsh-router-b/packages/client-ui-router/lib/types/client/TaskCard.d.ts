@@ -36,4 +36,4 @@ export interface TaskCardProps {
  * @param props - task plus the actions the board offers for it.
  * @returns the row, with its detail rendered but hidden while closed.
  */
-export declare function TaskCard({ task, partitionName, workerName, t, open, onToggle, onVerify, onOpenSession, onDownload, }: TaskCardProps): import("react/jsx-runtime").JSX.Element;
+export declare function TaskCard({ task, partitionName, workerName, t, open, onToggle, onVerify, onOpenSession, onDownload, }: TaskCardProps): import("react").JSX.Element;

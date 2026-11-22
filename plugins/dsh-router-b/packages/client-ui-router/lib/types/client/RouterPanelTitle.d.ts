@@ -17,4 +17,4 @@ export interface RouterPanelTitleProps {
  * @param props - controller and translate.
  * @returns the label, with an awaiting-review count when there is one.
  */
-export declare function RouterPanelTitle({ controller, t }: RouterPanelTitleProps): import("react/jsx-runtime").JSX.Element;
+export declare function RouterPanelTitle({ controller, t }: RouterPanelTitleProps): import("react").JSX.Element;

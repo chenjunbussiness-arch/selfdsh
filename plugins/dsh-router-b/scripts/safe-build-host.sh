@@ -6,7 +6,7 @@ set -euo pipefail
 H="$(cd "$(dirname "$0")/../packages/host-router" && pwd)"
 TSC="${DSH_TSC:-/srv/workspace/google tend/lumen-companion-harness/node_modules/typescript/bin/tsc}"
 rm -rf "$H/lib.next"
-node "$TSC" -p "$H/tsconfig.json"
+node "$TSC" -p "$H/tsconfig.json" ${DSH_TYPE_ROOTS:+--typeRoots "$DSH_TYPE_ROOTS"}
 # Must be ESM: the package is "type": "module". A CommonJS build fails at import.
 if head -c 200 "$H/lib.next/index.js" | grep -q '"use strict"'; then
   echo "safe-build: lib.next/index.js is CommonJS, refusing" >&2; exit 1

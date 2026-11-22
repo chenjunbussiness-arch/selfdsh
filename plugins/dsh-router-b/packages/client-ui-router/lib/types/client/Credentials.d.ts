@@ -35,4 +35,4 @@ export interface CredentialsProps {
  * @param props - rows, translate, and the optional write path.
  * @returns the rail's credential section.
  */
-export declare function Credentials({ rows, t, writable, onSave, onChanged }: CredentialsProps): import("react/jsx-runtime").JSX.Element;
+export declare function Credentials({ rows, t, writable, onSave, onChanged }: CredentialsProps): import("react").JSX.Element;

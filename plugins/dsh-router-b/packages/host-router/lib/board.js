@@ -40,12 +40,21 @@ export function mark(state) {
         case 'blocked': return '[B]';
         case 'cancelled': return '[-]';
         case 'interrupted': return '[^]';
+        case 'suspended': return '[z]';
     }
 }
 /** States a dispatched child can still be occupying a slot in. */
 export function isOpen(state) {
     return state === 'queued' || state === 'dispatched' || state === 'running' || state === 'reported'
-        || state === 'interrupted';
+        || state === 'interrupted' || state === 'suspended';
+}
+/** States that count as "finished" for a prerequisite. */
+export function isFinished(state) {
+    return state === 'done' || state === 'verified' || state === 'reported';
+}
+/** States that can never become finished without a human (a prerequisite in one of these is dead). */
+export function isDead(state) {
+    return state === 'failed' || state === 'cancelled';
 }
 /** Order tasks for execution: priority first, then arrival. */
 export function byExecutionOrder(left, right) {
@@ -74,8 +83,13 @@ export function summarize(tasks, options = {}) {
         const age = Math.max(0, Math.round((Date.now() - Date.parse(task.updatedAt)) / 1000));
         const parent = task.parentId === undefined ? '' : ` <- ${task.parentId}`;
         const worker = task.worker === undefined ? '-' : task.worker;
+        const order = [
+            task.stage === undefined ? '' : ` stage ${String(task.stage)}`,
+            (task.dependsOn?.length ?? 0) === 0 ? '' : ` after ${task.dependsOn.join(',')}`,
+            task.state === 'suspended' && (task.waitingOn?.length ?? 0) > 0 ? ` waiting-on ${task.waitingOn.join(',')}` : '',
+        ].join('');
         const row = `${mark(task.state)} ${task.id} ${task.partition}/${task.level} ${worker} `
-            + `p${String(task.priority)} ${task.subject}${parent} (${String(age)}s)`;
+            + `p${String(task.priority)} ${task.subject}${parent}${order} (${String(age)}s)`;
         // What the worker reported is what the next routing decision reads, so the
         // board shows it rather than making the caller open each row.
         const did = task.summary === undefined ? '' : `    did: ${task.summary}`;
@@ -83,11 +97,14 @@ export function summarize(tasks, options = {}) {
             ? ''
             : `    touched: ${task.touched.slice(0, 8).join(', ')}`
                 + (task.touched.length > 8 ? ` +${String(task.touched.length - 8)} more` : '');
-        return did === '' && touched === '' ? [row] : [row, did, touched];
+        const why = task.state === 'suspended' && task.suspendReason !== undefined ? `    suspended: ${task.suspendReason}` : '';
+        return [row, did, touched, why].filter(line => line !== '');
     });
     return [header, ...rows].join('\n');
 }
 /** Error text on a row the harness stopped mid-flight; the session itself is intact. */
+/** States after which a row does not change on its own. */
+export const SETTLED = new Set(['done', 'verified', 'reported', 'failed', 'cancelled']);
 export const INTERRUPTED_NOTE = 'the harness stopped while this task was in flight; its session will be resumed from its log';
 /** The board file. One instance per plugin activation. */
 export class TaskBoard {
@@ -95,6 +112,8 @@ export class TaskBoard {
     runToken;
     tasks = [];
     partitions = {};
+    /** Called after a row enters a settled state (see `SETTLED`). */
+    settleListeners = [];
     constructor(file, runToken) {
         this.file = file;
         this.runToken = runToken;
@@ -150,6 +169,7 @@ export class TaskBoard {
         const index = this.tasks.findIndex(task => task.id === id);
         if (index < 0)
             throw new Error(`host-router: unknown task ${id}`);
+        const previousState = this.tasks[index].state;
         const updated = {
             ...this.tasks[index],
             ...change,
@@ -157,7 +177,31 @@ export class TaskBoard {
         };
         this.tasks = [...this.tasks.slice(0, index), updated, ...this.tasks.slice(index + 1)];
         await this.flush();
+        const from = previousState;
+        if (SETTLED.has(updated.state) && !SETTLED.has(from)) {
+            for (const listener of this.settleListeners) {
+                try {
+                    listener(updated, from);
+                }
+                catch {
+                    // A listener must never fail a board write.
+                }
+            }
+        }
         return updated;
+    }
+    /**
+     * Run `listener` each time a row enters a settled state (done, verified,
+     * reported, failed, cancelled) from an unsettled one.
+     * @returns a function that removes the listener.
+     */
+    onSettled(listener) {
+        this.settleListeners.push(listener);
+        return () => {
+            const at = this.settleListeners.indexOf(listener);
+            if (at >= 0)
+                this.settleListeners.splice(at, 1);
+        };
     }
     /** Merge a patch into one partition record and persist. */
     async patchPartition(name, change) {

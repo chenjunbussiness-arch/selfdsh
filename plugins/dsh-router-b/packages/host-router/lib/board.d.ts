@@ -47,7 +47,13 @@ export type TaskState =
  * session log is intact, so the router resumes that same session on the next
  * boot instead of starting the work over.
  */
- | 'interrupted';
+ | 'interrupted'
+/**
+ * Parked until other tasks finish: the task (or a human) found it needs a
+ * prerequisite first. Its session is kept; when every row in `waitingOn` is
+ * finished the router continues that same session. Holds no worker slot.
+ */
+ | 'suspended';
 /** How a task was dispatched, so the board shows the routing level. */
 export type DispatchLevel = 
 /** Handed to a partition manager for decomposition. */
@@ -116,6 +122,51 @@ export interface RouterTask {
     readonly resumeNote?: string;
     /** How many times this row's session was resumed after an interruption. */
     readonly resumes?: number;
+    /**
+     * Task ids that must finish before this row may start. A queued row whose
+     * prerequisites are still open waits in the queue; one whose prerequisite
+     * failed or was cancelled is parked as `blocked` for a human.
+     */
+    readonly dependsOn?: readonly string[];
+    /**
+     * Ordered phase among siblings (rows with the same `parentId`). A row starts
+     * only after every sibling with a lower stage has finished. Absent = stage 0
+     * with no ordering among rows that carry no stage.
+     */
+    readonly stage?: number;
+    /** While `suspended`: the task ids it waits for. */
+    readonly waitingOn?: readonly string[];
+    /** Why the row was suspended, in the words of whoever suspended it. */
+    readonly suspendReason?: string;
+    /** How many times this row was suspended so far. */
+    readonly suspends?: number;
+    /** State the row had when it was suspended, so a resume knows whether it had finished once. */
+    readonly suspendedFrom?: TaskState;
+    /** How many times a manager that ended with open children was woken to keep waiting. */
+    readonly rewakes?: number;
+    /**
+     * Set on a `blocked` row the router parked because a prerequisite failed:
+     * the state to return to once that prerequisite is retried and finishes.
+     * Only meaningful together with a non-empty `waitingOn`.
+     */
+    readonly blockedFrom?: 'queued' | 'suspended';
+    /** A human chose to start this row without waiting for its prerequisites. */
+    readonly ignoreOrder?: boolean;
+    /** Model a human picked for this row (改派 / 换模型重跑); wins over tiers. */
+    readonly routeOverride?: {
+        readonly provider: string;
+        readonly model: string;
+        readonly reasoningEffort?: string;
+    };
+    /** The row that took this one's work over, and the row this one took over. */
+    readonly reassignedTo?: string;
+    readonly reassignedFrom?: string;
+    /** Pull request this row published, if any. */
+    readonly pr?: {
+        readonly number: number;
+        readonly url: string;
+        readonly provider: string;
+    };
     /** Human remarks recorded while the task was in flight. */
     readonly notes?: readonly string[];
     /** Difficulty tier chosen before dispatch (`easy | medium | hard`). */
@@ -154,6 +205,10 @@ export declare function tail(text: string, limit?: number): string;
 export declare function mark(state: TaskState): string;
 /** States a dispatched child can still be occupying a slot in. */
 export declare function isOpen(state: TaskState): boolean;
+/** States that count as "finished" for a prerequisite. */
+export declare function isFinished(state: TaskState): boolean;
+/** States that can never become finished without a human (a prerequisite in one of these is dead). */
+export declare function isDead(state: TaskState): boolean;
 /** Order tasks for execution: priority first, then arrival. */
 export declare function byExecutionOrder(left: RouterTask, right: RouterTask): number;
 /** Render the board for a model or a human. */
@@ -161,6 +216,8 @@ export declare function summarize(tasks: readonly RouterTask[], options?: {
     readonly partition?: string;
 }): string;
 /** Error text on a row the harness stopped mid-flight; the session itself is intact. */
+/** States after which a row does not change on its own. */
+export declare const SETTLED: ReadonlySet<TaskState>;
 export declare const INTERRUPTED_NOTE = "the harness stopped while this task was in flight; its session will be resumed from its log";
 /** The board file. One instance per plugin activation. */
 export declare class TaskBoard {
@@ -168,6 +225,8 @@ export declare class TaskBoard {
     private readonly runToken;
     private tasks;
     private partitions;
+    /** Called after a row enters a settled state (see `SETTLED`). */
+    private readonly settleListeners;
     private constructor();
     /**
      * Open or create `<dir>/board.json`.
@@ -197,6 +256,12 @@ export declare class TaskBoard {
      * @throws when the id is unknown, which means two writers disagree about the board.
      */
     patch(id: string, change: Partial<RouterTask>): Promise<RouterTask>;
+    /**
+     * Run `listener` each time a row enters a settled state (done, verified,
+     * reported, failed, cancelled) from an unsettled one.
+     * @returns a function that removes the listener.
+     */
+    onSettled(listener: (task: RouterTask, from: TaskState) => void): () => void;
     /** Merge a patch into one partition record and persist. */
     patchPartition(name: string, change: PartitionRecord): Promise<PartitionRecord>;
     /** Append a human remark without touching state. */

@@ -195,6 +195,11 @@ export interface PartitionView {
   readonly description?: string
   /** Configuration problems the Host found at boot. */
   readonly problems?: readonly PartitionProblemView[]
+  /**
+   * The built-in 快任务 group: small jobs outside every workspace, one worker
+   * each on the fast model, with slots of its own. It has no files to browse.
+   */
+  readonly quick?: boolean
 }
 
 /** One partition configuration problem a person should fix. */
@@ -271,6 +276,14 @@ export interface TaskView {
   readonly resumeNote?: string
   /** Harness Session of the executing worker, so the panel can offer "open". */
   readonly workerSessionId?: string
+  /** 改派: the row that took this one over, and the row this one took over. */
+  readonly reassignedTo?: string
+  readonly reassignedFrom?: string
+  /** Pull request this row published. */
+  readonly pr?: { readonly number: number; readonly url: string; readonly provider: string }
+  /** Model the row runs on, when the Host recorded one. */
+  readonly provider?: string
+  readonly model?: string
   /** Artifacts the worker produced, offered for download. */
   readonly artifacts?: readonly ArtifactRef[]
   /**
@@ -527,4 +540,105 @@ export interface PublishResult {
   readonly accepted: number
   /** Per-demand routing decisions, in input order. */
   readonly routed: readonly { readonly text: string; readonly partitionId?: string; readonly reason?: string }[]
+}
+
+// --- desk: approvals, audit, live output, reassign, batch --------------------
+
+/** One outlet action waiting for (or past) a human decision. */
+export interface ApprovalView {
+  readonly id: string
+  /** `git` push/PR, `merge` a PR, `ops` server command, `browser` page capture. */
+  readonly kind: 'git' | 'merge' | 'ops' | 'browser'
+  readonly partition: string
+  readonly taskId?: string
+  /** What will happen, in the router's words. */
+  readonly action: string
+  /** What it acts on: the PR URL, the command line, the page. */
+  readonly target: string
+  /** Why the agent asks, and checks where known. */
+  readonly reason: string
+  /** Whether the effect can be undone. */
+  readonly reversible: boolean
+  readonly state: 'pending' | 'approved' | 'rejected' | 'done' | 'failed' | 'expired'
+  readonly createdAt: string
+  readonly decidedAt?: string
+  readonly note?: string
+  /** Output of the run, or why it failed. */
+  readonly result?: string
+}
+
+/** `GET /api/router/approvals`. */
+export interface ApprovalsView {
+  readonly pending: readonly ApprovalView[]
+  readonly recent: readonly ApprovalView[]
+}
+
+/** One audit line. */
+export interface AuditEntryView {
+  readonly at: string
+  readonly kind: ApprovalView['kind']
+  readonly partition: string
+  readonly taskId?: string
+  readonly action: string
+  readonly target: string
+  readonly outcome: 'ran' | 'asked' | 'approved' | 'rejected' | 'refused' | 'failed' | 'expired'
+  readonly by: 'agent' | 'human' | 'router'
+  readonly detail?: string
+}
+
+/** One segment of a worker's live output: a command and its result, a message, or the turn end. */
+export interface LiveSegmentView {
+  readonly seq: number
+  readonly kind: 'command' | 'message' | 'end'
+  readonly title: string
+  readonly body: string
+  readonly error: boolean
+  readonly at: number
+  readonly running?: boolean
+}
+
+/** `GET /api/router/live`. */
+export interface LiveView {
+  readonly taskId: string
+  readonly state: string
+  readonly at: number
+  readonly sessionId?: string
+  readonly segments: readonly LiveSegmentView[]
+}
+
+/** A model the runtime offers, for 换模型. */
+export interface ModelChoiceView {
+  readonly provider: string
+  readonly providerName: string
+  readonly model: string
+  readonly name: string
+  readonly efforts?: readonly string[]
+}
+
+/** What 改派 asks for. */
+export interface ReassignInput {
+  readonly taskId: string
+  readonly partition?: string
+  readonly model?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+  /** true: 接着做 (carry progress); false: 从头来. */
+  readonly keepProgress: boolean
+  readonly note?: string
+}
+
+/** Result of 改派. */
+export interface ReassignResult {
+  readonly from: string
+  readonly to: string
+  readonly partition: string
+  readonly text: string
+}
+
+/** Actions the batch bar can send. */
+export type BatchAction = 'cancel' | 'cancel_tree' | 'retry' | 'suspend' | 'resume' | 'reassign'
+
+/** `POST /api/router/batch`. */
+export interface BatchResultView {
+  readonly ok: number
+  readonly failed: number
+  readonly results: readonly { readonly id: string; readonly ok: boolean; readonly state?: string; readonly error?: string }[]
 }

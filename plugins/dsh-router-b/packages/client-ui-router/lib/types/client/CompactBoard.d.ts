@@ -7,14 +7,20 @@
  * workers it dispatched indented underneath behind a `n 个 worker` chip. Rows
  * never repeat a work item as two siblings.
  *
- * The groups are 进行中, 需要输入, 排队中, 已失效分区, 失败/取消 and 已完成. There is
+ * The groups are 进行中, 已暂停（需要处理）, 已挂起（等前置）, 排队中, 已失效分区,
+ * 已完成, 失败 and 已取消. A parked (`blocked`) row carries a second line with its
+ * reason and a 恢复 button that sends `task_control resume`; a suspended row
+ * says what it waits for, and a queued row held back by the task order says
+ * which prerequisites are still open. Live rows offer 挂起 (with an optional
+ * prerequisite), failed rows offer 重试. The 进行中 tab opens with per-request
+ * progress and the router's latest progress notices. There is
  * no "awaiting review" bucket: a worker that reported in has finished, so host
  * state `reported` renders as 已完成. The finished pile opens folded, so history
  * never buries what is running.
  *
- * Each row is a single line: a thin-ringed circular status badge, the status word
- * (进行中 / 已完成 / 已中断 / 已取消 / 失败), one ellipsised title, and a light meta
- * column with the partition and either elapsed or settled time.
+ * Each row: an ellipsised 13px title with a light meta line (partition, time,
+ * monospace task id) below it, and a small status dot plus word on the right
+ * (进行中 / 已完成 / 已中断 / 已取消 / 失败). Narrow panels keep only title and dot.
  *
  * The groups come from `hostState` rather than the five-state `state` projection:
  * that projection folds `failed`/`cancelled` into `rejected` and `blocked` into
@@ -23,7 +29,7 @@
  * Everything the previous dense card list did is still here: rows open their
  * worker's Session on click, the board is re-read when the refresh icon is used
  * and every 3 s while anything runs (checklists live in worker logs, not in the
- * board file), long groups fold behind 更多（还有 n 条）, and the header's `+`
+ * board file), long groups fold behind 更多（还有 n 条） with 已显示 n/m beside the count, and the header's `+`
  * opens the war-room chat where demands are created.
  *
  * @module client-ui-router/compact-board
@@ -50,7 +56,7 @@ export type BoardTab = 'active' | 'next' | 'scheduled' | 'resolved';
  * has finished its work, and the panel is a progress tree, not a review queue.
  * Host states fold onto these three outcomes — running, finished, closed badly.
  */
-export type Group = 'running' | 'blocked' | 'queued' | 'stale' | 'done' | 'failed';
+export type Group = 'running' | 'blocked' | 'suspended' | 'queued' | 'stale' | 'done' | 'failed' | 'cancelled';
 /**
  * Group of one task.
  * @param task - the task.
@@ -62,16 +68,15 @@ export declare function groupOf(task: TaskView, live: ReadonlySet<string>): Grou
  * Bucket of one task.
  *
  * `reported` is a finished task here: a worker that reported in is done, and the
- * panel is a progress tree, not a review queue. The two closings that are not
- * failures in the usual sense (abort, cancel) still sit in 失败 but carry their
- * own caption on the row.
+ * panel is a progress tree, not a review queue. A cancellation files under
+ * 已取消; an abort stays in 失败 with its own 已中断 caption on the row.
  * @param task - a task.
  * @param live - partition ids that still exist.
  * @returns its bucket.
  */
 export declare function groupOfTask(task: TaskView, live: ReadonlySet<string>): Group;
 /** The word a row shows for its own status: icon colour alone is not enough. */
-export type StatusTone = 'running' | 'blocked' | 'queued' | 'done' | 'failed' | 'aborted' | 'cancelled' | 'stale';
+export type StatusTone = 'running' | 'blocked' | 'suspended' | 'queued' | 'waiting' | 'done' | 'failed' | 'aborted' | 'cancelled' | 'stale';
 /**
  * Caption key for one task's status word.
  * @param task - a task.
@@ -129,4 +134,4 @@ export declare function buildFamilies(tasks: readonly TaskView[], live: Readonly
  * @param props - controller, translate, Session service and outward actions.
  * @returns the board.
  */
-export declare function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, sessions }: CompactBoardProps): import("react/jsx-runtime").JSX.Element;
+export declare function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, sessions }: CompactBoardProps): import("react").JSX.Element;

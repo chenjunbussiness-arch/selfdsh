@@ -24,4 +24,4 @@ export interface ComposerProps {
  * @param props - publish callback and current publish status.
  * @returns the composer block.
  */
-export declare function Composer({ t, busy, lastPublish, onPublish, onEdit }: ComposerProps): import("react/jsx-runtime").JSX.Element;
+export declare function Composer({ t, busy, lastPublish, onPublish, onEdit }: ComposerProps): import("react").JSX.Element;

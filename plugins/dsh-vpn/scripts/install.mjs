@@ -19,7 +19,7 @@
  * @module dsh-vpn/scripts/install
  */
 
-import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -102,6 +102,8 @@ if (JSON.stringify(JSON.parse(original)) !== JSON.stringify(pkg)) {
 }
 
 const modules = join(profile, 'node_modules')
+// A fresh profile (first `dsh web` run, or a new machine) has no node_modules yet.
+if (!dryRun) mkdirSync(modules, { recursive: true })
 for (const [name, spec] of Object.entries(wanted)) {
   const target = spec.slice('link:'.length)
   const linkPath = join(modules, name)

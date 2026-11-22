@@ -25,6 +25,7 @@
  * @module host-router/bridge
  */
 import type { TaskState } from './board.ts';
+import type { GroupProgress } from './order.ts';
 import type { RouterSnapshot } from './snapshot.ts';
 import type { LoggerService, WebRouteLike } from './types.ts';
 /** Path prefix every bridge route lives under. */
@@ -35,6 +36,8 @@ export declare const BOARD_PATH = "/api/router/board";
 export declare const PUBLISH_PATH = "/api/router/publish";
 /** `POST` → record a human verification decision. */
 export declare const VERIFY_PATH = "/api/router/verify";
+/** `POST` → run one `task_control` action (`resume`, `block`) on a task. */
+export declare const CONTROL_PATH = "/api/router/control";
 /** `POST` → enable or disable one partition. */
 export declare const PARTITION_PATH = "/api/router/partition";
 /** `GET` → the 作战室 anchor session id (created or resumed on demand). */
@@ -43,6 +46,15 @@ export declare const ANCHOR_PATH = "/api/router/anchor";
 export declare const EVENTS_PATH = "/api/router/events";
 /** `GET` → tier settings + model options; `POST` → save tier settings. */
 export declare const TIERS_PATH = "/api/router/tiers";
+/** `GET ?partition=&path=` → one directory level of a partition (names only, never contents). */
+export declare const FILES_PATH = "/api/router/files";
+/** `GET|POST|DELETE` one partition's memory (notes and recent work). */
+export declare const MEMORY_PATH = "/api/router/memory";
+export declare const APPROVALS_PATH = "/api/router/approvals";
+export declare const AUDIT_PATH = "/api/router/audit";
+export declare const LIVE_PATH = "/api/router/live";
+export declare const REASSIGN_PATH = "/api/router/reassign";
+export declare const BATCH_PATH = "/api/router/batch";
 /**
  * The panel's five states.
  *
@@ -111,6 +123,8 @@ export interface UiManagerView {
 export interface UiPartitionView {
     readonly id: string;
     readonly name: string;
+    /** The built-in 快任务 group: jobs outside every workspace, on the fast model, with its own slots. */
+    readonly quick?: boolean;
     /** Absolute partition root. `repo` is the client contract's name for the same value. */
     readonly repo: string;
     /** Same absolute root, under the name the rail's subtitle reads. */
@@ -125,6 +139,18 @@ export interface UiPartitionView {
     readonly queuedCount: number;
     /** Rows whose worker self-reported and no verifier has ruled yet. */
     readonly unreviewedCount: number;
+    /** Suspended rows. */
+    readonly suspendedCount?: number;
+    /** Membership globs, so the workspace page can show the partition's rules. */
+    readonly include?: readonly string[];
+    readonly exclude?: readonly string[];
+    /** One-line description from the config, when given. */
+    readonly description?: string;
+    /** Configuration problems found at boot (missing root, nesting). */
+    readonly problems?: readonly {
+        readonly level: 'error' | 'warning';
+        readonly message: string;
+    }[];
     /** Every row this partition owns. */
     readonly taskCount: number;
     readonly manager: UiManagerView;
@@ -169,6 +195,18 @@ export interface UiTaskView {
     readonly result?: string;
     readonly verifyOutput?: string;
     readonly error?: string;
+    /** Why a `blocked` row is parked: the `value` of `task_control block`. */
+    readonly resumeNote?: string;
+    /** Explicit prerequisites and ordered phase. */
+    readonly dependsOn?: readonly string[];
+    readonly stage?: number;
+    /** A queued row held back by its order: the open prerequisites. */
+    readonly waitingFor?: readonly string[];
+    /** A suspended row: why, and what it waits for. */
+    readonly suspendReason?: string;
+    readonly waitingOn?: readonly string[];
+    /** Root task of the request this row belongs to. */
+    readonly rootId?: string;
     /** Difficulty tier chosen before dispatch (`easy | medium | hard`). */
     readonly tier?: 'easy' | 'medium' | 'hard';
     /** How the tier was decided and why. */
@@ -178,6 +216,14 @@ export interface UiTaskView {
     readonly provider?: string;
     readonly model?: string;
     readonly reasoningEffort?: string;
+    /** 改派 links and the published pull request. */
+    readonly reassignedTo?: string;
+    readonly reassignedFrom?: string;
+    readonly pr?: {
+        readonly number: number;
+        readonly url: string;
+        readonly provider: string;
+    };
 }
 /** One demand and the task it produced. */
 export interface UiDemandView {
@@ -206,6 +252,13 @@ export interface UiBoardSnapshot {
     /** Always `host` here: only the client's sample data is labelled otherwise. */
     readonly origin: 'host';
     readonly staleSince?: string;
+    /** Progress per request (root task). */
+    readonly groups?: readonly GroupProgress[];
+    /** Recent progress notices, newest first. */
+    readonly notices?: readonly {
+        readonly at: string;
+        readonly text: string;
+    }[];
 }
 /** One routing outcome inside a publish response. */
 export interface PublishRouted {
@@ -257,6 +310,11 @@ export interface PartitionSource {
     readonly dir: string;
     readonly slots: number;
     readonly managerEnabled: boolean;
+    /** The built-in 快任务 partition. */
+    readonly quick?: boolean;
+    readonly include?: readonly string[];
+    readonly exclude?: readonly string[];
+    readonly description?: string;
 }
 /** Everything the routes need from the plugin. Injected so the routes stay pure I/O. */
 export interface BridgeDeps {
@@ -278,6 +336,52 @@ export interface BridgeDeps {
         id: string;
         state: TaskState;
     }>;
+    /** Run one `task_control` action from the panel; absent means the route answers 404. */
+    readonly control?: (taskId: string, action: string, value: string | undefined, extra?: {
+        readonly prerequisite?: string;
+        readonly waitFor?: readonly string[];
+    }) => Promise<{
+        id: string;
+        state: TaskState;
+        text: string;
+    }>;
+    /** One directory level of a partition; absent means the route answers 404. */
+    readonly files?: (partition: string, path: string | undefined) => Promise<unknown>;
+    /**
+     * Outlets and the wider control surface: the approval queue, the audit log,
+     * a worker's live output, reassigning a task, and batch actions. Absent means
+     * these routes answer 404.
+     */
+    readonly desk?: {
+        readonly approvals: () => Promise<unknown>;
+        readonly decide: (id: string, decision: 'approve' | 'reject', note: string | undefined) => Promise<unknown>;
+        readonly audit: (limit: number) => Promise<unknown>;
+        readonly live: (taskId: string, after: number) => Promise<unknown>;
+        readonly reassign: (input: {
+            readonly taskId: string;
+            readonly partition?: string;
+            readonly model?: {
+                readonly provider: string;
+                readonly model: string;
+                readonly reasoningEffort?: string;
+            };
+            readonly keepProgress: boolean;
+            readonly note?: string;
+        }) => Promise<unknown>;
+        readonly batch: (taskIds: readonly string[], action: string, value: string | undefined) => Promise<unknown>;
+    };
+    /** Partition memory; absent means the route answers 404. */
+    readonly memory?: {
+        readonly read: (partition: string) => Promise<unknown>;
+        readonly addNote: (partition: string, text: string) => Promise<unknown>;
+        readonly removeNote: (partition: string, id: string) => Promise<unknown>;
+    };
+    /** Partition configuration problems found at boot. */
+    readonly problems?: () => readonly {
+        readonly partition: string;
+        readonly level: 'error' | 'warning';
+        readonly message: string;
+    }[];
     /** Flip a partition's operator switch. */
     readonly setPartitionState: (name: string, enabled: boolean) => Promise<{
         id: string;
@@ -306,6 +410,12 @@ export declare function boardDocument(input: {
     readonly partitions: readonly PartitionSource[];
     readonly isEnabled: (name: string) => boolean;
     readonly credentials: readonly UiCredentialView[];
+    /** Partition configuration problems found at boot. */
+    readonly problems?: readonly {
+        readonly partition: string;
+        readonly level: 'error' | 'warning';
+        readonly message: string;
+    }[];
     /** Clock override, for tests. */
     readonly now?: number;
 }): UiBoardSnapshot;

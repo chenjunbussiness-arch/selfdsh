@@ -58,3 +58,30 @@ export function createRoutes(deps) {
     },
   ]
 }
+
+/**
+ * Wrap a route so it answers only a logged-in browser.
+ *
+ * `dsh-client-connection` checks the login cookie on its `/api` prefix route,
+ * but `/api/token-stats/summary` is a longer match, so the web server picks it
+ * first and that check never runs. This puts the same check back.
+ *
+ * @param {{ kind: string, path: string, handler: Function }} route - the bridge route.
+ * @param {() => ({ requestRejection?: (req: import('node:http').IncomingMessage) => number | undefined } | undefined)} connection - reads the `connection` service at request time.
+ * @returns {{ kind: string, path: string, handler: Function }} the guarded route (401/403 from the connection, 503 when it is not up).
+ */
+export function requireLogin(route, connection) {
+  return {
+    ...route,
+    handler: async (req, res) => {
+      const check = connection()
+      const rejection = typeof check?.requestRejection === 'function' ? check.requestRejection(req) : 503
+      if (rejection !== undefined) {
+        res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(rejection === 401 ? 'unauthorized' : rejection === 403 ? 'forbidden' : 'login service unavailable')
+        return
+      }
+      await route.handler(req, res)
+    },
+  }
+}

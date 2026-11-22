@@ -35,11 +35,22 @@ export interface TierDecision {
     readonly source: TierSource;
     readonly reason: string;
 }
+/**
+ * Model of every partition manager.
+ *
+ * - absent or `'strongest'`: the saved `hard` route, else the strongest model the
+ *   runtime advertises (see `strongestRoute`), at its highest reasoning effort;
+ * - `'inherit'`: the dispatcher's own model (the old behaviour);
+ * - a route: exactly that model.
+ */
+export type ManagerModel = 'strongest' | 'inherit' | TierRoute;
 /** Persisted user choice. */
 export interface TierSettings {
     /** `false` means every task inherits the dispatcher's model (the old behaviour). */
     readonly auto: boolean;
     readonly tiers: Partial<Record<Tier, TierRoute>>;
+    /** Manager model; absent means `'strongest'`. Applies whether or not `auto` is on. */
+    readonly manager?: ManagerModel;
 }
 /** One model offered to the panel. */
 export interface ModelOption {
@@ -85,6 +96,29 @@ export declare function classifyTier(input: {
  * @returns one route per tier.
  */
 export declare function defaultTiers(models: readonly ModelOption[], fallback: TierRoute | undefined): Record<Tier, TierRoute | undefined>;
+/** Higher is stronger: flagship wording up, cheap wording down. */
+export declare function strength(name: string): number;
+/** The largest version number in a model name (`claude-opus-5.5` -> 5.5), 0 when none. */
+export declare function versionOf(name: string): number;
+/**
+ * The strongest advertised model, at its highest reasoning effort.
+ *
+ * Ranked by flagship wording, then version number, then how many reasoning
+ * efforts it offers. Ties keep the profile's default model when it is among
+ * them, so an install with one family and no flagship wording simply keeps its
+ * default. Returns the fallback when nothing is advertised.
+ */
+export declare function strongestRoute(models: readonly ModelOption[], fallback: TierRoute | undefined): TierRoute | undefined;
+/** Raise a route to the highest reasoning effort its model offers. */
+export declare function atTopEffort(route: TierRoute, models: readonly ModelOption[]): TierRoute;
+/**
+ * Resolve the manager's model route and say where it came from.
+ * @returns `route` undefined means inherit the dispatcher's model.
+ */
+export declare function managerRouteOf(settings: TierSettings, models: readonly ModelOption[], fallback: TierRoute | undefined): {
+    readonly route?: TierRoute;
+    readonly source: 'saved' | 'hard' | 'strongest' | 'inherit';
+};
 /** Durable tier settings in one JSON file. */
 export declare class TierStore {
     private readonly file;
@@ -99,3 +133,5 @@ export declare class TierStore {
 }
 /** Validate a settings document; unknown fields are dropped. */
 export declare function normaliseSettings(raw: Partial<TierSettings> | undefined): TierSettings;
+/** Validate a manager model choice; anything unreadable means the default. */
+export declare function normaliseManager(raw: unknown): ManagerModel | undefined;

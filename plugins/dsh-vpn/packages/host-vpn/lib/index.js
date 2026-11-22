@@ -15,6 +15,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { BRIDGE_BASE, createRoutes } from "./bridge.js";
 import { VpnManager } from "./manager.js";
+import { requireLogin } from "./login.js";
 import { ProfileStore } from "./store.js";
 /** Stable plugin name. */
 export const name = 'host-vpn';
@@ -98,8 +99,12 @@ export async function apply(ctx, config = {}) {
                 ctx.logger.warn('host-vpn: webServer exposes no register(); the HTTP bridge is not mounted');
                 return;
             }
-            for (const route of createRoutes(deps))
-                webCtx.effect(() => webServer.register(route), `host-vpn: ${route.path}`);
+            // Login is checked here: a plugin route outranks the connection's own `/api` check.
+            const connection = () => ctx.get?.('connection');
+            for (const route of createRoutes(deps)) {
+                const guarded = requireLogin(route, connection);
+                webCtx.effect(() => webServer.register(guarded), `host-vpn: ${route.path}`);
+            }
             ctx.logger.info(`host-vpn: HTTP bridge mounted at ${BRIDGE_BASE} (status/profiles/profile/connect/disconnect/logs)`);
         });
     }

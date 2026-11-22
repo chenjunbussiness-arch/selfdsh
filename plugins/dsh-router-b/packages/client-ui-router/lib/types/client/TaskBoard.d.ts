@@ -76,4 +76,4 @@ export interface TaskBoardProps {
  * @param props - board data, tab state, and the actions each row offers.
  * @returns the tab strip and the sections under it.
  */
-export declare function TaskBoard(props: TaskBoardProps): import("react/jsx-runtime").JSX.Element;
+export declare function TaskBoard(props: TaskBoardProps): import("react").JSX.Element;

@@ -40,20 +40,54 @@
  */
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { DEFAULT_CONTEXT_LIMIT, DEFAULT_CREDENTIAL_REFS, PartitionConfigError, normalisePartitions, partitionBrief, resolveRoute, resolveRouteSmart, } from "./config.js";
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { DEFAULT_CONTEXT_LIMIT, DEFAULT_CREDENTIAL_REFS, PartitionConfigError, QUICK_PARTITION, normalisePartitions, partitionBrief, quickPartition, resolveRoute, resolveRouteSmart, } from "./config.js";
 import { formatTokens, pressureTokensOf } from "./context.js";
 import { parseWorkerReport } from "./report.js";
-import { INTERRUPTED_NOTE, TaskBoard, mark, nextTaskId, summarize, tail } from "./board.js";
+import { INTERRUPTED_NOTE, SETTLED, TaskBoard, isDead, isFinished, mark, nextTaskId, summarize, tail } from "./board.js";
+import { dependencyError, gateOf, gateOfIds, groupProgress, progressLine, rootOf } from "./order.js";
 import { cancelWorker, continueWorker, runVerify, startWorker, textOf } from "./dispatch.js";
 import { buildSnapshot, createLogReader, foldWorkerLog } from "./snapshot.js";
 import { BRIDGE_BASE, BridgeError, createRoutes, credentialSourceOf } from "./bridge.js";
+import { FileListError, listPartitionDir, partitionProblems } from "./files.js";
 import { randomUUID } from 'node:crypto';
-import { TIERS, TierStore, classifyTier, defaultTiers, isTier, normaliseSettings } from "./tier.js";
+import { TIERS, TierStore, classifyTier, defaultTiers, isTier, managerRouteOf, normaliseManager, normaliseSettings } from "./tier.js";
+import { MemoryStore, entryOf, memoryBrief, renderTranscript, sessionRoster, workLine } from "./memory.js";
+import { DEFAULT_POLICY, OutletStore, classifyCommand, gitFacts, hostAllowed, pushableBranch, run, runShell } from "./outlets.js";
+import { createScmClient, envToken } from "./scm.js";
+import { liveSegments } from "./live.js";
 /** Stable plugin name. */
 export const name = 'host-router';
 /** The tool registry and the subagent seam are hard dependencies. */
 export const inject = ['tools', 'subagents'];
+/**
+ * Put the web app's own login in front of one bridge route.
+ *
+ * The host web server matches the longest prefix first, so `/api/router/*`
+ * wins over the app's `/api` route and would skip its login check. Without
+ * this, anything that can reach the port (a worker's shell included) could
+ * read the board and approve its own merge or dangerous command. Fails closed:
+ * with no login service the route answers 503.
+ * @param route - the route as the bridge builds it.
+ * @param connection - reads the `connection` service at request time.
+ * @returns the same route behind the login check.
+ */
+export function requireLogin(route, connection) {
+    return {
+        kind: route.kind,
+        path: route.path,
+        handler: async (req, res) => {
+            const check = connection();
+            const rejection = typeof check?.requestRejection === 'function' ? check.requestRejection(req) : 503;
+            if (rejection !== undefined) {
+                res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+                res.end(rejection === 401 ? 'unauthorized' : rejection === 403 ? 'forbidden' : 'login service unavailable');
+                return;
+            }
+            await route.handler(req, res);
+        },
+    };
+}
 /** Default concurrent workers per partition. */
 const DEFAULT_SLOTS = 2;
 /** Default process-wide concurrent worker cap. */
@@ -98,6 +132,10 @@ function managerPrompt(input) {
     return [
         `You are the manager of the "${input.partition.name}" partition of this workspace.`,
         `Its files live under ${input.partition.dir}; that is the scope you direct.`,
+        'You are this partition\'s standing manager: every request for this partition comes to its manager, and',
+        'what earlier requests did is kept for you in the partition memory below. Read it before you plan. You',
+        'know your partition\'s sessions: `session_list` shows every worker session, `session_read` shows what',
+        'one of them actually did (its messages and tool calls), and `task_resume` continues one.',
         '',
         'Your role is dispatch only. You are level 2 of the router: the router already chose this partition,',
         'and your job is to hand the work to workers. Hard rules:',
@@ -118,6 +156,20 @@ function managerPrompt(input) {
         '- Start independent workers in the SAME turn (several `route_task` calls, no `wait_agent` in between);',
         '  there is no worker cap to save. Each worker text must be self-contained: the worker has none of this',
         '  context.',
+        '- **Order rule**: when some pieces can only start after others finish (e.g. 1, 2, 3 must be done before',
+        '  4, 5, 6), still publish ALL pieces now, but give each `route_task` a `stage` (1 for the first phase,',
+        '  2 for the next, ...) or a `depends_on` list of the task ids that must finish first. The router holds',
+        '  later stages in the queue and starts them automatically when the earlier ones finish. Never start a',
+        '  later phase early, and never wait to publish it "later": publish it now with its stage.',
+        '- A worker may suspend itself (`task_suspend`) when it finds a missing prerequisite; the router then',
+        '  creates the prerequisite as a sibling task and continues the suspended worker when it finishes.',
+        '- **Dispatch now, do not wait for approval**: start the workers as soon as the plan is clear; the human',
+        '  does not review plans. Stop and ask only when you are genuinely unsure: the request can be read two ways',
+        '  that build different things, or a step could destroy data that cannot be recovered. Then call',
+        `  \`task_control\` with action \`block\` on your own task "${input.taskId}" with the question as \`value\`, and end.`,
+        '- Code goes out through `git_publish` (push + pull request) and merges only through `pr_merge`, which',
+        '  waits for the human. Server changes go through `ops_run`. A worker that failed for a reason another',
+        '  partition or a stronger model would fix can be moved with `task_reassign` instead of a blind retry.',
         '',
         '- Keep a checklist with `todo_write`: before the first `route_task` write the split plan (one step per',
         '  worker plus a final consolidate step); update it each time you start a worker and each time a worker',
@@ -126,7 +178,9 @@ function managerPrompt(input) {
         'Steps:',
         '1. Split the request into self-contained pieces (do not invent work), applying the split rule above.',
         '2. For each piece, decide whether to continue an existing worker or start a new one:',
-        '   - you may read `task_board` for this partition: finished rows carry `did` and `touched`;',
+        '   - the memory below lists recent work with `did`, `touched`, and the session; `task_board` and',
+        '     `session_list` have the rest. When a piece continues earlier work, `session_read` that session first',
+        '     so your brief builds on what was really done instead of guessing;',
         '   - continue with `task_resume` only when a reported row\'s `touched` overlaps the files this piece',
         '     will change; otherwise start a new worker with `route_task`;',
         '   - prefer a new worker when in doubt.',
@@ -134,10 +188,19 @@ function managerPrompt(input) {
         '   it as often as needed) until EVERY worker you started has reported back. Do not end your turn before',
         '   that: your closing message is what the dispatcher receives, and a worker report that arrives after',
         '   you have ended is lost.',
+        '   Tasks waiting on a stage or a prerequisite, and suspended tasks, are not running yet, so `wait_agent`',
+        `   cannot see them. When \`wait_agent\` has nothing left to wait for, call \`task_wait\` with parent_task "${input.taskId}":`,
+        '   it returns when one of your tasks changes state. Loop `wait_agent` / `task_wait` until `task_wait`',
+        '   reports that all your tasks are settled. Do not re-publish a task that is only waiting.',
         '   A worker that ended failed or aborted must be handled, not ignored: re-dispatch that piece with a',
         '   narrower brief (`route_task`) or retry the same row (`task_control` with action `retry`). Only give up',
         '   after a retry also fails, and say so explicitly in your answer.',
-        '4. Then answer with one consolidated report written for the human, in the request\'s language:',
+        '4. Before you answer, keep what the next manager of this partition must know: call `partition_memory`',
+        '   with action `note` once per lasting fact (a convention you found, a decision the user made, a pitfall',
+        '   a worker hit, where something lives). One short fact per note; skip what the work log already holds',
+        '   (each finished task is recorded automatically), and skip facts that only matter for this request.',
+        '   If a note in memory turned out wrong, remove it (`partition_memory` action `forget` with its id).',
+        '5. Then answer with one consolidated report written for the human, in the request\'s language:',
         '   what was done, how it was done, the results (concrete facts the workers observed), and every',
         '   artifact and screenshot path the workers gave, copied verbatim as absolute paths. Do not invent',
         '   facts and do not drop paths. There is no acceptance step: this report is the answer.',
@@ -147,6 +210,7 @@ function managerPrompt(input) {
                 'that reason, say so in your answer instead of doing the work yourself.']
             : [],
         '',
+        ...input.memory === undefined ? [] : [input.memory, ''],
         `--- request ${input.taskId} ---`,
         input.body,
     ].join('\n');
@@ -168,22 +232,28 @@ function anchorInstructions(partitions) {
         '做完后，你用正常聊天的口吻告诉用户做了什么、怎么做的、结果是什么。',
         '',
         '## 分区',
-        ...partitions.map(partition => `- ${partition.name}: ${partition.dir}`
+        ...partitions.filter(partition => partition.quick !== true).map(partition => `- ${partition.name}: ${partition.dir}`
+            + (partition.managerEnabled ? '' : '（无 manager）')
             + (partition.description === undefined ? '' : ` — ${partition.description.replace(/\s+/g, ' ').trim()}`)),
         '',
         '## 规则',
         '1. 闲聊、问答、解释、介绍你能做什么，以及靠对话本身就能回答的问题：直接回答，不要派任务。',
-        '2. 需要动手的事（改代码、跑命令、查看或分析文件、打开网页、截图、部署等）：你处在这条链的第 1 级，',
-        '   职责是「路由 + 拆解」，不是把整段需求原样转手。按三步走：',
-        '   a. **拆**：把需求拆成若干工作项，每项是一个能独立完成、有明确产物的单元（例如「改后端接口」与「改前端页面」',
-        '      是两个工作项；「先查清现状再改」可以是一个工作项）。单点小事才只有一个工作项。',
-        '   b. **分配**：每个工作项各自判断属于哪个分区；跨分区的工作项分别派给各自分区。',
-        '   c. **派发**：互不依赖的工作项必须在同一轮里连续多次调用 `route_task` 并行派出；有先后依赖的按顺序派。',
-        '      不要因为「一个需求」就只派一条——那会把整块工作压成主从式的单线传递。',
-        '   - 拆解结果先用 `todo_write` 记下来（每个工作项一步，最后一步汇总），用户能在面板上看到路由计划。',
-        '   - 每个 `route_task` 的 `text` 要自包含（执行者看不到这段对话，要带 URL、路径、要求、期望产物），',
-        '     但只写这个工作项的范围，不要把整段需求复制过去。',
-        '   - 能判断分区就填 `partition`，判断不了就省略，由路由器决定。不要传 `parent_task`。',
+        '2. 需要动手的事（改代码、跑命令、查看或分析文件、打开网页、截图、部署等）：你是这条链的第 1 级「路由」，',
+        '   只负责**快速转发**：routing（你）→ 分区 manager → session → worker。拆解、排顺序、选 worker 都是',
+        '   分区 manager 的事，它记得这个分区以前做过什么、有哪些 session，比你更清楚怎么拆。',
+        '   a. **认分区**：判断需求涉及哪个分区；涉及几个就是几个。',
+        '   b. **转发**：每个涉及的分区发一条 `route_task`，`partition` 填分区名；`text` 写用户原话里属于这个分区的',
+        '      那部分，再补上这段对话里它需要的上下文（URL、路径、要求、期望产物）。执行方看不到这段对话，所以要自包含，',
+        '      但**不要替 manager 拆成小任务**，也不要加你自己的实现方案。',
+        '   c. 跨分区且有先后（例如先改后端接口、再改前端页面），给后面那条带 `depends_on`（填前面返回的任务号）。',
+        '   d. 所有转发在同一轮里发完，不要等前面做完。不要传 `parent_task`。',
+        '   - 分区列表里标了「无 manager」的分区没有 manager，转给它的需求你要自己按工作项拆开、各发一条。',
+        '   - 判断不了分区就省略 `partition`，由路由器决定。',
+        ...partitions.some(partition => partition.quick === true) ? [
+            `   e. **快任务**：不属于上面任何工作区的小活——改电脑配置、跑 git 命令、装工具、查端口/进程/磁盘这类——`,
+            `      发一条 \`route_task\`，\`partition\` 填 \`${QUICK_PARTITION}\`，text 写清要做什么。它由一个快模型 worker 直接做，`,
+            '      不经过 manager。纯问答（不用在机器上执行就能答的）仍然按规则 1 直接回答，不要派。',
+        ] : [],
         '3. 你自己绝不动手干活：不调用 bash、pwsh、write、edit、apply_patch 等修改文件或执行命令的工具，',
         '   也不要用 web_fetch、browser 之类的工具代替执行者去做任务。可以用 `task_board` / `task_progress` 查进度，',
         '   用 `read` / `read_image` 查看执行者产出的文件和截图。',
@@ -195,11 +265,23 @@ function anchorInstructions(partitions) {
         '   - 其他产物用 Markdown 链接写出绝对路径；',
         '   - 失败就如实说明失败在哪里，以及建议的下一步。',
         '   没有验收环节，不要提"验收""待验收"；汇报本身就是结果。',
-        '6. 用户追问某个任务的细节时，用 `task_board`（带 task_id）查记录；需要在同一个执行者上继续做，用 `task_resume`。',
+        '6. 用户追问某个任务的细节时，用 `task_board`（带 task_id）查记录，`session_read` 看那个 session 实际做了什么；',
+        '   需要在同一个执行者上继续做，用 `task_resume`。问某个分区以前做过什么，用 `partition_memory`（action `read`）。',
+        '7. 挂起：用户说某个任务（不管是否已完成）缺了前置、要先挂起以后再补，用 `task_suspend`：填 task_id、原因，',
+        '   前置要做的事写在 `prerequisite`（路由器会新建前置任务），或者在 `wait_for` 里填已有的任务号。',
+        '   前置完成后路由器会在原来的会话里叫醒这个任务继续做。没有前置、只是先放着的，也可以只写原因，之后用',
+        '   `task_control` 的 `resume` 手动继续。',
+        '8. 以「【进度提醒】」开头的消息来自路由器，不是用户的新需求：用一两句话把进度转告用户（哪个任务挂起/继续了、',
+        '   整体完成了几个），不要派任务，也不要调用工具。',
+        '9. 子任务结束的通知不一定代表做完：分区 manager 有时一轮结束后会被路由器叫醒接着等它的 worker。收到通知后先用',
+        '   `task_board`（带 task_id）看那个任务的状态：还是 running / dispatched / queued 的，不要告诉用户做完了，',
+        '   最多一句「还在做」，等真正结束的那条通知再汇报；同一个任务已经汇报过的，不要重复汇报。',
     ].join('\n');
 }
 /** Directory the anchor Session lives in: the partitions' shared parent, else the first root. */
-function anchorDirOf(partitions) {
+function anchorDirOf(all) {
+    // The 快任务 root (home) is not a workspace and would pull the anchor out of them.
+    const partitions = all.filter(partition => partition.quick !== true);
     const parents = [...new Set(partitions.map(partition => dirname(partition.dir)))];
     return parents.length === 1 ? parents[0] : (partitions[0]?.dir ?? process.cwd());
 }
@@ -226,10 +308,15 @@ function userMessage(text) {
 }
 /** Mount the router: partitions, board, tools, and the worker lifecycle. */
 export async function apply(ctx, config) {
-    const partitions = normalisePartitions(config.partitions, {
+    const declared = normalisePartitions(config.partitions, {
         workers: DEFAULT_SLOTS,
         manager: config.manager !== false,
     });
+    // 快任务: a built-in partition for jobs outside every workspace (see QuickConfig).
+    const quick = quickPartition(config.quick, declared, homedir());
+    const partitions = quick === undefined ? declared : [...declared, quick];
+    /** Names of partitions whose workers do not count against the router-wide cap. */
+    const quickNames = new Set(partitions.filter(partition => partition.quick === true).map(partition => partition.name));
     const home = process.env['DSH_HOME'] ?? join(homedir(), '.dsh');
     const boardDir = config.boardDir === undefined ? join(home, 'router') : resolve(config.boardDir);
     const snapshotPath = join(boardDir, 'snapshot.json');
@@ -237,6 +324,32 @@ export async function apply(ctx, config) {
     /** Identity of this plugin activation, so a restart can spot its own leftovers. */
     const runToken = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const board = await TaskBoard.open(boardDir, runToken);
+    /**
+     * Partition memory: every settled row lands in its partition's work log, so the
+     * next manager of that partition starts knowing what was done before.
+     */
+    const memory = await MemoryStore.open(join(boardDir, 'memory'), partitions.map(partition => partition.name));
+    const outlets = await OutletStore.open(boardDir);
+    {
+        // First boot with memory: the board already holds the partition's history.
+        const byId = new Map(board.list().map(row => [row.id, row]));
+        for (const partition of partitions) {
+            const settled = board.inPartition(partition.name).filter(task => SETTLED.has(task.state));
+            const seeded = await memory.seed(partition.name, settled.map(task => entryOf(task, rootOf(task, byId).id)))
+                .catch((error) => {
+                ctx.logger.warn(`host-router: could not seed ${partition.name} memory: ${String(error)}`);
+                return 0;
+            });
+            if (seeded > 0)
+                ctx.logger.info(`host-router: ${partition.name} memory seeded with ${String(seeded)} finished task(s)`);
+        }
+    }
+    board.onSettled((task) => {
+        const byId = new Map(board.list().map(row => [row.id, row]));
+        void memory.record(task.partition, entryOf(task, rootOf(task, byId).id)).catch((error) => {
+            ctx.logger.warn(`host-router: could not record ${task.id} in ${task.partition} memory: ${String(error)}`);
+        });
+    });
     const provider = config.provider ?? 'spawn';
     const maxWorkers = config.maxWorkers ?? DEFAULT_MAX_WORKERS;
     const autoVerify = config.autoVerify !== false;
@@ -385,6 +498,8 @@ export async function apply(ctx, config) {
             hard: saved.hard ?? defaults.hard,
         };
     };
+    /** Model route for partition managers: saved choice, else the strongest advertised model. */
+    const managerRoute = async () => managerRouteOf(tierStore.get(), await cachedModelOptions(), defaultRoute());
     /** Classify one route_task call; never throws. */
     const decideTier = async (args) => {
         if (!tierStore.get().auto && !isTier(args.tier))
@@ -404,6 +519,8 @@ export async function apply(ctx, config) {
                 effective: await effectiveTiers(),
                 defaults,
                 defaultModel: defaultRoute() ?? null,
+                manager: settings.manager ?? 'strongest',
+                managerEffective: await managerRoute(),
                 models,
             };
         },
@@ -431,7 +548,19 @@ export async function apply(ctx, config) {
                     }
                 }
             }
-            await tierStore.set({ auto: incoming.auto, tiers });
+            let manager = current.manager;
+            if ('manager' in body) {
+                manager = body['manager'] === null ? undefined : normaliseManager(body['manager']);
+                if (body['manager'] !== null && manager === undefined) {
+                    throw new BridgeError(400, 'bad-request', 'manager must be "strongest", "inherit", or a {provider, model} route');
+                }
+                const picked = manager;
+                if (typeof picked === 'object' && models.length > 0
+                    && !models.some(option => option.provider === picked.provider && option.model === picked.model)) {
+                    throw new BridgeError(400, 'bad-request', `unknown model route ${picked.provider}/${picked.model}`);
+                }
+            }
+            await tierStore.set({ auto: incoming.auto, tiers, ...manager === undefined ? {} : { manager } });
             ctx.logger.info(`host-router: tier settings saved (auto=${String(incoming.auto)})`);
             return await tierFace.read();
         },
@@ -492,6 +621,11 @@ export async function apply(ctx, config) {
     }, undefined, 2), 'utf8').catch((error) => {
         ctx.logger.warn(`host-router: could not write seams.json: ${String(error)}`);
     });
+    /** Partition layout problems, checked once at boot and shown on the workspace page. */
+    const configProblems = await partitionProblems(partitions).catch(() => []);
+    for (const problem of configProblems) {
+        ctx.logger.warn(`host-router: partition "${problem.partition}" ${problem.level}: ${problem.message}`);
+    }
     let sequence = board.list().length;
     /** Most recent human-facing agent, used when a queued task's own dispatcher is gone. */
     let lastCaller;
@@ -722,7 +856,11 @@ export async function apply(ctx, config) {
      * then any live Session, then the Router's own anchor.
      */
     const resolveParent = async (task, caller) => {
-        const recorded = liveAgent(task.dispatchFrom) ?? caller ?? lastCaller;
+        // A row held back by its order starts after its dispatcher may have ended its
+        // turn; the parent manager's own session is the next best owner, because the
+        // worker's report must reach the manager that is waiting for it.
+        const parentSession = task.parentId === undefined ? undefined : board.get(task.parentId)?.sessionId;
+        const recorded = liveAgent(task.dispatchFrom) ?? liveAgent(parentSession) ?? caller ?? lastCaller;
         if (recorded !== undefined)
             return recorded;
         const root = partitions.find(entry => entry.name === task.partition)?.dir;
@@ -736,9 +874,10 @@ export async function apply(ctx, config) {
     };
     /** Workers, not managers: managers are control entities with their own cap. */
     const runningCount = (partition) => board.inPartition(partition).filter(task => task.level === 'worker' && holdsSlot(task)).length;
-    const totalRunning = () => board.list().filter(task => task.level === 'worker' && holdsSlot(task)).length;
+    /** Workspace workers only: a 快任务 worker has its own slots and never takes a workspace's. */
+    const totalRunning = () => board.list().filter(task => task.level === 'worker' && !quickNames.has(task.partition) && holdsSlot(task)).length;
     /** Whether the router-side worker caps are reached; `0` means that cap is off. */
-    const workersFull = (partition) => (maxWorkers > 0 && totalRunning() >= maxWorkers)
+    const workersFull = (partition) => (maxWorkers > 0 && partition.quick !== true && totalRunning() >= maxWorkers)
         || (partition.slots > 0 && runningCount(partition.name) >= partition.slots);
     const readLog = createLogReader(ctx.get('sessionQuery'), ctx.logger);
     /**
@@ -795,8 +934,18 @@ export async function apply(ctx, config) {
         }
         return snapshotQueued;
     };
+    /** Set when a snapshot pass settled a row from its log; the queue is driven after the pass. */
+    let settledFromLog = false;
     const buildAndWriteSnapshot = async () => {
+        const byId = new Map(board.list().map(row => [row.id, row]));
         const snapshot = await buildSnapshot({
+            progress: () => progressOf(),
+            notices: () => recentNotices,
+            waitingFor: (task) => {
+                const gate = orderGate(task);
+                return gate.kind === 'wait' ? gate.on : undefined;
+            },
+            rootOf: (task) => rootOf(task, byId).id,
             board,
             partitions,
             sessionQuery: ctx.get('sessionQuery'),
@@ -804,6 +953,9 @@ export async function apply(ctx, config) {
             isLive: task => holdsSlot(task),
             readLog,
             correctState: async (task, change) => {
+                if (task.level === 'manager' && change.state === 'done' && await keepManagerWaiting(task, change.result ?? ''))
+                    return;
+                settledFromLog = true;
                 await board.patch(task.id, {
                     state: change.state,
                     ...change.result === undefined ? {} : { result: tail(change.result) },
@@ -811,6 +963,11 @@ export async function apply(ctx, config) {
                 });
             },
         });
+        if (settledFromLog) {
+            settledFromLog = false;
+            // Off the build: driving the queue publishes again, which waits on this one.
+            setTimeout(() => { void afterChange().catch(() => { }); }, 0);
+        }
         try {
             await mkdir(dirname(snapshotPath), { recursive: true });
             await writeFile(snapshotPath, JSON.stringify(snapshot, undefined, 2), 'utf8');
@@ -820,8 +977,15 @@ export async function apply(ctx, config) {
         }
         return snapshot;
     };
-    /** Record a task's terminal state from the worker's own result. */
+    /** Record a task's terminal state from the worker's own result, then drive what it unblocks. */
     const finish = async (taskId, result) => {
+        await settleRow(taskId, result);
+        await afterChange().catch((error) => {
+            ctx.logger.warn(`host-router: after settling ${taskId}: ${String(error)}`);
+        });
+    };
+    /** Record a task's terminal state from the worker's own result. */
+    const settleRow = async (taskId, result) => {
         inFlight.delete(taskId);
         const task = board.get(taskId);
         if (task === undefined || (task.state !== 'running' && task.state !== 'dispatched'))
@@ -866,6 +1030,10 @@ export async function apply(ctx, config) {
                 await publishSnapshot().catch(() => { });
                 return;
             }
+            // A manager that ends while some of its tasks are still waiting (on a stage,
+            // a prerequisite, or a suspension) would lose their reports: wake it to wait.
+            if (await keepManagerWaiting(task, report))
+                return;
             // No acceptance step: a manager that dispatched and ended normally is done.
             const relayed = relayWarning(task.body, children);
             if (relayed !== undefined)
@@ -913,13 +1081,38 @@ export async function apply(ctx, config) {
     const dispatch = async (task, parent) => {
         const partition = partitionOf(task);
         const isManager = task.level === 'manager';
+        let brief;
+        if (isManager) {
+            try {
+                brief = memoryBrief(await memory.read(partition.name), board.inPartition(partition.name));
+            }
+            catch (error) {
+                ctx.logger.warn(`host-router: ${partition.name} memory unavailable for ${task.id}: ${String(error)}`);
+            }
+        }
         const prompt = isManager
-            ? managerPrompt({ partition, taskId: task.id, body: task.body, contextLimit })
+            ? managerPrompt({ partition, taskId: task.id, body: task.body, contextLimit, ...brief === undefined ? {} : { memory: brief } })
             : workerPrompt(partition, task.id, task.body, autoVerify);
         const label = `${partition.name}/${isManager ? 'manager' : 'worker'}: ${task.subject}`;
         // Tier -> model route, read at dispatch time so a saved change applies to queued rows too.
         let route;
-        if (task.tier !== undefined && (tierStore.get().auto || task.tierSource === 'explicit')) {
+        let managerSource;
+        if (isManager) {
+            // A manager plans for the whole partition: it runs on the strongest model by default.
+            try {
+                const chosen = await managerRoute();
+                route = chosen.route;
+                managerSource = chosen.source;
+            }
+            catch (error) {
+                ctx.logger.warn(`host-router: manager route for ${task.id} unavailable: ${String(error)}`);
+            }
+        }
+        else if (task.routeOverride !== undefined) {
+            // A human picked the model (改派 / 换模型重跑).
+            route = { ...task.routeOverride };
+        }
+        else if (task.tier !== undefined && (tierStore.get().auto || task.tierSource === 'explicit')) {
             try {
                 route = (await effectiveTiers())[task.tier];
             }
@@ -969,7 +1162,9 @@ export async function apply(ctx, config) {
                 ...recorded === undefined ? {} : { provider: recorded.provider, model: recorded.model },
                 ...recorded?.reasoningEffort === undefined ? {} : { reasoningEffort: recorded.reasoningEffort },
                 ...route !== undefined && usedRoute === undefined ? { tierReason: `${task.tierReason ?? ''} (route rejected, inherited)` } : {},
-                ...task.tier === undefined ? { tierSource: 'off' } : {},
+                ...managerSource !== undefined
+                    ? { tierSource: 'manager', tierReason: `manager model: ${managerSource}${route !== undefined && usedRoute === undefined ? ' (route rejected, inherited)' : ''}` }
+                    : task.tier === undefined ? { tierSource: 'off' } : {},
             });
             await board.patch(task.id, {
                 state: 'dispatched',
@@ -1036,10 +1231,32 @@ export async function apply(ctx, config) {
                 // Managers are control entities: any number may run at once, one per
                 // demand. Only workers count against the (optional) caps.
                 const full = workersFull(partition);
-                const next = board.inPartition(partitionName)
-                    .find(task => task.state === 'queued' && (task.level === 'manager' || !full));
+                let next;
+                for (const task of board.inPartition(partitionName)) {
+                    if (task.state !== 'queued' || (task.level !== 'manager' && full))
+                        continue;
+                    // Order: a row whose prerequisites are open waits; one whose
+                    // prerequisite can never finish is parked for a human.
+                    const gate = orderGate(task);
+                    if (gate.kind === 'wait')
+                        continue;
+                    if (gate.kind === 'dead') {
+                        await board.patch(task.id, {
+                            state: 'blocked',
+                            resumeNote: `${gate.reason}；重试那个前置任务后这里会自动继续，或用 resume 跳过前置直接开始`,
+                            waitingOn: gate.on,
+                            blockedFrom: 'queued',
+                        });
+                        notice(`任务 ${task.id}（${task.subject}）没法开始：${gate.reason}。已暂停等你决定。`, task);
+                        continue;
+                    }
+                    next = task;
+                    break;
+                }
                 if (next === undefined)
                     return;
+                if ((next.dependsOn?.length ?? 0) > 0 || next.stage !== undefined)
+                    startedAfterOrder.push(next);
                 const parent = await resolveParent(next, caller);
                 if (parent === undefined)
                     return;
@@ -1068,11 +1285,316 @@ export async function apply(ctx, config) {
             ...caller === undefined ? {} : { dispatchFrom: caller.id },
             ...input.verify === undefined ? {} : { verify: input.verify },
             ...tier === undefined ? {} : { tier: tier.tier, tierSource: tier.source, tierReason: tier.reason },
+            ...input.depends_on === undefined || input.depends_on.length === 0 ? {} : { dependsOn: [...new Set(input.depends_on)] },
+            ...input.stage === undefined ? {} : { stage: input.stage },
             attempts: 0,
             createdAt: now,
             updatedAt: now,
         };
         return await board.add(task);
+    };
+    // --- Order, suspension and progress notices ---------------------------------
+    //
+    // The pump starts a queued row only when its order allows (order.ts). Anything
+    // that can unblock a row — a worker settling, a log fold that closed a resumed
+    // row, a human retry — ends in `afterChange`, which re-drives every partition,
+    // wakes suspended rows whose prerequisites finished, and tells the 作战室 how
+    // the request is doing.
+    const READY = { kind: 'ready' };
+    /** Whether one queued row may start now. A human `resume` sets `ignoreOrder`. */
+    const orderGate = (task) => task.ignoreOrder === true ? READY : gateOf(task, board.list());
+    /** Rows the current pump pass started after waiting on their order; announced by `afterChange`. */
+    const startedAfterOrder = [];
+    /** Most woken-to-wait cycles one manager gets before it is closed anyway. */
+    const MAX_REWAKES = 4;
+    /** States in which a manager's task is still going to produce a report. */
+    const stillComing = (state) => state === 'queued' || state === 'dispatched' || state === 'running' || state === 'interrupted' || state === 'suspended';
+    /** Progress per request (root task), for the snapshot and the notices. */
+    const progressOf = () => groupProgress(board.list());
+    const groupLineOf = (task) => {
+        const byId = new Map(board.list().map(row => [row.id, row]));
+        const root = rootOf(task, byId);
+        const group = progressOf().find(entry => entry.rootId === root.id);
+        return group === undefined ? '' : `「${root.subject}」整体：${progressLine(group)}。`;
+    };
+    // Notices are coalesced: several changes in a few seconds become one message,
+    // so a stage of six workers finishing does not post six times.
+    const noticesEnabled = config.progressNotices !== false;
+    const NOTICE_DEBOUNCE_MS = config.progressNoticeDelayMs ?? 3_000;
+    const pendingNotices = [];
+    /** Last notices, newest first, for the panel. */
+    let recentNotices = [];
+    let noticeTimer;
+    const flushNotices = async () => {
+        noticeTimer = undefined;
+        if (pendingNotices.length === 0)
+            return;
+        const lines = pendingNotices.splice(0, pendingNotices.length);
+        const agent = liveAgent(anchorSessionId) ?? await ensureAnchor().catch(() => undefined);
+        if (agent === undefined || typeof agent.followup !== 'function')
+            return;
+        try {
+            agent.followup(userMessage(['【进度提醒】', ...lines.map(line => `- ${line}`)].join('\n')));
+        }
+        catch (error) {
+            ctx.logger.warn(`host-router: progress notice not delivered: ${String(error)}`);
+        }
+    };
+    /**
+     * Queue one line for the 作战室 and the panel's notice list.
+     * @param text - one sentence for a person.
+     * @param about - the row it is about; its request's progress is appended.
+     */
+    const notice = (text, about) => {
+        const line = about === undefined ? text : `${text}${groupLineOf(about)}`;
+        recentNotices = [{ at: new Date().toISOString(), text: line }, ...recentNotices].slice(0, 30);
+        ctx.logger.info(`host-router notice: ${line}`);
+        if (!noticesEnabled)
+            return;
+        pendingNotices.push(line);
+        if (noticeTimer === undefined) {
+            noticeTimer = setTimeout(() => { void flushNotices(); }, NOTICE_DEBOUNCE_MS);
+            noticeTimer.unref?.();
+        }
+    };
+    ctx.effect(() => () => { if (noticeTimer !== undefined)
+        clearTimeout(noticeTimer); }, 'host-router: notice timer');
+    /**
+     * Keep a manager in its role while some of its tasks are still to come.
+     *
+     * A manager that ends its turn while children wait on a stage, a prerequisite
+     * or a suspension would never see their reports. Instead of closing it, the
+     * router continues the manager's own session with the list of what is still
+     * open and tells it to wait (`task_wait`), at most `MAX_REWAKES` times.
+     * @returns true when the manager was woken (the row stays `running`).
+     */
+    const keepManagerWaiting = async (task, report) => {
+        if (task.level !== 'manager' || task.sessionId === undefined)
+            return false;
+        const open = board.childrenOf(task.id).filter(child => stillComing(child.state));
+        if (open.length === 0)
+            return false;
+        const rewakes = (task.rewakes ?? 0) + 1;
+        if (rewakes > MAX_REWAKES)
+            return false;
+        const sender = liveAgent(task.dispatchFrom) ?? await ensureAnchor().catch(() => undefined);
+        if (sender === undefined)
+            return false;
+        const text = [
+            `【系统通知】你还有 ${String(open.length)} 个子任务没有结束，现在不能汇总：`,
+            ...open.map(child => `- ${child.id} ${child.subject}：${child.state === 'suspended' ? '挂起中' : child.state === 'queued' ? '排队等前置' : '进行中'}`),
+            `它们会在前置完成后自动开始。请调用 \`task_wait\`（parent_task 填 "${task.id}"）等它们，必要时配合 \`wait_agent\`，`,
+            '全部结束后再给出完整的汇总报告。不要重复派发这些任务。',
+        ].join('\n');
+        try {
+            await continueWorker(ctx.get('subagents'), sender, task.sessionId, text, AbortSignal.timeout(60_000));
+        }
+        catch (error) {
+            ctx.logger.warn(`host-router: could not wake manager ${task.id} to wait: ${String(error)}`);
+            return false;
+        }
+        await board.patch(task.id, {
+            state: 'running', rewakes, runToken, reportedTo: sender.id,
+            ...report.trim() === '' ? {} : { result: tail(report) },
+        });
+        resumedRows.add(task.id);
+        watchResumed();
+        ctx.logger.info(`host-router: manager ${task.id} ended with ${String(open.length)} open task(s); woken to wait (${String(rewakes)})`);
+        return true;
+    };
+    /** Who delivers a continuation into one row's session. */
+    const senderFor = async (task) => {
+        const parentSession = task.parentId === undefined ? undefined : board.get(task.parentId)?.sessionId;
+        return liveAgent(task.dispatchFrom) ?? liveAgent(parentSession) ?? await ensureAnchor().catch(() => undefined);
+    };
+    /** Text a suspended worker receives when it may continue. */
+    const wakeText = (task, manual) => {
+        const prereqs = (task.waitingOn ?? []).flatMap((id) => {
+            const row = board.get(id);
+            if (row === undefined)
+                return [];
+            const said = row.summary ?? row.result;
+            return [`- ${row.id} ${row.subject}（${row.state}）${said === undefined ? '' : `：${tail(said.replace(/\s+/g, ' '), 400)}`}`];
+        });
+        const finishedBefore = task.suspendedFrom !== undefined && isFinished(task.suspendedFrom);
+        return [
+            '【系统通知】你之前挂起的任务现在可以继续了。你的会话历史和 todo 列表都还在。',
+            `挂起原因：${task.suspendReason ?? '(无)'}`,
+            ...prereqs.length === 0 ? [] : ['前置任务的结果：', ...prereqs],
+            ...manual === undefined ? [] : [`人工说明：${manual}`],
+            finishedBefore
+                ? '这个任务之前已经交付过一次。请补上挂起时说的缺口，然后重新给出完整报告（含 --- report --- 块）。'
+                : '请从挂起的那一步继续，已经完成的步骤不要重做，完成后照常给出报告。',
+        ].join('\n');
+    };
+    /**
+     * Continue one suspended (or dependency-blocked) row in its own session.
+     * A row that never had a session goes back to the queue instead.
+     */
+    const wakeRow = async (task, manual) => {
+        if (task.sessionId === undefined) {
+            await board.patch(task.id, { state: 'queued', waitingOn: [] });
+            await pump(task.partition, undefined);
+            return `${task.id}: back in the queue`;
+        }
+        const sender = await senderFor(task);
+        if (sender === undefined)
+            throw new Error(`no live agent can deliver the wake-up of ${task.id}`);
+        await continueWorker(ctx.get('subagents'), sender, task.sessionId, wakeText(task, manual), AbortSignal.timeout(60_000));
+        await board.patch(task.id, { state: 'running', waitingOn: [], runToken, reportedTo: sender.id });
+        resumedRows.add(task.id);
+        watchResumed();
+        return `${task.id}: continued in session ${task.sessionId}`;
+    };
+    /**
+     * Suspend one task until other tasks finish.
+     *
+     * Works on any row a human may want to finish later — one in flight (its
+     * worker is stopped unless it is the worker suspending itself), one waiting,
+     * or one already delivered that turned out to need a prerequisite.
+     */
+    const suspendTask = async (input) => {
+        const task = board.get(input.taskId);
+        if (task === undefined)
+            throw new Error(`unknown task "${input.taskId}"`);
+        if (task.state === 'cancelled')
+            throw new Error(`${task.id} is cancelled; retry it instead of suspending it`);
+        const reason = input.reason.trim() === '' ? '(未说明原因)' : input.reason.trim();
+        const waitFor = [...new Set(input.waitFor ?? [])].filter(id => id !== task.id);
+        const bad = dependencyError(waitFor, board.list());
+        if (bad !== undefined)
+            throw new Error(bad.replace('depends_on', 'wait_for'));
+        let created;
+        if (input.prerequisite !== undefined && input.prerequisite.trim() !== '') {
+            const decision = await route({
+                text: input.prerequisite,
+                partition: input.partition ?? task.partition,
+            });
+            if (!isEnabled(decision.partition.name))
+                throw new Error(`partition "${decision.partition.name}" is disabled`);
+            const underParent = task.parentId !== undefined;
+            const level = decision.partition.managerEnabled && !underParent ? 'manager' : 'worker';
+            const dispatcher = liveAgent(task.dispatchFrom) ?? input.caller;
+            created = await enqueue({
+                text: input.prerequisite.trim(),
+                subject: `前置：${input.prerequisite.replace(/\s+/g, ' ').trim().slice(0, 60)}`,
+                priority: task.priority + 1,
+                ...task.parentId === undefined ? {} : { parent_task: task.parentId },
+            }, decision, level, dispatcher);
+            if (task.dispatchFrom !== undefined && created.dispatchFrom === undefined) {
+                created = await board.patch(created.id, { dispatchFrom: task.dispatchFrom });
+            }
+            waitFor.push(created.id);
+        }
+        const wasInFlight = task.state === 'running' || task.state === 'dispatched';
+        const selfSuspend = input.caller !== undefined && task.sessionId !== undefined && input.caller.id === task.sessionId;
+        const updated = await board.patch(task.id, {
+            state: 'suspended',
+            suspendReason: reason,
+            waitingOn: waitFor,
+            suspends: (task.suspends ?? 0) + 1,
+            suspendedFrom: task.state === 'suspended' ? (task.suspendedFrom ?? 'queued') : task.state,
+        });
+        // A human (or the chat) suspending a live worker stops it, as `block` does;
+        // a worker suspending itself just ends its turn, so its tool call finishes.
+        const sessionId = inFlight.get(task.id)?.childId ?? task.sessionId;
+        if (wasInFlight && !selfSuspend && sessionId !== undefined) {
+            try {
+                cancelWorker(ctx.get('subagents'), sessionId);
+            }
+            catch (error) {
+                ctx.logger.warn(`host-router: suspending ${task.id}: interrupt ${sessionId} failed: ${String(error)}`);
+            }
+        }
+        if (created !== undefined)
+            await pump(created.partition, input.caller ?? liveAgent(task.dispatchFrom));
+        if (wasInFlight)
+            await pump(task.partition, input.caller).catch(() => { });
+        const waits = waitFor.length === 0 ? '没有指定前置，需要手动继续' : `等待 ${waitFor.join('、')}`;
+        notice(`任务 ${task.id}（${task.subject}）已挂起：${reason}；${waits}${created === undefined ? '' : `（已新建前置任务 ${created.id}）`}。`, task);
+        await publishSnapshot().catch(() => { });
+        // If everything it waits for is already finished, continue right away.
+        await afterChange().catch(() => { });
+        const after = board.get(task.id) ?? updated;
+        return {
+            task: after,
+            ...created === undefined ? {} : { created },
+            text: [
+                `${task.id} suspended (${waits}).`,
+                created === undefined ? '' : `Prerequisite ${created.id} created in partition "${created.partition}" (state ${board.get(created.id)?.state ?? created.state}).`,
+                selfSuspend
+                    ? 'End your turn now without doing more work: the router continues this same session, with the prerequisite\'s result, once it is done.'
+                    : after.state === 'suspended'
+                        ? 'It continues in its own session once every prerequisite is done; `task_control resume` continues it earlier.'
+                        : `Its prerequisites were already done, so it is ${after.state} again.`,
+            ].filter(line => line !== '').join('\n'),
+        };
+    };
+    /**
+     * Re-drive everything an earlier change may have unblocked.
+     *
+     * Serialized: settlements arrive concurrently, and two passes waking the same
+     * suspended row would send it the same message twice.
+     */
+    let changeChain = Promise.resolve();
+    const afterChange = () => {
+        const run = changeChain.then(async () => {
+            const all = board.list();
+            const listBefore = all;
+            const noticesBefore = recentNotices;
+            // 1. Rows parked because a prerequisite failed: a retried prerequisite may be done or running again.
+            for (const task of all) {
+                if (task.state !== 'blocked' || task.blockedFrom === undefined || (task.waitingOn?.length ?? 0) === 0)
+                    continue;
+                const gate = gateOfIds(task.waitingOn, board.list());
+                if (gate.kind === 'dead')
+                    continue;
+                if (task.blockedFrom === 'queued') {
+                    await board.patch(task.id, { state: 'queued', waitingOn: [] });
+                }
+                else {
+                    await board.patch(task.id, { state: 'suspended' });
+                }
+            }
+            // 2. Suspended rows whose prerequisites are all finished continue; dead ones are parked.
+            for (const task of board.list()) {
+                if (task.state !== 'suspended' || (task.waitingOn?.length ?? 0) === 0)
+                    continue;
+                const gate = gateOfIds(task.waitingOn, board.list());
+                if (gate.kind === 'wait')
+                    continue;
+                if (gate.kind === 'dead') {
+                    await board.patch(task.id, {
+                        state: 'blocked',
+                        resumeNote: `${gate.reason}；重试那个前置任务后会自动继续，或用 resume 直接继续`,
+                        blockedFrom: 'suspended',
+                    });
+                    notice(`挂起的任务 ${task.id}（${task.subject}）没法继续：${gate.reason}。已暂停等你决定。`, task);
+                    continue;
+                }
+                try {
+                    ctx.logger.info(`host-router: ${await wakeRow(task)}`);
+                    notice(`前置任务已完成，挂起的任务 ${task.id}（${task.subject}）继续执行。`, task);
+                }
+                catch (error) {
+                    await board.patch(task.id, { state: 'blocked', waitingOn: [], resumeNote: `前置已完成，但没法继续原会话：${String(error)}；用 retry 开一个新的执行者` });
+                    notice(`挂起的任务 ${task.id}（${task.subject}）的前置已完成，但没能继续原会话，需要你决定。`, task);
+                }
+            }
+            // 3. Start whatever is now allowed to start.
+            startedAfterOrder.length = 0;
+            for (const partition of partitions)
+                await pump(partition.name, undefined).catch(() => { });
+            const started = startedAfterOrder.splice(0, startedAfterOrder.length);
+            if (started.length > 0) {
+                notice(`前置任务完成，开始下一步：${started.map(task => `${task.id}（${task.subject}）`).join('、')}。`, started[0]);
+            }
+            // Anything this pass changed (a wake, a park, a start, a notice) must reach the panel.
+            if (recentNotices !== noticesBefore || board.list() !== listBefore)
+                await publishSnapshot().catch(() => { });
+        });
+        changeChain = run.catch(() => { });
+        return run;
     };
     // --- Panel-side writes (the HTTP bridge calls these) -----------------------
     //
@@ -1148,6 +1670,47 @@ export async function apply(ctx, config) {
         });
         await publishSnapshot().catch(() => { });
         return { id: updated.id, state: updated.state };
+    };
+    /** `task_control` actions the panel may run over HTTP. */
+    const PANEL_ACTIONS = new Set(['resume', 'block', 'suspend', 'retry', 'cancel', 'cancel_tree']);
+    /**
+     * Run one `task_control` action from the router panel. The request has no
+     * calling agent, so `resume` delivers through the row's dispatcher, the last
+     * caller, or the 作战室 anchor, in that order (the boot-resume path uses the anchor too).
+     */
+    const controlFromPanel = async (taskId, action, value, extra = {}) => {
+        if (!PANEL_ACTIONS.has(action)) {
+            throw new BridgeError(400, 'bad-request', `action must be one of ${[...PANEL_ACTIONS].join(', ')}`);
+        }
+        const task = board.get(taskId);
+        if (task === undefined)
+            throw new BridgeError(404, 'not-found', `unknown task "${taskId}"`);
+        if (task.state === 'running' || task.state === 'dispatched') {
+            if (action === 'resume')
+                throw new BridgeError(409, 'conflict', `${task.id} is still in flight ("${task.state}")`);
+        }
+        if (action === 'suspend') {
+            const out = await suspendTask({
+                taskId: task.id,
+                reason: value ?? '',
+                ...extra.prerequisite === undefined ? {} : { prerequisite: extra.prerequisite },
+                ...extra.waitFor === undefined ? {} : { waitFor: extra.waitFor },
+            }).catch((error) => { throw new BridgeError(409, 'conflict', error instanceof Error ? error.message : String(error)); });
+            return { id: out.task.id, state: out.task.state, text: out.text };
+        }
+        let agent;
+        if (action === 'retry') {
+            agent = liveAgent(task.dispatchFrom) ?? lastCaller ?? await ensureAnchor().catch(() => undefined);
+        }
+        if (action === 'resume') {
+            agent = liveAgent(task.dispatchFrom) ?? lastCaller ?? await ensureAnchor().catch(() => undefined);
+            if (agent === undefined) {
+                throw new BridgeError(503, 'unavailable', `no live agent can deliver the resume of ${task.id} (dispatcher ${task.dispatchFrom ?? '-'} is gone and no 作战室 anchor is available)`);
+            }
+        }
+        const out = await taskControl({ task_id: task.id, action, ...value === undefined ? {} : { value }, by: 'human' }, { ...agent === undefined ? {} : { agent }, signal: AbortSignal.timeout(60_000) });
+        const after = board.get(task.id);
+        return { id: after.id, state: after.state, text: out.text };
     };
     /** Flip one partition's operator switch and persist it on the board. */
     const setPartitionState = async (name, enabled) => {
@@ -1256,6 +1819,19 @@ export async function apply(ctx, config) {
                     description: 'Difficulty tier, which picks the worker model. Omit to let the router classify '
                         + '(a `[tier:hard]` marker in text works too).',
                 },
+                depends_on: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Task ids (returned by earlier route_task calls) that must finish before this task '
+                        + 'starts. The task is published now and waits in the queue; the router starts it automatically '
+                        + 'when they are done.',
+                },
+                stage: {
+                    type: 'integer',
+                    minimum: 0,
+                    description: 'Phase number among tasks with the same parent_task: a task starts only after every '
+                        + 'sibling with a lower stage has finished. E.g. stage 1 for tasks 1-3 and stage 2 for tasks 4-6.',
+                },
             },
         },
         output: {
@@ -1290,6 +1866,12 @@ export async function apply(ctx, config) {
             if (refused !== undefined) {
                 throw new Error(`${refused} Finish the work yourself instead of delegating it.`);
             }
+            const badOrder = dependencyError(args.depends_on, board.list());
+            if (badOrder !== undefined)
+                throw new Error(badOrder);
+            if (args.stage !== undefined && (!Number.isInteger(args.stage) || args.stage < 0)) {
+                throw new Error('stage must be a non-negative integer');
+            }
             const decision = await route(args);
             if (!isEnabled(decision.partition.name)) {
                 throw new Error(`partition "${decision.partition.name}" is disabled; enable it from the router panel first`);
@@ -1298,13 +1880,21 @@ export async function apply(ctx, config) {
             // level 2 and must start a worker rather than another manager.
             const fromManager = args.parent_task !== undefined;
             const level = decision.partition.managerEnabled && !fromManager ? 'manager' : 'worker';
-            const tier = await decideTier(args);
+            // A 快任务 runs on the fast model unless the caller named a tier.
+            const tier = decision.partition.quick === true && !isTier(args.tier)
+                ? { tier: 'easy', source: 'explicit', reason: '快任务：用快模型' }
+                : await decideTier(args);
             const task = await enqueue(args, decision, level, exec.agent, tier);
             await pump(decision.partition.name, exec.agent);
             const after = board.get(task.id) ?? task;
-            return routeResult(after, after.state === 'queued'
-                ? 'Queued: a worker limit is reached or no live parent agent was found. It starts when a slot frees (task_board re-drives it).'
-                : 'Dispatched. Its report will arrive as a message; task_progress shows worker detail.');
+            const gate = after.state === 'queued' ? orderGate(after) : READY;
+            return routeResult(after, gate.kind === 'wait'
+                ? `Waiting for ${gate.on.join(', ')} to finish; it starts automatically then. Keep publishing the other pieces now.`
+                : after.state === 'queued'
+                    ? 'Queued: a worker limit is reached or no live parent agent was found. It starts when a slot frees (task_board re-drives it).'
+                    : after.state === 'blocked'
+                        ? `Blocked: ${after.resumeNote ?? 'a prerequisite cannot finish'}`
+                        : 'Dispatched. Its report will arrive as a message; task_progress shows worker detail.');
         },
     }));
     // --- Read-only surfaces ----------------------------------------------------
@@ -1447,13 +2037,985 @@ export async function apply(ctx, config) {
         },
     }));
     // --- Control ---------------------------------------------------------------
+    /** Every row below one task, at any depth. */
+    const descendantsOf = (taskId) => {
+        const out = [];
+        const seen = new Set([taskId]);
+        const walk = (id) => {
+            for (const child of board.childrenOf(id)) {
+                if (seen.has(child.id))
+                    continue;
+                seen.add(child.id);
+                out.push(child);
+                walk(child.id);
+            }
+        };
+        walk(taskId);
+        return out;
+    };
+    /**
+     * Stop one row: interrupt its worker's turn, drop the activation, mark it
+     * cancelled. A human stop also tells the manager above it.
+     * @returns the session that was interrupted, if any.
+     */
+    const stopRow = async (task, reason, byHuman) => {
+        const activation = inFlight.get(task.id);
+        const sessionId = activation?.childId ?? task.sessionId;
+        const live = activation !== undefined || task.state === 'running' || task.state === 'dispatched' || task.state === 'interrupted';
+        if (sessionId !== undefined && live) {
+            try {
+                cancelWorker(ctx.get('subagents'), sessionId);
+            }
+            catch (error) {
+                ctx.logger.warn(`host-router: stopping ${task.id}: interrupt ${sessionId} failed: ${String(error)}`);
+            }
+        }
+        if (activation !== undefined)
+            await activation.dispose().catch(() => { });
+        inFlight.delete(task.id);
+        const note = byHuman ? `人工停止${reason === undefined || reason.trim() === '' ? '' : `: ${reason.trim()}`}` : reason;
+        await board.patch(task.id, {
+            state: 'cancelled',
+            ...note === undefined || note === '' ? {} : { error: `cancelled: ${note}` },
+        });
+        if (byHuman)
+            await tellManager(task, reason);
+        return live ? sessionId : undefined;
+    };
+    /**
+     * Tell the manager that owns a row, when that manager is still working, that a
+     * human stopped the row, so it neither waits for it nor dispatches it again.
+     */
+    const tellManager = async (task, reason, notice) => {
+        const parent = task.parentId === undefined ? undefined : board.get(task.parentId);
+        if (parent === undefined || parent.level !== 'manager' || parent.sessionId === undefined)
+            return;
+        if (parent.state !== 'running' && parent.state !== 'dispatched')
+            return;
+        const sender = liveAgent(parent.dispatchFrom) ?? await ensureAnchor().catch(() => undefined);
+        if (sender === undefined)
+            return;
+        const text = notice ?? [
+            `【系统通知】用户手动停止了你的子任务 ${task.id}「${task.subject}」${reason === undefined || reason.trim() === '' ? '' : `，原因：${reason.trim()}`}。`,
+            '不要重新派发它，也不要再等它。其余子任务照常进行；汇总时说明这一项已被人工停止。',
+        ].join('\n');
+        try {
+            await continueWorker(ctx.get('subagents'), sender, parent.sessionId, text, AbortSignal.timeout(30_000));
+        }
+        catch (error) {
+            ctx.logger.warn(`host-router: could not tell manager ${parent.id} about ${task.id}: ${String(error)}`);
+        }
+    };
+    /**
+     * One `task_control` action. Shared by the tool and by `POST /api/router/control`,
+     * so a panel click changes the row exactly as the tool would.
+     */
+    const taskControl = async (args, exec) => {
+        if (exec.agent !== undefined)
+            lastCaller = exec.agent;
+        const task = board.get(args.task_id);
+        if (task === undefined)
+            throw new Error(`unknown task "${args.task_id}"`);
+        const partition = partitionOf(task);
+        switch (args.action) {
+            case 'cancel': {
+                if (SETTLED.has(task.state))
+                    return { text: `${task.id} already ended ("${task.state}")` };
+                const sessionId = await stopRow(task, args.value, args.by === 'human');
+                // Rows waiting on it can no longer start: park them for a human now.
+                await afterChange().catch(() => { });
+                await publishSnapshot().catch(() => { });
+                return {
+                    text: `${task.id} cancelled (${sessionId === undefined ? 'no live worker' : `interrupted ${sessionId}`})`,
+                };
+            }
+            case 'cancel_tree': {
+                // The whole request under this row: the row itself, then every open
+                // descendant. The parent goes first so a manager cannot react to its
+                // children stopping by dispatching them again.
+                const family = [task, ...descendantsOf(task.id)].filter(row => !SETTLED.has(row.state));
+                if (family.length === 0)
+                    return { text: `${task.id} and its tasks already ended` };
+                const stopped = [];
+                for (const row of family) {
+                    const current = board.get(row.id);
+                    if (current === undefined || SETTLED.has(current.state))
+                        continue;
+                    await stopRow(current, args.by === 'human' ? `人工停止整个需求${args.value === undefined || args.value.trim() === '' ? '' : `: ${args.value.trim()}`}` : args.value ?? 'stopped with the whole request', false);
+                    stopped.push(current.id);
+                }
+                // A human stopping a subtree inside a larger request: the manager above
+                // it still runs and has to know.
+                if (args.by === 'human')
+                    await tellManager(task, args.value);
+                await afterChange().catch(() => { });
+                await publishSnapshot().catch(() => { });
+                return { text: `stopped ${String(stopped.length)} task(s): ${stopped.join(', ')}` };
+            }
+            case 'priority': {
+                const value = Number(args.value);
+                if (!Number.isInteger(value))
+                    throw new Error('priority requires an integer value');
+                const updated = await board.patch(task.id, { priority: value });
+                await pump(partition.name, exec.agent ?? lastCaller);
+                return { text: `${updated.id} priority -> ${String(value)}` };
+            }
+            case 'retry': {
+                // The work moved to another row (改派): running this one again would do it twice.
+                if (task.reassignedTo !== undefined)
+                    throw new Error(`${task.id} was reassigned to ${task.reassignedTo}; retry that row instead`);
+                if (task.state === 'running' || task.state === 'dispatched') {
+                    throw new Error(`${task.id} is still in flight; cancel it first`);
+                }
+                const parent = exec.agent ?? liveAgent(task.dispatchFrom) ?? lastCaller;
+                if (parent === undefined)
+                    throw new Error('retry needs a live agent to own the new worker');
+                await board.patch(task.id, { state: 'queued' });
+                await pump(partition.name, parent);
+                const after = board.get(task.id);
+                // A retried prerequisite un-parks the rows that were waiting on it.
+                await afterChange().catch(() => { });
+                await publishSnapshot().catch(() => { });
+                return { text: `${after.id} state ${after.state}; worker ${after.worker ?? '-'}` };
+            }
+            case 'resume': {
+                if (task.reassignedTo !== undefined)
+                    throw new Error(`${task.id} was reassigned to ${task.reassignedTo}; resume that row instead`);
+                if (task.state === 'running' || task.state === 'dispatched') {
+                    throw new Error(`${task.id} is still in flight`);
+                }
+                // Suspended, or parked because a prerequisite failed: a human says go on
+                // without waiting any longer.
+                if (task.state === 'suspended' || (task.state === 'blocked' && task.blockedFrom !== undefined && (task.waitingOn?.length ?? 0) > 0)) {
+                    const fromQueue = task.state === 'blocked' && task.blockedFrom === 'queued';
+                    if (fromQueue || (task.state === 'suspended' && task.sessionId === undefined)) {
+                        await board.patch(task.id, { state: 'queued', waitingOn: [], ignoreOrder: true });
+                        await pump(partition.name, exec.agent ?? lastCaller);
+                        await publishSnapshot().catch(() => { });
+                        const after = board.get(task.id);
+                        notice(`任务 ${task.id}（${task.subject}）按你的决定不再等前置，现在 ${after.state === 'queued' ? '排队' : '开始执行'}。`, after);
+                        return { text: `${after.id} state ${after.state} (order skipped by request)` };
+                    }
+                    try {
+                        const line = await wakeRow(task, args.value);
+                        notice(`挂起的任务 ${task.id}（${task.subject}）已手动继续。`, task);
+                        await publishSnapshot().catch(() => { });
+                        return { text: line };
+                    }
+                    catch (error) {
+                        throw new Error(`could not continue ${task.id} in its session: ${String(error)}; use retry for a fresh worker`);
+                    }
+                }
+                const sender = exec.agent ?? liveAgent(task.dispatchFrom) ?? lastCaller;
+                if (sender === undefined)
+                    throw new Error('resume needs a live agent to own the delivery');
+                let line;
+                try {
+                    const text = task.state === 'blocked'
+                        ? [
+                            '【系统通知】你的任务曾被挂起等待人工决策，现已恢复。你的会话历史和 todo 列表都还在。',
+                            `挂起原因：${task.resumeNote ?? '(无)'}`,
+                            ...args.value === undefined ? [] : [`人工决定：${args.value}`],
+                            '请从中断的那一步继续，已经完成的步骤不要重做。',
+                        ].join('\n')
+                        : RESUME_TEXT;
+                    line = await resumeRow({ ...task, resumes: 0 }, sender, text);
+                }
+                catch (error) {
+                    // The original session cannot take the message (gone, or not in this
+                    // tree): say so on the row instead of leaving it parked and silent.
+                    const reason = `resume failed, original session ${task.sessionId ?? '-'} unavailable: ${String(error)}; use retry for a fresh worker`;
+                    await board.patch(task.id, { state: 'failed', error: reason });
+                    await publishSnapshot().catch(() => { });
+                    return { text: `${task.id} -> failed (${reason})` };
+                }
+                await publishSnapshot().catch(() => { });
+                return { text: line };
+            }
+            case 'verify': {
+                const commands = task.verify ?? partition.verify ?? [];
+                const verdict = await runVerify(commands, partition.dir, verifyTimeout);
+                const updated = await board.patch(task.id, {
+                    state: verdict.ok ? 'verified' : 'failed',
+                    verify: commands,
+                    verifyOutput: tail(verdict.output),
+                    ...verdict.ok ? {} : { error: `acceptance failed: ${verdict.failed ?? 'unknown command'}` },
+                });
+                await publishSnapshot().catch(() => { });
+                return { text: `${updated.id} -> ${updated.state}\n${tail(verdict.output)}` };
+            }
+            case 'block': {
+                const wasInFlight = task.state === 'running' || task.state === 'dispatched';
+                // Persist `blocked` first: the interrupted turn then settles into
+                // `finish`, which leaves a row that is no longer running/dispatched alone.
+                const updated = await board.patch(task.id, {
+                    state: 'blocked',
+                    resumeNote: args.value ?? '(no note)',
+                    // A human block is not a dependency block: nothing unparks it but a human.
+                    waitingOn: [],
+                });
+                // A blocked row holds no slot (`holdsSlot`), so its worker must really
+                // stop; the session and its log stay, and `resume` continues it there.
+                const sessionId = inFlight.get(task.id)?.childId ?? task.sessionId;
+                if (wasInFlight && sessionId !== undefined) {
+                    try {
+                        cancelWorker(ctx.get('subagents'), sessionId);
+                    }
+                    catch (error) {
+                        ctx.logger.warn(`host-router: blocking ${task.id}: interrupt ${sessionId} failed: ${String(error)}`);
+                    }
+                }
+                await publishSnapshot().catch(() => { });
+                if (wasInFlight)
+                    await pump(partition.name, exec.agent ?? lastCaller).catch(() => { });
+                return {
+                    text: `${updated.id} blocked: ${updated.resumeNote ?? ''}`
+                        + (wasInFlight && sessionId !== undefined ? ` (worker ${sessionId} interrupted; session kept for resume)` : ''),
+                };
+            }
+            case 'suspend': {
+                const out = await suspendTask({ taskId: task.id, reason: args.value ?? '', ...exec.agent === undefined ? {} : { caller: exec.agent } });
+                return { text: out.text };
+            }
+            case 'note': {
+                if (args.value === undefined)
+                    throw new Error('note requires a value');
+                const updated = await board.note(task.id, args.value);
+                return { text: `${updated.id} has ${String(updated.notes?.length ?? 0)} note(s)` };
+            }
+            default:
+                throw new Error(`unknown action "${args.action}"`);
+        }
+    };
+    /** Partition a tool call is about: explicit, else the calling manager's own partition. */
+    const partitionForCall = (explicit, exec) => {
+        if (explicit !== undefined && explicit.trim() !== '') {
+            const found = partitions.find(entry => entry.name === explicit.trim());
+            if (found === undefined)
+                throw new Error(`unknown partition "${explicit}"; partition_list shows the names`);
+            return found;
+        }
+        const callerSession = exec.agent?.session.id;
+        const own = callerSession === undefined
+            ? undefined
+            : board.list().find(task => task.level === 'manager' && task.sessionId === callerSession);
+        if (own !== undefined)
+            return partitionOf(own);
+        if (partitions.length === 1)
+            return partitions[0];
+        throw new Error('pass partition: this call does not come from a partition manager');
+    };
+    /** Task id of the calling manager, when the caller is one. */
+    const managerTaskOf = (exec) => {
+        const callerSession = exec.agent?.session.id;
+        if (callerSession === undefined)
+            return undefined;
+        return board.list().find(task => task.level === 'manager' && task.sessionId === callerSession)?.id;
+    };
+    const textOutput = {
+        schema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['text'],
+            properties: { text: { type: 'string' } },
+        },
+        render: (_args, value) => [{ type: 'text', text: value.text }],
+    };
+    ctx.effect(() => ctx.tools.register({
+        name: 'session_list',
+        description: 'List the worker sessions of one partition, newest first: open ones (running, queued, '
+            + 'suspended, blocked) always, then recent finished ones. Each line has the task id, the session id, the '
+            + 'state, the subject, and what the worker said it did. A manager omits `partition` to get its own.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                partition: { type: 'string', description: 'Partition name; a manager may omit it.' },
+                limit: { type: 'integer', minimum: 1, maximum: 100, description: 'How many sessions (default 30).' },
+            },
+        },
+        output: textOutput,
+        isConcurrencySafe: () => true,
+        async execute(raw, exec) {
+            const args = raw;
+            const partition = partitionForCall(args.partition, exec);
+            const lines = sessionRoster(board.inPartition(partition.name), Math.min(100, Math.max(1, args.limit ?? 30)));
+            return {
+                text: lines.length === 0
+                    ? `${partition.name}: no worker sessions yet`
+                    : [`${partition.name}: ${String(lines.length)} session(s)`, ...lines].join('\n'),
+            };
+        },
+    }));
+    ctx.effect(() => ctx.tools.register({
+        name: 'session_read',
+        description: 'Read what one worker session actually did: the end of its transcript (messages, tool calls '
+            + 'and results, turn ends), plus the task record. Use it before continuing or redoing earlier work, or to '
+            + 'answer "what happened in that session". Read-only.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                task_id: { type: 'string', description: 'Task whose session to read.' },
+                session_id: { type: 'string', description: 'Or the session id directly (from session_list).' },
+                last: { type: 'integer', minimum: 1, maximum: 80, description: 'Transcript entries from the end (default 20).' },
+            },
+        },
+        output: textOutput,
+        isConcurrencySafe: () => true,
+        async execute(raw) {
+            const args = raw;
+            const task = args.task_id !== undefined
+                ? board.get(args.task_id)
+                : args.session_id === undefined ? undefined : board.list().find(row => row.sessionId === args.session_id);
+            if (args.task_id !== undefined && task === undefined)
+                throw new Error(`unknown task "${args.task_id}"`);
+            const sessionId = task?.sessionId ?? args.session_id;
+            if (sessionId === undefined) {
+                throw new Error(args.task_id === undefined ? 'pass task_id or session_id' : `${args.task_id} has no session yet`);
+            }
+            // Only sessions the router started: this tool is a window on partitions, not on every chat.
+            if (task === undefined)
+                throw new Error(`session ${sessionId} does not belong to any routed task`);
+            const events = await readLog(sessionId);
+            const transcript = renderTranscript(events, Math.min(80, Math.max(1, args.last ?? 20)));
+            const head = [
+                `${task.id} ${task.partition}/${task.level} [${task.state}] session ${sessionId}`,
+                `subject: ${task.subject}`,
+                ...task.summary === undefined ? [] : [`did: ${task.summary}`],
+                ...task.touched === undefined || task.touched.length === 0 ? [] : [`touched: ${task.touched.join(', ')}`],
+                ...task.left === undefined ? [] : [`left: ${task.left}`],
+                ...task.error === undefined ? [] : [`error: ${task.error}`],
+            ];
+            return {
+                text: [
+                    ...head,
+                    '',
+                    events.length === 0
+                        ? '(the session log is empty or could not be read)'
+                        : `--- last ${String(transcript.length)} transcript entries ---`,
+                    ...transcript,
+                ].join('\n'),
+            };
+        },
+    }));
+    ctx.effect(() => ctx.tools.register({
+        name: 'partition_memory',
+        description: 'A partition\'s durable memory, kept across requests. `read` returns its notes and recent '
+            + 'work log (optionally filtered by `query`); `note` adds one lasting fact (a convention, a decision, a '
+            + 'pitfall, where something lives); `forget` removes a note by id. Finished tasks are logged '
+            + 'automatically, so do not note them. A manager omits `partition` to use its own.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['action'],
+            properties: {
+                action: { type: 'string', enum: ['read', 'note', 'forget'] },
+                partition: { type: 'string', description: 'Partition name; a manager may omit it.' },
+                text: { type: 'string', description: 'For `note`: one short fact.' },
+                id: { type: 'string', description: 'For `forget`: the note id (n-xxxxxxxx).' },
+                query: { type: 'string', description: 'For `read`: keep notes and log lines containing this text.' },
+                limit: { type: 'integer', minimum: 1, maximum: 300, description: 'For `read`: log entries (default 40).' },
+            },
+        },
+        output: textOutput,
+        isConcurrencySafe: () => false,
+        async execute(raw, exec) {
+            const args = raw;
+            const partition = partitionForCall(args.partition, exec);
+            if (args.action === 'note') {
+                if (typeof args.text !== 'string')
+                    throw new Error('note needs text');
+                const managerTask = managerTaskOf(exec);
+                const note = await memory.addNote(partition.name, args.text, managerTask === undefined ? 'router' : 'manager', managerTask);
+                await publishSnapshot().catch(() => { });
+                return { text: `noted in ${partition.name}: [${note.id}] ${note.text}` };
+            }
+            if (args.action === 'forget') {
+                if (typeof args.id !== 'string' || args.id === '')
+                    throw new Error('forget needs the note id');
+                const removed = await memory.removeNote(partition.name, args.id);
+                if (!removed)
+                    throw new Error(`no note ${args.id} in ${partition.name}`);
+                await publishSnapshot().catch(() => { });
+                return { text: `forgot ${args.id} in ${partition.name}` };
+            }
+            if (args.action !== 'read')
+                throw new Error('action must be read, note, or forget');
+            const doc = await memory.read(partition.name);
+            const query = args.query?.trim().toLowerCase();
+            const keep = (text) => query === undefined || query === '' || text.toLowerCase().includes(query);
+            const notes = doc.notes.filter(note => keep(note.text));
+            const log = doc.log.filter(entry => keep(workLine(entry))).slice(-Math.min(300, Math.max(1, args.limit ?? 40))).reverse();
+            return {
+                text: [
+                    `${partition.name} memory: ${String(doc.notes.length)} note(s), ${String(doc.log.length)} logged task(s)`,
+                    '',
+                    'notes:',
+                    ...notes.length === 0 ? ['(none)'] : notes.map(note => `- [${note.id}] (${note.by}) ${note.text}`),
+                    '',
+                    'work log (newest first):',
+                    ...log.length === 0 ? ['(none)'] : log.map(entry => workLine(entry)),
+                ].join('\n'),
+            };
+        },
+    }));
+    // --- Outlets: code host, server commands, headless browser ---------------------
+    //
+    // Each outlet call is checked against the partition's policy (outlets.ts). A call
+    // a human must see becomes an approval; the human's 同意 in the panel runs it once
+    // and the outcome goes back to the session that asked.
+    const policyOf = (partition, kind) => {
+        if (kind === 'merge')
+            return 'confirm';
+        return partition.outlets?.[kind] ?? DEFAULT_POLICY[kind];
+    };
+    /** The routed row whose session made this call, if any. */
+    const callerTask = (exec) => {
+        const id = exec.agent?.session.id;
+        return id === undefined ? undefined : board.list().find(task => task.sessionId === id);
+    };
+    /** Partition of an outlet call: the caller's row, else the explicit name. */
+    const outletPartition = (explicit, exec) => {
+        const mine = callerTask(exec);
+        if (mine !== undefined)
+            return partitionOf(mine);
+        return partitionForCall(explicit, exec);
+    };
+    const scmClients = new Map();
+    // Test seam: a fake fetch for the code host. Never set in production config.
+    const scmFetch = config.scmFetch;
+    const scmOf = (partition) => {
+        const scm = partition.git?.scm;
+        if (scm === undefined)
+            throw new Error(`partition "${partition.name}" has no code host configured (git.scm)`);
+        let client = scmClients.get(partition.name);
+        if (client === undefined) {
+            client = createScmClient(scm, () => envToken(scm), ...scmFetch === undefined ? [] : [scmFetch]);
+            scmClients.set(partition.name, client);
+        }
+        return client;
+    };
+    /**
+     * Tell whoever is still working on a row what became of its outlet call: the
+     * worker itself while it runs, else its manager while that runs.
+     */
+    const notifyCaller = async (taskId, text) => {
+        const task = taskId === undefined ? undefined : board.get(taskId);
+        if (task === undefined)
+            return;
+        const live = (row) => row.sessionId !== undefined && (row.state === 'running' || row.state === 'dispatched');
+        const target = live(task) ? task : task.parentId === undefined ? undefined : board.get(task.parentId);
+        if (target === undefined || !live(target))
+            return;
+        const sender = liveAgent(target.dispatchFrom) ?? await ensureAnchor().catch(() => undefined);
+        if (sender === undefined)
+            return;
+        try {
+            await continueWorker(ctx.get('subagents'), sender, target.sessionId, text, AbortSignal.timeout(30_000));
+        }
+        catch (error) {
+            ctx.logger.warn(`host-router: could not tell ${target.id} about an outlet result: ${String(error)}`);
+        }
+    };
+    /** Queue an approval and say so in the words the agent gets back. */
+    const askHuman = async (input) => {
+        const approval = await outlets.request(input);
+        await publishSnapshot().catch(() => { });
+        return [
+            `需要人工确认：已提交确认单 ${approval.id}（${approval.action}）。`,
+            '用户在面板点「同意」后由路由执行一次，结果会发回你的会话（你已结束时发给你的 manager）。',
+            '不要重复提交，也不要换别的方式绕过这一步。可以先继续做不依赖它的部分。',
+        ].join('\n');
+    };
+    /** Commit the named paths (when asked), push the current branch, open or update its PR. */
+    const publishBranch = async (partition, args, taskId) => {
+        const client = scmOf(partition);
+        const cwd = partition.dir;
+        if (args.commit_message !== undefined && args.commit_message.trim() !== '') {
+            const paths = args.paths ?? [];
+            if (paths.length === 0)
+                throw new Error('commit_message needs the paths to commit (paths); the tree is shared, so nothing is added wholesale');
+            for (const path of paths) {
+                if (path.startsWith('-') || path.includes('..') || isAbsolute(path))
+                    throw new Error(`path "${path}" must be relative to the partition and stay inside it`);
+            }
+            const added = await run('git', ['add', '--', ...paths], cwd);
+            if (added.code !== 0)
+                throw new Error(`git add failed: ${added.stderr.trim()}`);
+            const committed = await run('git', ['commit', '-m', args.commit_message.trim()], cwd);
+            if (committed.code !== 0 && !/nothing to commit/.test(committed.stdout + committed.stderr)) {
+                throw new Error(`git commit failed: ${(committed.stderr || committed.stdout).trim()}`);
+            }
+        }
+        const facts = await gitFacts(cwd);
+        const base = await client.defaultBranch();
+        const refused = pushableBranch(facts.branch, base);
+        if (refused !== undefined)
+            throw new Error(refused);
+        const remote = partition.git?.scm?.remote ?? 'origin';
+        const pushed = await run('git', ['push', '-u', remote, facts.branch], cwd, 180_000);
+        if (pushed.code !== 0)
+            throw new Error(`git push failed: ${pushed.stderr.trim() || pushed.stdout.trim()}`);
+        let pr = await client.findOpen(facts.branch);
+        let verb = 'updated';
+        if (pr === undefined) {
+            const title = args.title?.trim() || (taskId === undefined ? facts.branch : board.get(taskId)?.subject ?? facts.branch);
+            pr = await client.open({ head: facts.branch, base, title, body: args.body ?? '', ...args.draft === true ? { draft: true } : {} });
+            verb = 'opened';
+        }
+        else if ((args.title !== undefined && args.title.trim() !== '') || args.body !== undefined) {
+            pr = await client.update(pr.number, {
+                ...args.title !== undefined && args.title.trim() !== '' ? { title: args.title.trim() } : {},
+                ...args.body === undefined ? {} : { body: args.body },
+            });
+        }
+        if (taskId !== undefined && board.get(taskId) !== undefined) {
+            await board.patch(taskId, { pr: { number: pr.number, url: pr.url, provider: client.provider } });
+        }
+        await outlets.audit({ kind: 'git', partition: partition.name, ...taskId === undefined ? {} : { taskId }, action: `push ${facts.branch}; ${verb} PR #${String(pr.number)}`, target: pr.url, outcome: 'ran', by: 'agent' });
+        const dirty = facts.dirty.length === 0 ? '' : `\nnote: ${String(facts.dirty.length)} uncommitted path(s) stay local (not in the PR).`;
+        return `pushed ${facts.branch} to ${remote}; ${verb} PR #${String(pr.number)} -> ${pr.base}: ${pr.url}${dirty}`;
+    };
+    /** Merge one PR, refusing when its head moved since the human approved. */
+    const mergePull = async (partition, number, method, sha) => {
+        const client = scmOf(partition);
+        const pr = await client.get(number);
+        if (pr.state !== 'open')
+            throw new Error(`PR #${String(number)} is ${pr.state}`);
+        if (sha !== undefined && pr.headSha !== sha)
+            throw new Error(`PR #${String(number)} changed after it was approved (head ${pr.headSha.slice(0, 7)}, approved ${sha.slice(0, 7)}); ask again`);
+        const out = await client.merge(number, method, pr.headSha);
+        if (!out.merged)
+            throw new Error(`not merged: ${out.message}`);
+        return `merged PR #${String(number)} (${method}) into ${pr.base}: ${pr.url}`;
+    };
+    const screenshotCommand = config.screenshotCommand ?? '/srv/workspace/bin/screenshot';
+    /** Headless screenshot (or page text) of one URL, saved under the partition's artifacts. */
+    const capturePage = async (partition, url, mode, full, taskId) => {
+        let parsed;
+        try {
+            parsed = new URL(url);
+        }
+        catch {
+            throw new Error(`"${url}" is not a URL`);
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+            throw new Error('only http(s) pages can be opened');
+        if (!hostAllowed(parsed.hostname, partition.outlets?.browserAllow)) {
+            throw new Error(`${parsed.hostname} is not in this partition's browser allowlist (outlets.browserAllow)`);
+        }
+        if (mode === 'text') {
+            const response = await fetch(parsed, { signal: AbortSignal.timeout(20_000), headers: { 'user-agent': 'dsh-router' } });
+            const html = await response.text();
+            const text = html
+                .replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' ')
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+                .replace(/\s+/g, ' ')
+                .trim();
+            return `HTTP ${String(response.status)} ${parsed.href}\n${text.slice(0, 6000)}${text.length > 6000 ? '…' : ''}`;
+        }
+        const dir = join(partition.dir, '.dsh-artifacts', taskId ?? 'manual');
+        await mkdir(dir, { recursive: true });
+        const out = join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, '-')}.png`);
+        const shot = await run(screenshotCommand, [parsed.href, out, ...full ? ['--full'] : []], partition.dir, 90_000);
+        if (shot.code !== 0)
+            throw new Error(`screenshot failed: ${(shot.stderr || shot.stdout).trim()}`);
+        return out;
+    };
+    /** Run one approved (or allowed) outlet action. */
+    const executeOutlet = async (approval) => {
+        const partition = partitions.find(entry => entry.name === approval.partition);
+        if (partition === undefined)
+            throw new Error(`partition "${approval.partition}" is gone`);
+        const params = approval.params;
+        switch (approval.kind) {
+            case 'merge':
+                return await mergePull(partition, Number(params['number']), params['method'] ?? 'squash', params['sha']);
+            case 'ops': {
+                const result = await runShell(String(params['command']), partition.dir, 300_000);
+                const text = [`exit ${String(result.code)}`, result.stdout.trim(), result.stderr.trim()].filter(part => part !== '').join('\n');
+                if (result.code !== 0)
+                    throw new Error(text);
+                return text;
+            }
+            case 'git':
+                return await publishBranch(partition, params, approval.taskId);
+            case 'browser':
+                return await capturePage(partition, String(params['url']), params['mode'] === 'text' ? 'text' : 'screenshot', params['full'] === true, approval.taskId);
+        }
+    };
+    /** A human's decision on one approval: run it once, or refuse it. */
+    const decideApproval = async (id, decision, note) => {
+        await outlets.expire();
+        const approval = outlets.get(id);
+        if (approval === undefined)
+            throw new BridgeError(404, 'not-found', `unknown approval "${id}"`);
+        if (approval.state !== 'pending')
+            throw new Error(`${id} is already ${approval.state}`);
+        const base = { kind: approval.kind, partition: approval.partition, ...approval.taskId === undefined ? {} : { taskId: approval.taskId }, action: approval.action, target: approval.target };
+        const at = new Date().toISOString();
+        if (decision === 'reject') {
+            const rejected = await outlets.patch(id, { state: 'rejected', decidedAt: at, ...note === undefined ? {} : { note } });
+            await outlets.audit({ ...base, outcome: 'rejected', by: 'human', ...note === undefined ? {} : { detail: note } });
+            await notifyCaller(approval.taskId, `【系统通知】用户拒绝了确认单 ${id}（${approval.action}）${note === undefined ? '' : `，说明：${note}`}。不要再执行这一步，也不要换方式绕过；在汇报里说明。`);
+            await publishSnapshot().catch(() => { });
+            return rejected;
+        }
+        await outlets.patch(id, { state: 'approved', decidedAt: at, ...note === undefined ? {} : { note } });
+        await outlets.audit({ ...base, outcome: 'approved', by: 'human', ...note === undefined ? {} : { detail: note } });
+        let settled;
+        try {
+            const result = await executeOutlet(approval);
+            settled = await outlets.patch(id, { state: 'done', result: result.slice(0, 4000) });
+            await outlets.audit({ ...base, outcome: 'ran', by: 'router', detail: result });
+            await notifyCaller(approval.taskId, `【系统通知】确认单 ${id} 已获用户同意并执行：${approval.action}\n结果：${result.slice(0, 1500)}`);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            settled = await outlets.patch(id, { state: 'failed', result: message.slice(0, 4000) });
+            await outlets.audit({ ...base, outcome: 'failed', by: 'router', detail: message });
+            await notifyCaller(approval.taskId, `【系统通知】确认单 ${id} 已获同意，但执行失败：${message.slice(0, 1500)}`);
+        }
+        await publishSnapshot().catch(() => { });
+        return settled;
+    };
+    ctx.effect(() => ctx.tools.register({
+        name: 'git_publish',
+        description: 'Publish committed work: push the current branch of this partition\'s checkout and open its pull '
+            + 'request (or update the open one). Optionally commit first: pass `commit_message` with the exact `paths` you '
+            + 'changed (the checkout is shared, so nothing is added wholesale). Refuses the default branch. Needs `git.scm` '
+            + 'on the partition. Returns the PR URL.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                title: { type: 'string', description: 'PR title (default: the task subject).' },
+                body: { type: 'string', description: 'PR description.' },
+                draft: { type: 'boolean', description: 'Open as a draft (GitHub).' },
+                commit_message: { type: 'string', description: 'Commit these paths first with this message.' },
+                paths: { type: 'array', items: { type: 'string' }, description: 'Paths to commit, relative to the partition root.' },
+                partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+            },
+        },
+        output: textOutput,
+        isConcurrencySafe: () => false,
+        async execute(raw, exec) {
+            const args = raw;
+            const partition = outletPartition(args.partition, exec);
+            const task = callerTask(exec);
+            const mode = policyOf(partition, 'git');
+            if (mode === 'off')
+                throw new Error(`git publishing is off for partition "${partition.name}"`);
+            scmOf(partition);
+            if (mode === 'confirm') {
+                return { text: await askHuman({ kind: 'git', partition: partition.name, ...task === undefined ? {} : { taskId: task.id }, action: `推送分支并开/更新 PR：${args.title ?? task?.subject ?? ''}`.trim(), target: partition.git.scm.repo, reason: args.body?.slice(0, 300) ?? '', reversible: true, params: args }) };
+            }
+            return { text: await publishBranch(partition, args, task?.id) };
+        },
+    }));
+    ctx.effect(() => ctx.tools.register({
+        name: 'pr_status',
+        description: 'Read a pull request of this partition\'s repository: state, mergeability and CI checks (failing and '
+            + 'pending check names). Without `number` it reads the PR of the current branch.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                number: { type: 'integer', minimum: 1, description: 'PR number.' },
+                partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+            },
+        },
+        output: textOutput,
+        isConcurrencySafe: () => true,
+        async execute(raw, exec) {
+            const args = raw;
+            const partition = outletPartition(args.partition, exec);
+            const client = scmOf(partition);
+            const pr = args.number !== undefined
+                ? await client.get(args.number)
+                : await client.findOpen((await gitFacts(partition.dir)).branch);
+            if (pr === undefined)
+                return { text: 'no open pull request for the current branch' };
+            const checks = await client.checks(pr.headSha);
+            return {
+                text: [
+                    `PR #${String(pr.number)} ${pr.state}${pr.draft ? ' (draft)' : ''}: ${pr.title}`,
+                    `${pr.head} -> ${pr.base} @ ${pr.headSha.slice(0, 7)}; mergeable: ${pr.mergeable === undefined ? 'unknown' : String(pr.mergeable)}`,
+                    `checks: ${checks.state} (${String(checks.total)})`
+                        + (checks.failing.length > 0 ? `; failing: ${checks.failing.join(', ')}` : '')
+                        + (checks.pending.length > 0 ? `; pending: ${checks.pending.join(', ')}` : ''),
+                    pr.url,
+                ].join('\n'),
+            };
+        },
+    }));
+    ctx.effect(() => ctx.tools.register({
+        name: 'pr_merge',
+        description: 'Ask to merge a pull request. Never merges by itself: it files an approval the human sees in the panel; '
+            + 'on 同意 the router merges exactly the head it was shown (a later push voids it) and tells you the result.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['number', 'reason'],
+            properties: {
+                number: { type: 'integer', minimum: 1, description: 'PR number.' },
+                method: { type: 'string', enum: ['merge', 'squash', 'rebase'], description: 'Merge method (default squash).' },
+                reason: { type: 'string', description: 'Why it is ready: checks, review, what it changes.' },
+                partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+            },
+        },
+        output: textOutput,
+        isConcurrencySafe: () => false,
+        async execute(raw, exec) {
+            const args = raw;
+            const partition = outletPartition(args.partition, exec);
+            const task = callerTask(exec);
+            const client = scmOf(partition);
+            const pr = await client.get(args.number);
+            if (pr.state !== 'open')
+                throw new Error(`PR #${String(pr.number)} is ${pr.state}`);
+            const checks = await client.checks(pr.headSha);
+            return {
+                text: await askHuman({
+                    kind: 'merge', partition: partition.name, ...task === undefined ? {} : { taskId: task.id },
+                    action: `合并 PR #${String(pr.number)}「${pr.title}」到 ${pr.base}（${args.method ?? 'squash'}）`,
+                    target: pr.url,
+                    reason: `${args.reason.trim()}\nCI：${checks.state}${checks.failing.length > 0 ? `，失败：${checks.failing.join('、')}` : ''}`,
+                    reversible: false,
+                    params: { number: pr.number, method: args.method ?? 'squash', sha: pr.headSha },
+                }),
+            };
+        },
+    }));
+    ctx.effect(() => ctx.tools.register({
+        name: 'ops_run',
+        description: 'Run one command on the server, in the partition root, with its risk checked first. Read-only looks '
+            + '(logs, status, disk, nginx -t, curl -I) run at once; changes run and are logged; dangerous commands (restart '
+            + 'or stop a service, delete files, firewall, users, reboot, force-push) are not run: they become an approval '
+            + 'the human sees, and run once on 同意. Always give the reason.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['command', 'reason'],
+            properties: {
+                command: { type: 'string', description: 'Shell command line.' },
+                reason: { type: 'string', description: 'Why, and what you expect it to do.' },
+                partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+            },
+        },
+        output: textOutput,
+        isConcurrencySafe: () => false,
+        async execute(raw, exec) {
+            const args = raw;
+            const partition = outletPartition(args.partition, exec);
+            const task = callerTask(exec);
+            const mode = policyOf(partition, 'ops');
+            if (mode === 'off')
+                throw new Error(`server commands are off for partition "${partition.name}"`);
+            const level = classifyCommand(args.command, partition.outlets?.danger);
+            const where = { partition: partition.name, ...task === undefined ? {} : { taskId: task.id } };
+            if (level === 'danger' || (mode === 'confirm' && level !== 'read')) {
+                return {
+                    text: `[${level}] ${await askHuman({ kind: 'ops', ...where, action: `${level === 'danger' ? '危险' : '变更'}命令`, target: args.command, reason: args.reason, reversible: level !== 'danger', params: { command: args.command } })}`,
+                };
+            }
+            const result = await runShell(args.command, partition.dir, 300_000);
+            await outlets.audit({ kind: 'ops', ...where, action: `${level} command`, target: args.command, outcome: result.code === 0 ? 'ran' : 'failed', by: 'agent', detail: `exit ${String(result.code)}; ${args.reason}` });
+            return { text: [`[${level}] exit ${String(result.code)}`, result.stdout.trim(), result.stderr.trim()].filter(part => part !== '').join('\n') };
+        },
+    }));
+    ctx.effect(() => ctx.tools.register({
+        name: 'browser_capture',
+        description: 'Open a page in a headless browser on the server and save a screenshot under the partition\'s '
+            + '`.dsh-artifacts/<task>/` (mode `screenshot`), or read the page as plain text (mode `text`). Use screenshots as '
+            + 'evidence for UI and site checks and list their paths in your report. Hosts may be limited per partition.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['url'],
+            properties: {
+                url: { type: 'string', description: 'http(s) URL.' },
+                mode: { type: 'string', enum: ['screenshot', 'text'], description: 'Default screenshot.' },
+                full: { type: 'boolean', description: 'Whole page instead of the first screen.' },
+                partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+            },
+        },
+        output: textOutput,
+        isConcurrencySafe: () => true,
+        async execute(raw, exec) {
+            const args = raw;
+            const partition = outletPartition(args.partition, exec);
+            const task = callerTask(exec);
+            const mode = policyOf(partition, 'browser');
+            if (mode === 'off')
+                throw new Error(`the browser is off for partition "${partition.name}"`);
+            if (mode === 'confirm') {
+                return { text: await askHuman({ kind: 'browser', partition: partition.name, ...task === undefined ? {} : { taskId: task.id }, action: `无头浏览器打开页面（${args.mode ?? 'screenshot'}）`, target: args.url, reason: '', reversible: true, params: args }) };
+            }
+            const out = await capturePage(partition, args.url, args.mode ?? 'screenshot', args.full === true, task?.id);
+            await outlets.audit({ kind: 'browser', partition: partition.name, ...task === undefined ? {} : { taskId: task.id }, action: args.mode ?? 'screenshot', target: args.url, outcome: 'ran', by: 'agent' });
+            return { text: out };
+        },
+    }));
+    // --- 改派 / 换模型, live output, batch ------------------------------------------
+    /**
+     * Move a task's work to another partition and/or model. The old row stops (if
+     * it still runs) and points at the new one; the new row keeps the parent, the
+     * stage and the prerequisites, and every row that waited on the old one now
+     * waits on the new one. With `keepProgress` the new worker's brief carries what
+     * the old one did and its last output; without it, only the original request.
+     */
+    const reassignTask = async (input, caller) => {
+        const task = board.get(input.taskId);
+        if (task === undefined)
+            throw new Error(`unknown task "${input.taskId}"`);
+        if (task.reassignedTo !== undefined)
+            throw new Error(`${task.id} was already reassigned to ${task.reassignedTo}`);
+        const target = input.partition === undefined ? partitionOf(task) : partitions.find(entry => entry.name === input.partition);
+        if (target === undefined)
+            throw new Error(`unknown partition "${input.partition ?? ''}"`);
+        if (input.model !== undefined) {
+            const known = await cachedModelOptions().catch(() => []);
+            if (known.length > 0 && !known.some(option => option.provider === input.model.provider && option.model === input.model.model)) {
+                throw new Error(`model ${input.model.provider}/${input.model.model} is not offered by the runtime`);
+            }
+        }
+        if (target.name === task.partition && input.model === undefined && !input.keepProgress) {
+            // Same place, same model, from scratch: that is a retry, which keeps the row.
+            throw new Error('nothing to change: pick another partition or model, or use retry');
+        }
+        const wasOpen = !SETTLED.has(task.state);
+        let transcript = [];
+        if (input.keepProgress && task.sessionId !== undefined) {
+            transcript = renderTranscript(await readLog(task.sessionId), 10, 500);
+        }
+        const why = input.note ?? task.error ?? (wasOpen ? '人工改派' : undefined);
+        const lines = [
+            task.body,
+            '',
+            `--- 改派说明（原任务 ${task.id}，${task.partition}${task.model === undefined ? '' : ` / ${task.model}`}）---`,
+            ...why === undefined ? [] : [`原因：${why}`],
+        ];
+        if (input.keepProgress) {
+            lines.push(...task.summary === undefined ? [] : [`上一个 worker 已做：${task.summary}`], ...task.touched === undefined || task.touched.length === 0 ? [] : [`它改过的文件：${task.touched.join('、')}`], ...task.left === undefined ? [] : [`它留下没做的：${task.left}`], ...transcript.length === 0 ? [] : ['它最后的输出：', ...transcript], '接着它的进度继续：先检查上面这些文件的现状再动手，不要从头重做已经完成的部分。');
+        }
+        else {
+            lines.push('从头开始做，不要沿用上一个 worker 的改动结论（先看文件现状）。');
+        }
+        if (wasOpen)
+            await stopRow(task, `改派${why === undefined ? '' : `：${why}`}`, false);
+        const created = await enqueue({
+            text: lines.join('\n'),
+            subject: task.subject,
+            priority: task.priority,
+            ...task.parentId === undefined ? {} : { parent_task: task.parentId },
+            ...task.dependsOn === undefined ? {} : { depends_on: task.dependsOn },
+            ...task.stage === undefined ? {} : { stage: task.stage },
+        }, { partition: target, reason: 'explicit', because: [`reassigned from ${task.id}`] }, task.level === 'manager' && target.managerEnabled ? 'manager' : 'worker', caller ?? liveAgent(task.dispatchFrom) ?? lastCaller);
+        await board.patch(created.id, {
+            reassignedFrom: task.id,
+            ...input.model === undefined ? {} : { routeOverride: input.model, tierSource: 'explicit', tierReason: `换模型：${input.model.model}` },
+        });
+        await board.patch(task.id, { reassignedTo: created.id, ...wasOpen ? {} : {} });
+        // Rows that waited on the old task now wait on the new one.
+        for (const row of board.list()) {
+            if (row.id === created.id || row.dependsOn === undefined || !row.dependsOn.includes(task.id))
+                continue;
+            await board.patch(row.id, { dependsOn: row.dependsOn.map(id => id === task.id ? created.id : id) });
+        }
+        const parentAgent = caller ?? liveAgent(task.dispatchFrom) ?? lastCaller ?? await ensureAnchor().catch(() => undefined);
+        await pump(target.name, parentAgent);
+        const moved = `${task.id} -> ${created.id}（${target.name}${input.model === undefined ? '' : ` / ${input.model.model}`}，${input.keepProgress ? '接着做' : '从头来'}）`;
+        await tellManager(task, undefined, `【系统通知】你的子任务 ${task.id}「${task.subject}」被改派为 ${created.id}（${target.name}${input.model === undefined ? '' : `，模型 ${input.model.model}`}）。不要再等 ${task.id}，改为等 ${created.id}；不要重复派发。`);
+        await afterChange().catch(() => { });
+        await publishSnapshot().catch(() => { });
+        return { from: task.id, to: created.id, partition: target.name, text: `reassigned ${moved}` };
+    };
+    /** One action over many rows, each reported on its own. */
+    const BATCH_ACTIONS = new Set(['cancel', 'cancel_tree', 'retry', 'suspend', 'resume', 'reassign']);
+    const batchControl = async (taskIds, action, value) => {
+        if (!BATCH_ACTIONS.has(action))
+            throw new BridgeError(400, 'bad-request', `action must be one of ${[...BATCH_ACTIONS].join(', ')}`);
+        const results = [];
+        for (const id of taskIds) {
+            try {
+                if (action === 'reassign') {
+                    const out = await reassignTask({ taskId: id, ...value === undefined || value === '' ? {} : { partition: value }, keepProgress: true });
+                    results.push({ id, ok: true, state: `→ ${out.to}` });
+                }
+                else if (action === 'suspend') {
+                    const out = await controlFromPanel(id, 'suspend', value ?? '批量挂起');
+                    results.push({ id, ok: true, state: out.state });
+                }
+                else {
+                    const out = await controlFromPanel(id, action, value);
+                    results.push({ id, ok: true, state: out.state });
+                }
+            }
+            catch (error) {
+                results.push({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
+            }
+        }
+        return { ok: results.filter(row => row.ok).length, failed: results.filter(row => !row.ok).length, results };
+    };
+    /** A worker's live output since segment `after`. */
+    const liveOutput = async (taskId, after) => {
+        const task = board.get(taskId);
+        if (task === undefined)
+            throw new BridgeError(404, 'not-found', `unknown task "${taskId}"`);
+        const base = { taskId: task.id, state: task.state, at: Date.now() };
+        if (task.sessionId === undefined)
+            return { ...base, segments: [] };
+        const events = await readLog(task.sessionId);
+        return { ...base, sessionId: task.sessionId, segments: liveSegments(events, after, 80) };
+    };
+    ctx.effect(() => ctx.tools.register({
+        name: 'task_reassign',
+        description: 'Move a task to another partition and/or model instead of retrying it blindly. The old row stops '
+            + 'and points at the new one; the new row keeps the parent, stage and prerequisites. `keep_progress` (default '
+            + 'true) hands the new worker what the old one did and its last output; false starts from the request alone.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['task_id'],
+            properties: {
+                task_id: { type: 'string' },
+                partition: { type: 'string', description: 'Target partition (default: the same).' },
+                provider: { type: 'string', description: 'Model provider, with `model`.' },
+                model: { type: 'string', description: 'Model id to run on.' },
+                reasoning_effort: { type: 'string' },
+                keep_progress: { type: 'boolean' },
+                note: { type: 'string', description: 'Why it moves.' },
+            },
+        },
+        output: textOutput,
+        isConcurrencySafe: () => false,
+        async execute(raw, exec) {
+            const args = raw;
+            if ((args.provider === undefined) !== (args.model === undefined))
+                throw new Error('pass provider and model together');
+            const out = await reassignTask({
+                taskId: args.task_id,
+                ...args.partition === undefined ? {} : { partition: args.partition },
+                ...args.provider === undefined || args.model === undefined ? {} : { model: { provider: args.provider, model: args.model, ...args.reasoning_effort === undefined ? {} : { reasoningEffort: args.reasoning_effort } } },
+                keepProgress: args.keep_progress !== false,
+                ...args.note === undefined ? {} : { note: args.note },
+            }, exec.agent);
+            return { text: out.text };
+        },
+    }));
     ctx.effect(() => ctx.tools.register({
         name: 'task_control',
-        description: 'Change one task: `cancel` interrupts its worker and marks it cancelled; `priority` '
+        description: 'Change one task: `cancel` interrupts its worker and marks it cancelled; `cancel_tree` '
+            + 'stops the task and every open task under it (a whole request, or a manager and its workers); `priority` '
             + 'reorders the queue; `retry` re-dispatches a failed or reported task to a fresh worker; '
             + '`resume` continues an interrupted or failed row in its own session from its log; '
             + '`verify` runs the acceptance commands against the current tree; `block` parks it on a human '
-            + 'decision; `note` records a remark verbatim.',
+            + 'decision; `suspend` parks it to be finished later (use task_suspend to also name a prerequisite); '
+            + '`resume` also continues a suspended task now, or starts a task held by a failed prerequisite; '
+            + '`note` records a remark verbatim.',
         parameters: {
             type: 'object',
             additionalProperties: false,
@@ -1462,12 +3024,12 @@ export async function apply(ctx, config) {
                 task_id: { type: 'string', description: 'Task id.' },
                 action: {
                     type: 'string',
-                    enum: ['cancel', 'priority', 'retry', 'resume', 'verify', 'block', 'note'],
+                    enum: ['cancel', 'cancel_tree', 'priority', 'retry', 'resume', 'verify', 'block', 'suspend', 'note'],
                     description: 'What to change.',
                 },
                 value: {
                     type: 'string',
-                    description: 'Priority for `priority`, remark for `note`, decision needed for `block`, reason for `cancel`.',
+                    description: 'Priority for `priority`, remark for `note`, decision needed for `block`, the decision for `resume` of a blocked row, reason for `cancel`.',
                 },
             },
         },
@@ -1482,92 +3044,7 @@ export async function apply(ctx, config) {
         },
         isConcurrencySafe: () => true,
         async execute(raw, exec) {
-            const args = raw;
-            if (exec.agent !== undefined)
-                lastCaller = exec.agent;
-            const task = board.get(args.task_id);
-            if (task === undefined)
-                throw new Error(`unknown task "${args.task_id}"`);
-            const partition = partitionOf(task);
-            switch (args.action) {
-                case 'cancel': {
-                    const activation = inFlight.get(task.id);
-                    const sessionId = activation?.childId ?? task.sessionId;
-                    if (sessionId !== undefined)
-                        cancelWorker(ctx.get('subagents'), sessionId);
-                    if (activation !== undefined)
-                        await activation.dispose().catch(() => { });
-                    inFlight.delete(task.id);
-                    const updated = await board.patch(task.id, {
-                        state: 'cancelled',
-                        ...args.value === undefined ? {} : { error: `cancelled: ${args.value}` },
-                    });
-                    await publishSnapshot().catch(() => { });
-                    return {
-                        text: `${updated.id} cancelled (${sessionId === undefined ? 'no live worker' : `interrupted ${sessionId}`})`,
-                    };
-                }
-                case 'priority': {
-                    const value = Number(args.value);
-                    if (!Number.isInteger(value))
-                        throw new Error('priority requires an integer value');
-                    const updated = await board.patch(task.id, { priority: value });
-                    await pump(partition.name, exec.agent ?? lastCaller);
-                    return { text: `${updated.id} priority -> ${String(value)}` };
-                }
-                case 'retry': {
-                    if (task.state === 'running' || task.state === 'dispatched') {
-                        throw new Error(`${task.id} is still in flight; cancel it first`);
-                    }
-                    const parent = exec.agent ?? liveAgent(task.dispatchFrom) ?? lastCaller;
-                    if (parent === undefined)
-                        throw new Error('retry needs a live agent to own the new worker');
-                    await board.patch(task.id, { state: 'queued' });
-                    await pump(partition.name, parent);
-                    const after = board.get(task.id);
-                    await publishSnapshot().catch(() => { });
-                    return { text: `${after.id} state ${after.state}; worker ${after.worker ?? '-'}` };
-                }
-                case 'resume': {
-                    if (task.state === 'running' || task.state === 'dispatched') {
-                        throw new Error(`${task.id} is still in flight`);
-                    }
-                    const sender = exec.agent ?? liveAgent(task.dispatchFrom) ?? lastCaller;
-                    if (sender === undefined)
-                        throw new Error('resume needs a live agent to own the delivery');
-                    const line = await resumeRow({ ...task, resumes: 0 }, sender);
-                    await publishSnapshot().catch(() => { });
-                    return { text: line };
-                }
-                case 'verify': {
-                    const commands = task.verify ?? partition.verify ?? [];
-                    const verdict = await runVerify(commands, partition.dir, verifyTimeout);
-                    const updated = await board.patch(task.id, {
-                        state: verdict.ok ? 'verified' : 'failed',
-                        verify: commands,
-                        verifyOutput: tail(verdict.output),
-                        ...verdict.ok ? {} : { error: `acceptance failed: ${verdict.failed ?? 'unknown command'}` },
-                    });
-                    await publishSnapshot().catch(() => { });
-                    return { text: `${updated.id} -> ${updated.state}\n${tail(verdict.output)}` };
-                }
-                case 'block': {
-                    const updated = await board.patch(task.id, {
-                        state: 'blocked',
-                        resumeNote: args.value ?? '(no note)',
-                    });
-                    await publishSnapshot().catch(() => { });
-                    return { text: `${updated.id} blocked: ${updated.resumeNote ?? ''}` };
-                }
-                case 'note': {
-                    if (args.value === undefined)
-                        throw new Error('note requires a value');
-                    const updated = await board.note(task.id, args.value);
-                    return { text: `${updated.id} has ${String(updated.notes?.length ?? 0)} note(s)` };
-                }
-                default:
-                    throw new Error(`unknown action "${args.action}"`);
-            }
+            return await taskControl(raw, exec);
         },
     }));
     ctx.effect(() => ctx.tools.register({
@@ -1623,6 +3100,149 @@ export async function apply(ctx, config) {
             };
         },
     }));
+    ctx.effect(() => ctx.tools.register({
+        name: 'task_suspend',
+        description: 'Suspend a task until a prerequisite is done, then continue it in its own session. '
+            + 'A worker that finds it cannot finish because something else must happen first calls this on its '
+            + 'own task id with `prerequisite` describing that work, then ends its turn. A human (via the chat) '
+            + 'can also suspend any task, even one already delivered, to have it finished later. The router '
+            + 'creates the prerequisite task, waits for it (or for `wait_for` ids), and wakes the suspended '
+            + 'task with the prerequisite\'s result.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['task_id', 'reason'],
+            properties: {
+                task_id: { type: 'string', description: 'The task to suspend (a worker passes its own task id).' },
+                reason: { type: 'string', description: 'Why it cannot be finished now, in one or two sentences.' },
+                prerequisite: {
+                    type: 'string',
+                    description: 'Self-contained instruction for the prerequisite work. The router publishes it as a new '
+                        + 'task (same partition unless `partition` says otherwise) and continues this task once it is done.',
+                },
+                partition: { type: 'string', description: 'Partition for the prerequisite, when it belongs elsewhere.' },
+                wait_for: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Existing task ids to wait for instead of (or as well as) a new prerequisite.',
+                },
+            },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['text'],
+                properties: { text: { type: 'string' } },
+            },
+            render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        isConcurrencySafe: () => true,
+        async execute(raw, exec) {
+            const args = raw;
+            if (exec.agent !== undefined)
+                lastCaller = exec.agent;
+            const out = await suspendTask({
+                taskId: args.task_id,
+                reason: typeof args.reason === 'string' ? args.reason : '',
+                ...args.prerequisite === undefined ? {} : { prerequisite: args.prerequisite },
+                ...args.partition === undefined ? {} : { partition: args.partition },
+                ...args.wait_for === undefined ? {} : { waitFor: args.wait_for },
+                ...exec.agent === undefined ? {} : { caller: exec.agent },
+            });
+            return { text: out.text };
+        },
+    }));
+    /** Longest one `task_wait` call blocks; the caller loops for longer waits. */
+    const MAX_WAIT_SECONDS = 900;
+    ctx.effect(() => ctx.tools.register({
+        name: 'task_wait',
+        description: 'Wait for tasks that are not running yet: ones held by a stage or depends_on, suspended ones, '
+            + 'and ones still queued. Returns as soon as any watched task changes state, when all of them are '
+            + 'settled, or after the timeout, with one line per task. A manager passes its own task id as '
+            + '`parent_task` to watch all of its tasks, including ones started later.',
+        parameters: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                parent_task: { type: 'string', description: 'Watch every task under this parent.' },
+                task_ids: { type: 'array', items: { type: 'string' }, description: 'Watch these tasks.' },
+                timeout_seconds: { type: 'integer', minimum: 5, maximum: MAX_WAIT_SECONDS, description: 'Default 300.' },
+            },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['text', 'settled'],
+                properties: { text: { type: 'string' }, settled: { type: 'boolean' } },
+            },
+            render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        isConcurrencySafe: () => true,
+        async execute(raw, exec) {
+            const args = raw;
+            if (args.parent_task === undefined && (args.task_ids === undefined || args.task_ids.length === 0)) {
+                throw new Error('task_wait needs parent_task or task_ids');
+            }
+            const watched = () => {
+                const ids = new Set(args.task_ids ?? []);
+                if (args.parent_task !== undefined)
+                    for (const child of board.childrenOf(args.parent_task))
+                        ids.add(child.id);
+                return [...ids].flatMap(id => board.get(id) ?? []);
+            };
+            // Blocked needs a human: waiting for it would only run out the clock.
+            const settled = (task) => !stillComing(task.state);
+            const timeout = Math.min(MAX_WAIT_SECONDS, Math.max(5, args.timeout_seconds ?? 300)) * 1000;
+            const before = new Map(watched().map(task => [task.id, task.state]));
+            const started = Date.now();
+            let lastFold = Date.now();
+            let reason = 'timeout';
+            while (Date.now() - started < timeout) {
+                if (exec.signal.aborted) {
+                    reason = 'aborted';
+                    break;
+                }
+                const now = watched();
+                if (now.length > 0 && now.every(settled)) {
+                    reason = 'all settled';
+                    break;
+                }
+                if (now.some(task => before.get(task.id) !== task.state)) {
+                    reason = 'changed';
+                    break;
+                }
+                // Resumed rows settle only through a log fold; do one now and then.
+                if (Date.now() - lastFold > 10_000) {
+                    lastFold = Date.now();
+                    await publishSnapshot().catch(() => { });
+                    await afterChange().catch(() => { });
+                }
+                await new Promise(done => setTimeout(done, 500));
+            }
+            const rows = watched();
+            const all = rows.length > 0 && rows.every(settled);
+            const lines = rows.map((task) => {
+                const gate = task.state === 'queued' ? orderGate(task) : READY;
+                const waits = gate.kind === 'wait' ? ` (waiting for ${gate.on.join(', ')})` : '';
+                const said = task.summary ?? (isFinished(task.state) || isDead(task.state) ? task.result : undefined);
+                const extra = task.state === 'suspended'
+                    ? ` suspended: ${task.suspendReason ?? ''}${(task.waitingOn?.length ?? 0) > 0 ? `; waiting for ${task.waitingOn.join(', ')}` : ''}`
+                    : task.state === 'blocked' ? ` blocked: ${task.resumeNote ?? ''}` : '';
+                return `${mark(task.state)} ${task.id} ${task.state}${waits}${extra} | ${task.subject}`
+                    + (said === undefined ? '' : `\n    ${tail(said.replace(/\s+/g, ' '), 300)}`)
+                    + (task.error === undefined ? '' : `\n    error: ${task.error}`);
+            });
+            return {
+                settled: all,
+                text: [
+                    `${reason}; ${all ? 'every watched task is settled: write your consolidated report now' : 'some tasks are still to come: call task_wait (or wait_agent) again'}`,
+                    ...lines,
+                ].join('\n'),
+            };
+        },
+    }));
     // Optional in-process handle for a host-side bridge. The JSON snapshot is the
     // guaranteed contract; this only saves a file read when cordis offers `set`.
     const service = {
@@ -1653,12 +3273,94 @@ export async function apply(ctx, config) {
             dir: partition.dir,
             slots: partition.slots,
             managerEnabled: partition.managerEnabled,
+            ...partition.quick === true ? { quick: true } : {},
+            ...partition.include === undefined ? {} : { include: partition.include },
+            ...partition.exclude === undefined ? {} : { exclude: partition.exclude },
+            ...partition.description === undefined ? {} : { description: partition.description.replace(/\s+/g, ' ').trim() },
         })),
+        files: async (name, path) => {
+            const partition = partitions.find(entry => entry.name === name);
+            if (partition === undefined)
+                throw new BridgeError(404, 'not-found', `unknown partition "${name}"`);
+            // Its root is the home directory: the panel does not browse that.
+            if (partition.quick === true)
+                throw new BridgeError(404, 'not-found', '快任务没有工作区文件');
+            try {
+                return await listPartitionDir(partition, path);
+            }
+            catch (error) {
+                if (error instanceof FileListError)
+                    throw new BridgeError(error.status, error.code, error.message);
+                throw error;
+            }
+        },
+        desk: {
+            approvals: async () => {
+                await outlets.expire();
+                return { pending: outlets.pending(), recent: outlets.list().filter(item => item.state !== 'pending').slice(0, 30) };
+            },
+            decide: (id, decision, note) => decideApproval(id, decision, note),
+            audit: async (limit) => ({ entries: await outlets.recentAudit(limit) }),
+            live: (taskId, after) => liveOutput(taskId, after),
+            reassign: input => reassignTask(input),
+            batch: (taskIds, action, value) => batchControl(taskIds, action, value),
+        },
+        memory: {
+            read: async (name) => {
+                const partition = partitions.find(entry => entry.name === name);
+                if (partition === undefined)
+                    throw new BridgeError(404, 'not-found', `unknown partition "${name}"`);
+                const doc = await memory.read(name);
+                const route = await managerRoute().catch(() => ({ source: 'inherit' }));
+                return {
+                    partition: name,
+                    notes: doc.notes,
+                    log: [...doc.log].reverse().slice(0, 60),
+                    logTotal: doc.log.length,
+                    sessions: board.inPartition(name)
+                        .filter(task => task.level === 'worker' && task.sessionId !== undefined)
+                        .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+                        .slice(0, 40)
+                        .map(task => ({
+                        taskId: task.id,
+                        sessionId: task.sessionId,
+                        state: task.state,
+                        subject: task.subject,
+                        updatedAt: task.updatedAt,
+                        ...task.summary === undefined ? {} : { summary: task.summary },
+                    })),
+                    manager: {
+                        enabled: partition.managerEnabled,
+                        source: route.source,
+                        ...'route' in route && route.route !== undefined ? { route: route.route } : {},
+                    },
+                };
+            },
+            addNote: async (name, text) => {
+                if (!partitions.some(entry => entry.name === name))
+                    throw new BridgeError(404, 'not-found', `unknown partition "${name}"`);
+                try {
+                    return await memory.addNote(name, text, 'human');
+                }
+                catch (error) {
+                    throw new BridgeError(400, 'bad-request', error instanceof Error ? error.message : String(error));
+                }
+            },
+            removeNote: async (name, id) => {
+                if (!partitions.some(entry => entry.name === name))
+                    throw new BridgeError(404, 'not-found', `unknown partition "${name}"`);
+                if (!await memory.removeNote(name, id))
+                    throw new BridgeError(404, 'not-found', `no note ${id} in ${name}`);
+                return { ok: true, id };
+            },
+        },
+        problems: () => configProblems,
         isEnabled,
         snapshot: () => publishSnapshot(),
         publish: publishDemands,
         anchor: anchorSession,
         verify: decideFromPanel,
+        control: controlFromPanel,
         setPartitionState,
         credentials: credentialStatus,
         // Every board mutation rewrites this file, so its mtime is the change signal
@@ -1674,9 +3376,10 @@ export async function apply(ctx, config) {
                 return;
             }
             for (const route of createRoutes(bridgeDeps)) {
-                webCtx.effect(() => webServer.register(route), `host-router: ${route.path}`);
+                const guarded = requireLogin(route, () => ctx.get('connection'));
+                webCtx.effect(() => webServer.register(guarded), `host-router: ${route.path}`);
             }
-            ctx.logger.info(`host-router: HTTP bridge mounted at ${BRIDGE_BASE} (board/publish/anchor/verify/partition/tiers/events)`);
+            ctx.logger.info(`host-router: HTTP bridge mounted at ${BRIDGE_BASE} (board/publish/anchor/verify/control/partition/tiers/files/events)`);
         });
     }
     else {
@@ -1729,14 +3432,16 @@ export async function apply(ctx, config) {
      * Resume one interrupted row in its own session.
      * @returns what happened, for the boot log.
      */
-    const resumeRow = async (task, sender) => {
+    const resumeRow = async (task, sender, text = RESUME_TEXT) => {
         if (task.sessionId === undefined) {
             await board.patch(task.id, { state: 'queued' });
             return `${task.id}: no session, re-queued`;
         }
-        // A child that finished just before the stop needs no second turn.
+        // A child that finished just before the stop needs no second turn. A blocked
+        // row is the exception: a human decided, so the worker must hear it even when
+        // its last turn ended normally (e.g. it stopped to ask).
         const facts = foldWorkerLog(await readLog(task.sessionId));
-        if (facts.endedWith === 'completed' && facts.lastAssistant !== undefined) {
+        if (task.state !== 'blocked' && facts.endedWith === 'completed' && facts.lastAssistant !== undefined) {
             await board.patch(task.id, { state: 'done', result: facts.lastAssistant });
             return `${task.id}: already completed in its log, closed`;
         }
@@ -1745,7 +3450,7 @@ export async function apply(ctx, config) {
             await board.patch(task.id, { state: 'failed', error: `interrupted ${String(MAX_RESUMES)} times; resume it by hand (task_control resume) or retry` });
             return `${task.id}: resume limit reached`;
         }
-        await continueWorker(ctx.get('subagents'), sender, task.sessionId, RESUME_TEXT, AbortSignal.timeout(60_000));
+        await continueWorker(ctx.get('subagents'), sender, task.sessionId, text, AbortSignal.timeout(60_000));
         await board.patch(task.id, { state: 'running', resumes, runToken, reportedTo: sender.id });
         resumedRows.add(task.id);
         watchResumed();

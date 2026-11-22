@@ -10,6 +10,8 @@
  *
  * @module host-router/config
  */
+import type { OutletPolicy } from './outlets.ts';
+import { type ScmConfig } from './scm.ts';
 /** Reachability a partition declares, so its workers stop guessing. */
 export type PartitionNetwork = 'intranet' | 'internet' | 'offline';
 /** Git instructions attached to a worker's brief. */
@@ -18,6 +20,12 @@ export interface PartitionGit {
     readonly branch?: string;
     /** Extra git rule for this partition, appended verbatim. */
     readonly rule?: string;
+    /**
+     * Code host of this checkout (GitHub or Gitea). With it, workers publish their
+     * branch and open or update a pull request through `git_publish`, read checks
+     * through `pr_status`, and ask for a merge through `pr_merge` (a human approves).
+     */
+    readonly scm?: ScmConfig;
 }
 /** One declarative file partition. */
 export interface PartitionConfig {
@@ -61,6 +69,13 @@ export interface PartitionConfig {
      * would move work that is not the worker's to move.
      */
     readonly git?: PartitionGit;
+    /**
+     * What agents in this partition may do outside the sandbox: push and open
+     * pull requests (`git`), run server commands (`ops`), open pages headless
+     * (`browser`). `off` refuses, `confirm` asks a human every time, `allow` runs
+     * (dangerous commands and merges still ask). See outlets.ts.
+     */
+    readonly outlets?: OutletPolicy;
     /**
      * Use one long-lived manager child for this partition: tasks are handed to it
      * and it decomposes them into worker calls. Default follows the router-level
@@ -151,7 +166,57 @@ export interface RouterConfig {
     readonly resumeDelayMs?: number;
     /** Credential references whose presence the board reports. Default {@link DEFAULT_CREDENTIAL_REFS}. */
     readonly credentialRefs?: readonly CredentialRefConfig[];
+    /**
+     * Post a short 【进度提醒】 into the 作战室 when a task is suspended or
+     * continued, when a prerequisite fails, and when a held-back stage starts.
+     * Default true.
+     */
+    readonly progressNotices?: boolean;
+    /** Notices arriving within this window are posted as one message. Default 3000 ms. */
+    readonly progressNoticeDelayMs?: number;
+    /**
+     * Headless screenshot command used by `browser_capture`:
+     * `<command> <url> <out.png> [--full] [--wait ms]`. Default `/srv/workspace/bin/screenshot`.
+     */
+    readonly screenshotCommand?: string;
+    /**
+     * 快任务: small jobs outside every workspace (machine settings, a git command,
+     * installing a tool). On by default; `false` turns it off.
+     */
+    readonly quick?: QuickConfig | false;
 }
+/** Name the built-in 快任务 partition is routed by. */
+export declare const QUICK_PARTITION = "quick";
+/**
+ * The built-in 快任务 partition.
+ *
+ * Work that belongs to no project still deserves a worker rather than the
+ * chat: "set the git user name", "what is using port 3000", "install jq". The
+ * router hands such a job to one worker on the fast model, with no manager
+ * and no branch, and answers the user at once; the result comes back later.
+ * These workers have their own slots, so a quick job never waits behind a
+ * workspace's long task and never takes a workspace's slot.
+ */
+export interface QuickConfig {
+    /** Directory the worker starts in. Default the user's home directory. */
+    readonly root?: string;
+    /** Concurrent quick workers. Default 2; `0` means no cap. */
+    readonly workers?: number;
+    /** One line the classifier and the panel show. */
+    readonly description?: string;
+    /** Outlet policy, as for any partition (dangerous commands still ask). */
+    readonly outlets?: OutletPolicy;
+}
+/** Default one-line description of the 快任务 partition. */
+export declare const QUICK_DESCRIPTION = "\u5FEB\u4EFB\u52A1\uFF1A\u4E0D\u5C5E\u4E8E\u4EFB\u4F55\u5DE5\u4F5C\u533A\u7684\u5C0F\u6D3B\uFF0C\u4F8B\u5982\u6539\u7535\u8111\u914D\u7F6E\u3001\u8DD1 git \u547D\u4EE4\u3001\u88C5\u5DE5\u5177\u3001\u67E5\u7AEF\u53E3\u6216\u78C1\u76D8";
+/**
+ * Build the 快任务 partition, or undefined when it is off or a declared
+ * partition already uses its name (the declared one wins).
+ * @param raw - `RouterConfig.quick`.
+ * @param declared - the normalised declared partitions.
+ * @param home - default root.
+ */
+export declare function quickPartition(raw: QuickConfig | false | undefined, declared: readonly Partition[], home: string): Partition | undefined;
 /** Why a task landed where it did; recorded so a human can audit routing. */
 export type RouteReason = 'explicit' | 'files' | 'auto' | 'llm' | 'default' | 'manager';
 /** One normalised partition. */
@@ -162,6 +227,8 @@ export interface Partition extends PartitionConfig {
     readonly slots: number;
     /** Effective manager flag. */
     readonly managerEnabled: boolean;
+    /** The built-in 快任务 partition (see {@link QuickConfig}). */
+    readonly quick?: boolean;
 }
 /** Raised for configuration a deployment must fix, not for a task-level mistake. */
 export declare class PartitionConfigError extends Error {

@@ -22,6 +22,7 @@ import { join, resolve } from 'node:path'
 import { BRIDGE_BASE, createRoutes } from './bridge.ts'
 import { EgressRuntime, installHook } from './dispatch.ts'
 import { buildState, providerHosts, statusText } from './state.ts'
+import { requireLogin, type LoginCheck } from './login.ts'
 import { EgressStore } from './store.ts'
 import type { EgressConfig, PluginContext } from './types.ts'
 
@@ -97,7 +98,12 @@ export function apply(ctx: PluginContext, config: EgressConfig = {}): void {
       ctx.logger.warn('dsh-egress: webServer exposes no register(); the HTTP bridge is not mounted')
       return
     }
-    for (const route of routes) webCtx.effect(() => webServer.register(route), `dsh-egress: ${route.path}`)
+    // Login is checked here: a plugin route outranks the connection's own `/api` check.
+    const connection = (): LoginCheck | undefined => (ctx as { get?(name: string): unknown }).get?.('connection') as LoginCheck | undefined
+    for (const route of routes) {
+      const guarded = requireLogin(route, connection)
+      webCtx.effect(() => webServer.register(guarded), `dsh-egress: ${route.path}`)
+    }
     ctx.logger.info(`dsh-egress: HTTP bridge mounted at ${BRIDGE_BASE} (state/exit/binding/probe)`)
   })
 }

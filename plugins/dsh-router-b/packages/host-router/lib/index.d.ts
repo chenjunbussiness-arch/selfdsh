@@ -42,11 +42,29 @@ import { normalisePartitions, resolveRoute } from './config.ts';
 import type { Partition, RouterConfig } from './config.ts';
 import type { RouterTask, TaskState } from './board.ts';
 import type { RouterSnapshot, TaskView } from './snapshot.ts';
-import type { PluginContext } from './types.ts';
+import type { PluginContext, WebRouteLike } from './types.ts';
 /** Stable plugin name. */
 export declare const name = "host-router";
 /** The tool registry and the subagent seam are hard dependencies. */
 export declare const inject: string[];
+/** The part of the web app's `connection` service the bridge uses to check a login. */
+interface LoginCheck {
+    /** `undefined` for a logged-in browser (or API peer), else 401 / 403. */
+    requestRejection?(request: import('node:http').IncomingMessage): number | undefined;
+}
+/**
+ * Put the web app's own login in front of one bridge route.
+ *
+ * The host web server matches the longest prefix first, so `/api/router/*`
+ * wins over the app's `/api` route and would skip its login check. Without
+ * this, anything that can reach the port (a worker's shell included) could
+ * read the board and approve its own merge or dangerous command. Fails closed:
+ * with no login service the route answers 503.
+ * @param route - the route as the bridge builds it.
+ * @param connection - reads the `connection` service at request time.
+ * @returns the same route behind the login check.
+ */
+export declare function requireLogin(route: WebRouteLike, connection: () => LoginCheck | undefined): WebRouteLike;
 /** Mount the router: partitions, board, tools, and the worker lifecycle. */
 export declare function apply(ctx: PluginContext, config: RouterConfig): Promise<void>;
 /** Exported so a deployment or test can validate config without booting the plugin. */

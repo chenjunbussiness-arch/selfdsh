@@ -42,6 +42,8 @@ import type { RouterBoardController } from './controller.ts'
 import { clockTime, duration, relativeTime } from './format.ts'
 import { NO_SESSIONS, todosOf, type SessionsFace } from './native-todos.ts'
 import { BOARD_TOKENS_CSS, type BoardTone } from './styles.ts'
+import { ApprovalsSection, BatchBar, DESK_CSS, LivePanel, NO_FILTER, ReassignDialog, failureKey, type BatchFilter } from './Desk.tsx'
+import { ThemeButton, useBoardTheme } from './theme.tsx'
 
 /** Props supplied by the tab registration. */
 export interface CompactBoardProps {
@@ -411,6 +413,7 @@ const CARET = 'M6 4l4 4-4 4'
 const ICON_REFRESH = 'M13 8a5 5 0 1 1-1.5-3.6M13 3v3h-3'
 const ICON_PLUS = 'M8 3v10M3 8h10'
 const ICON_CLOSE = 'M4 4l8 8M12 4l-8 8'
+const ICON_BATCH = 'M3 4.5h2M3 8h2M3 11.5h2M7.5 4.5H13M7.5 8H13M7.5 11.5H13'
 
 /*
  * Board stylesheet. Tokens (state colours, hover/press, 4px spacing scale, 28px
@@ -419,8 +422,7 @@ const ICON_CLOSE = 'M4 4l8 8M12 4l-8 8'
  * low-contrast dividers.
  */
 const STYLE = `${BOARD_TOKENS_CSS}
-.dshrc{container-type:inline-size;--c-text:var(--dsw-alias-label-primary,#0f1115);--c-text2:var(--dsw-alias-label-secondary,#61666b);--c-text3:var(--c-meta);--c-line:var(--dsw-alias-border-l2,rgba(0,0,0,.1));--c-line-soft:var(--dsw-alias-border-l1,rgba(0,0,0,.04));--c-pill:var(--dsw-alias-interactive-bg-hover-solid,#f1f3f5);--c-focus:var(--st-running-dot);--f-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw-alias-bg-base,transparent);color:var(--c-text);font-size:13px;line-height:1.45;text-align:left}
+.dshrc{container-type:inline-size;display:flex;flex-direction:column;height:100%;min-height:0;background:var(--c-bg);color:var(--c-text);font-size:13px;line-height:1.47;letter-spacing:-.003em;text-align:left;transition:background-color var(--dur) var(--ease),color var(--dur) var(--ease)}
 .dshrc *{box-sizing:border-box}
 /* Zero-specificity reset so .dshrc-gh/-chip/-fold/-tab keep their own font size, weight and numerals. */
 :where(.dshrc button){font:inherit}
@@ -481,7 +483,7 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 /* Worker fold chip: ghost button, 28x28 minimum hit area, 16px caret. The
    negative block margin keeps it from growing the 44px family row. */
 .dshrc-chip{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-1);min-width:var(--h-ctl);height:var(--h-ctl);margin-block:-4px;padding:0 var(--sp-2) 0 var(--sp-1);border:1px solid transparent;border-radius:var(--r-ctl);background:transparent;color:var(--c-text3);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;cursor:pointer;white-space:nowrap;transition:background-color .12s ease,border-color .12s ease,color .12s ease}
-.dshrc-chip:hover{border-color:var(--c-ghost-line);background:var(--dsw-alias-bg-base,transparent);color:var(--c-text)}
+.dshrc-chip:hover{border-color:var(--c-ghost-line);background:var(--c-raised);color:var(--c-text)}
 .dshrc-chip:active{background:var(--c-press);color:var(--c-text)}
 .dshrc-caret{flex:none;width:16px;height:16px;display:block;transition:transform .15s ease}
 .dshrc-caret[data-open]{transform:rotate(90deg)}
@@ -495,7 +497,7 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-err-stale{display:block;color:var(--c-text3);font-size:11px}
 .dshrc-err-btn,.dshrc-hold-btn{flex:none;height:var(--h-ctl);padding:0 var(--sp-3);border:1px solid transparent;border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease}
 .dshrc-err-btn{border-color:var(--c-ghost-line)}
-.dshrc-err-btn:hover,.dshrc-hold-btn:hover:not(:disabled){border-color:var(--c-ghost-line);background:var(--dsw-alias-bg-base,transparent)}
+.dshrc-err-btn:hover,.dshrc-hold-btn:hover:not(:disabled){border-color:var(--c-ghost-line);background:var(--c-raised)}
 .dshrc-err-btn:active,.dshrc-hold-btn:active:not(:disabled){background:var(--c-press)}
 .dshrc-sample{flex:none;margin:var(--sp-2) var(--sp-3) 0;padding:var(--sp-1) var(--sp-3);border-radius:var(--r-ctl);background:var(--st-blocked-bg);color:var(--st-blocked-text);font-size:11px}
 .dshrc-hold{display:flex;align-items:center;gap:var(--sp-2);min-width:0;margin:-4px 0 var(--sp-1);padding:0 var(--sp-3) 0 28px;font-size:12px;line-height:16px;color:var(--c-text2)}
@@ -508,7 +510,7 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 /* Row actions: hidden until the row is hovered or focused, so a quiet list stays quiet. */
 .dshrc-acts-row{flex:none;display:flex;align-items:center;gap:2px;opacity:.55;transition:opacity .12s ease}
 .dshrc-row:hover .dshrc-acts-row,.dshrc-row:focus-within .dshrc-acts-row,.dshrc-acts-row[data-busy]{opacity:1}
-.dshrc-act{height:22px;margin-block:-3px;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:var(--dsw-alias-bg-base,transparent);color:var(--c-text2);font-size:11px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.dshrc-act{height:22px;margin-block:-3px;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:var(--c-raised);color:var(--c-text2);font-size:11px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,color .12s ease}
 .dshrc-act[data-tone="stop"]:hover{color:var(--st-failed-text)}
 .dshrc-act[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
 .dshrc-act:hover:not(:disabled){color:var(--c-text);background:var(--c-hover)}
@@ -518,7 +520,7 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-wait .dshrc-id{color:var(--c-text2)}
 .dshrc-sform{display:flex;flex-direction:column;gap:var(--sp-2);margin:0 var(--sp-2) var(--sp-2) 28px;padding:var(--sp-2) var(--sp-3);border:1px solid var(--c-line);border-radius:var(--r-ctl);background:var(--c-line-soft)}
 .dshrc-sform label{display:flex;flex-direction:column;gap:2px;font-size:11px;line-height:16px;color:var(--c-text2)}
-.dshrc-sform input{height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-line);border-radius:var(--r-ctl);background:var(--dsw-alias-bg-base,#fff);color:var(--c-text);font:inherit;font-size:12px}
+.dshrc-sform input{height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-line);border-radius:var(--r-ctl);background:var(--c-raised);color:var(--c-text);font:inherit;font-size:12px}
 .dshrc-sform input:focus-visible{outline:2px solid var(--c-focus);outline-offset:0}
 .dshrc-sform-hint{font-size:11px;color:var(--c-text3)}
 .dshrc-sform-btns{display:flex;justify-content:flex-end;gap:var(--sp-2)}
@@ -541,6 +543,36 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-nt-item{display:flex;gap:var(--sp-2);padding:0 var(--sp-1);font-size:12px;line-height:18px;color:var(--c-text2)}
 .dshrc-nt-time{flex:none;min-width:44px;color:var(--c-text3);font-variant-numeric:tabular-nums}
 .dshrc-nt-text{min-width:0;overflow-wrap:anywhere}
+${DESK_CSS}
+/* Appearance: quiet, roomy, one accent. Pill segments, pill search, rounded rows. */
+.dshrc{position:relative;-webkit-font-smoothing:antialiased}
+.dshrc-head{padding:var(--sp-4) var(--sp-3) var(--sp-2) var(--sp-4)}
+.dshrc-title{font-size:17px;font-weight:600;line-height:22px;letter-spacing:-.022em}
+.dshrc-ico{border-radius:50%}
+.dshrc-ico[aria-pressed="true"]{background:var(--c-pill);color:var(--c-text)}
+.dshrc-tabs{gap:2px;padding:var(--sp-1) var(--sp-3) var(--sp-3) var(--sp-4);border-bottom:0}
+.dshrc-tab{height:28px;padding:0 12px;border-radius:var(--r-pill);font-size:12.5px}
+.dshrc-tab[data-on]{background:var(--c-text);color:var(--c-bg)}
+.dshrc-tab[data-on] .dshrc-tab-n{color:inherit;opacity:.7}
+.dshrc-find{height:28px;padding:0 12px;border:0;border-radius:var(--r-pill);background:var(--c-pill);font-size:12.5px;transition:box-shadow var(--dur) var(--ease)}
+.dshrc-find::placeholder{color:var(--c-text3)}
+.dshrc-find:focus{outline:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--c-accent) 28%,transparent)}
+.dshrc-row{border-radius:10px}
+.dshrc-family+.dshrc-family{border-top-color:transparent}
+.dshrc-act{height:24px;padding:0 10px;border:0;border-radius:var(--r-pill);background:var(--c-pill);color:var(--c-text2)}
+/* With a pointer, a row's buttons appear on hover or focus, so titles keep their room; touch keeps them visible. */
+@media (hover:hover){.dshrc-acts-row{display:none}.dshrc-row:hover .dshrc-acts-row,.dshrc-row:focus-within .dshrc-acts-row,.dshrc-acts-row[data-busy],.dshrc-acts-row:has([aria-pressed="true"]){display:flex}}
+.dshrc-act[data-armed]{background:var(--st-failed-bg)}
+.dshrc-act[data-tone="live"][aria-pressed="true"]{background:var(--c-accent);color:var(--c-on-accent)}
+.dshrc-err,.dshrc-notice,.dshrc-sample,.dshrc-prog{border-radius:12px}
+.dshrc-prog{background:var(--c-surface);padding:var(--sp-3)}
+.dshrc-pr,.dshrc-moved{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:var(--r-pill);background:var(--st-running-bg);color:var(--st-running-text);font-size:11px;font-weight:500;line-height:16px;text-decoration:none;white-space:nowrap;cursor:pointer;border:0}
+.dshrc-pr:hover{text-decoration:underline}
+.dshrc-moved{background:var(--c-pill);color:var(--c-text2)}
+.dshrc-moved:hover{color:var(--c-text)}
+.dshrc[data-batch-on] .dshrc-acts-row{display:none}
+.dshrc-pick{flex:none;width:15px;height:15px;margin:0 2px 0 0;cursor:pointer}
+.dshrc-row[data-picked]{background:color-mix(in srgb,var(--c-accent) 9%,transparent)}
 @media (prefers-reduced-motion:reduce){.dshrc *{transition:none!important;animation:none!important}}
 /* Narrow rail (about 340px at a 1024 viewport): title and status dot only. */
 @container (max-width:379px){
@@ -595,6 +627,13 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   }, [arming])
   // A hand-triggered refresh spins its icon until the read settles.
   const [refreshing, setRefreshing] = useState(false)
+  // Desk: theme, the open output panel, the 改派 dialog and batch mode.
+  const theme = useBoardTheme()
+  const [liveOf, setLiveOf] = useState<string | null>(null)
+  const [moving, setMoving] = useState<{ id: string; focus: 'partition' | 'model' } | null>(null)
+  const [batchOn, setBatchOn] = useState(false)
+  const [filter, setFilter] = useState<BatchFilter>(NO_FILTER)
+  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set())
   const refresh = (): void => {
     if (refreshing) return
     setRefreshing(true)
@@ -714,7 +753,22 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     const needle = query.trim().toLowerCase()
     const matches = (task: TaskView): boolean => [task.title, task.id, nameOf.get(task.partitionId) ?? '']
       .some(text => text.toLowerCase().includes(needle))
-    const families = buildFamilies(tasks, live).filter(family => needle === '' || family.members.some(matches))
+    const fits = (family: Family): boolean => !batchOn || (
+      (filter.group === '' || family.group === filter.group)
+      && (filter.partition === '' || family.members.some(task => task.partitionId === filter.partition))
+      && (filter.failure === '' || family.members.some(task => failureKey(task.error) === filter.failure)))
+    const all = buildFamilies(tasks, live)
+    const families = all.filter(family => (needle === '' || family.members.some(matches)) && fits(family))
+    // Batch mode: what there is to filter by, with counts over the whole board.
+    const groupN = new Map<Group, number>()
+    for (const family of all) groupN.set(family.group, (groupN.get(family.group) ?? 0) + 1)
+    const causeN = new Map<string, number>()
+    for (const task of tasks) {
+      if (groupOfTask(task, live) !== 'failed') continue
+      const key = failureKey(task.error)
+      if (key !== '') causeN.set(key, (causeN.get(key) ?? 0) + 1)
+    }
+    const causes = [...causeN].map(([key, n]) => ({ key, n })).sort((left, right) => right.n - left.n || left.key.localeCompare(right.key))
     const groupFams = new Map<Group, Family[]>()
     for (const group of Object.keys(TAB_GROUPS).flatMap(id => TAB_GROUPS[id as BoardTab])) groupFams.set(group, [])
     for (const family of families) {
@@ -726,8 +780,8 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     const anyShown = [...counts].some(([group, count]) => count > 0 && isLive(group))
     // `anyLive` drives polling, so it reads the whole board, not the filtered rows.
     const anyLive = needle === '' ? anyShown : buildFamilies(tasks, live).some(family => isLive(family.group))
-    return { live, nameOf, workerName, titleOf, groupFams, counts, anyLive }
-  }, [board, query])
+    return { live, nameOf, workerName, titleOf, groupFams, counts, anyLive, groupN, causes, partitions }
+  }, [board, query, batchOn, filter])
 
   // Checklists are not in the board file: poll while something runs. A hidden
   // browser tab skips its polls and catches up the moment it is shown again.
@@ -876,6 +930,54 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     return { key, tone: key.replace('status.', '') as StatusTone }
   }
 
+  /** Batch mode's checkbox at the start of a row. */
+  const pick = (task: TaskView) => {
+    if (!batchOn) return null
+    const on = picked.has(task.id)
+    return (
+      <input type="checkbox" className="dshrc-pick" checked={on} aria-label={t('batch.pick', { title: task.title })}
+        onClick={(event) => { event.stopPropagation() }}
+        onChange={() => {
+          const next = new Set(picked)
+          if (on) next.delete(task.id)
+          else next.add(task.id)
+          setPicked(next)
+        }} />
+    )
+  }
+
+  /** The row's pull request, and where an 改派 moved it to or from. */
+  const badges = (task: TaskView) => (
+    <>
+      {task.pr !== undefined && (
+        <a className="dshrc-pr" href={task.pr.url} target="_blank" rel="noreferrer noopener"
+          title={task.pr.url} onClick={(event) => { event.stopPropagation() }}>
+          {t('row.pr', { n: task.pr.number })}
+        </a>
+      )}
+      {task.reassignedTo !== undefined && (
+        <button type="button" className="dshrc-moved" title={model.titleOf.get(task.reassignedTo) ?? task.reassignedTo}
+          onClick={(event) => { event.stopPropagation(); setQuery(task.reassignedTo ?? '') }}>
+          {t('row.movedTo')}
+        </button>
+      )}
+      {task.reassignedFrom !== undefined && (
+        <button type="button" className="dshrc-moved" title={model.titleOf.get(task.reassignedFrom) ?? task.reassignedFrom}
+          onClick={(event) => { event.stopPropagation(); setQuery(task.reassignedFrom ?? '') }}>
+          {t('row.movedFrom')}
+        </button>
+      )}
+    </>
+  )
+
+  /** The live output under a row. */
+  const livePanel = (task: TaskView) => (
+    <LivePanel controller={controller} t={t} task={task}
+      onClose={() => { setLiveOf(null) }}
+      {...controller.canControl ? { onStop: () => { void act(task, 'cancel') } } : {}}
+      {...controller.canReassign && task.reassignedTo === undefined ? { onReassign: (focus: 'partition' | 'model') => { setMoving({ id: task.id, focus }) } } : {}} />
+  )
+
   /** One indented child row: a worker the headline task dispatched. */
   const childRow = (task: TaskView, group: Group) => {
     const click = openOf(task)
@@ -884,8 +986,10 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
       <div key={task.id} className="dshrc-child" data-child={task.id}>
         <div className="dshrc-row dshrc-sub" data-group={group} data-task={task.id}
           {...linkProps(click)} title={tooltipOf(task, group, orderLines(task))}>
+          {pick(task)}
           <span className="dshrc-rt">{task.title}</span>
           {task.stage !== undefined && <span className="dshrc-tag" data-tone="stage">{t('order.stage', { n: task.stage })}</span>}
+          {badges(task)}
           <span className="dshrc-rm">{metaOf(task, group)}</span>
           <span className="dshrc-id">{shortId(task.id)}</span>
           {rowActs(task, group)}
@@ -894,6 +998,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
         {group === 'suspended' && suspendLine(task)}
         {group === 'queued' && waitLine(task)}
         {suspending === task.id && suspendForm(task)}
+        {liveOf === task.id && livePanel(task)}
       </div>
     )
   }
@@ -932,12 +1037,17 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
    * row on its worker.
    */
   const rowActs = (task: TaskView, group: Group) => {
-    if (!controller.canControl) return null
-    const open = group === 'running' || group === 'queued' || group === 'blocked' || group === 'suspended'
-    const canSuspend = group === 'running' || group === 'queued'
-    const canRetry = group === 'failed' || group === 'cancelled'
+    if (!controller.canControl && !controller.canReadLive) return null
+    const ctl = controller.canControl
+    const isOpen = group === 'running' || group === 'queued' || group === 'blocked' || group === 'suspended'
+    const isEnded = group === 'failed' || group === 'cancelled'
+    const open = ctl && isOpen
+    const canSuspend = ctl && (group === 'running' || group === 'queued')
+    const canRetry = ctl && isEnded
     const canStopTree = open && hasChildren(task)
-    if (!open && !canRetry) return null
+    const canLive = controller.canReadLive && group !== 'queued'
+    const canMove = controller.canReassign && task.reassignedTo === undefined && (isOpen || isEnded)
+    if (!open && !canRetry && !canLive && !canMove) return null
     const anyBusy = [...busy].some(key => key.startsWith(`${task.id}:`))
     const armed = (action: string): boolean => arming === `${task.id}:${action}`
     return (
@@ -968,6 +1078,18 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
           <button type="button" className="dshrc-act" title={t('act.retryHint')} disabled={anyBusy}
             onClick={() => { void act(task, 'retry') }}>
             {t('act.retry')}
+          </button>
+        )}
+        {canMove && (
+          <button type="button" className="dshrc-act" title={t('ra.hint')} disabled={anyBusy}
+            onClick={() => { setMoving({ id: task.id, focus: 'partition' }) }}>
+            {t('ra.reassign')}
+          </button>
+        )}
+        {canLive && (
+          <button type="button" className="dshrc-act" data-tone="live" aria-pressed={liveOf === task.id}
+            title={t('live.hint')} onClick={() => { setLiveOf(liveOf === task.id ? null : task.id) }}>
+            {t('live.open')}
           </button>
         )}
       </span>
@@ -1058,6 +1180,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
       <div key={family.key} className="dshrc-family" data-family={family.key} data-group={group}>
         <div className="dshrc-row" data-group={group} data-task={family.root.id}
           {...linkProps(click)} title={tooltipOf(family.root, group, extra)}>
+          {pick(family.root)}
           <span className="dshrc-main">
             <span className="dshrc-rt">{family.root.title}</span>
             <span className="dshrc-meta">
@@ -1065,6 +1188,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
               <span className="dshrc-id">{shortId(family.root.id)}</span>
             </span>
           </span>
+          {badges(family.root)}
           {family.attempt > 1 && (
             <span className="dshrc-tag" data-tone="attempt">{t('compact.retry', { n: family.attempt })}</span>
           )}
@@ -1084,6 +1208,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
         {group === 'suspended' && repHere && suspendLine(family.rep)}
         {group === 'queued' && repHere && waitLine(family.rep)}
         {suspending === family.root.id && suspendForm(family.root)}
+        {liveOf === family.root.id && livePanel(family.root)}
         {expanded && hidden.map(task => childRow(task, groupOfTask(task, model.live)))}
       </div>
     )
@@ -1212,17 +1337,32 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     )
   }
 
+  const exitOrEnterBatch = (): void => {
+    setBatchOn(on => !on)
+    setPicked(new Set())
+    setFilter(NO_FILTER)
+  }
+  const movingTask = moving === null ? undefined : (board?.tasks ?? []).find(task => task.id === moving.id)
+
   const groups = TAB_GROUPS[tab]
   const shownCount = groups.reduce((sum, group) => sum + (model.counts.get(group) ?? 0), 0)
   const failed = state.status === 'error'
   const lastOk = board === null ? '' : clockTime(board.fetchedAt)
 
   return (
-    <div className="dshrc" data-router-compact data-tab={tab}>
+    <div className="dshrc" data-router-compact data-tab={tab} data-theme={theme.mode} data-batch-on={batchOn ? '' : undefined}>
       <style>{STYLE}</style>
       <header className="dshrc-head">
         <h2 className="dshrc-title">{t('board.title')}</h2>
         <div className="dshrc-acts">
+          {controller.canBatch && (
+            <button type="button" className="dshrc-ico" aria-pressed={batchOn}
+              title={t(batchOn ? 'batch.exit' : 'batch.enter')} aria-label={t(batchOn ? 'batch.exit' : 'batch.enter')}
+              onClick={() => { exitOrEnterBatch() }}>
+              <Icon d={ICON_BATCH} />
+            </button>
+          )}
+          <ThemeButton className="dshrc-ico" pref={theme.pref} setPref={theme.setPref} t={t} />
           <button type="button" className="dshrc-ico" onClick={refresh} data-busy={refreshing ? '' : undefined}
             title={t(refreshing ? 'board.refreshing' : 'board.refresh')} aria-label={t(refreshing ? 'board.refreshing' : 'board.refresh')}>
             <Icon d={ICON_REFRESH} />
@@ -1275,6 +1415,24 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
         <div className="dshrc-notice" role="status" data-tone={notice.tone}>{notice.text}</div>
       )}
       <div className="dshrc-list">
+        <ApprovalsSection controller={controller} t={t} titleOf={model.titleOf} nameOf={model.nameOf}
+          refreshKey={board?.fetchedAt ?? ''} />
+        {batchOn && board !== null && (
+          <BatchBar controller={controller} t={t} filter={filter}
+            setFilter={(next) => {
+              setFilter(next)
+              if (next.group !== '' && next.group !== filter.group) {
+                const home = TABS.find(item => TAB_GROUPS[item.id].includes(next.group as Group))
+                if (home !== undefined) setTab(home.id)
+              }
+            }}
+            groups={GROUP_ORDER.filter(group => (model.groupN.get(group) ?? 0) > 0)
+              .map(group => ({ id: group, label: t(GROUP_KEY[group]), n: model.groupN.get(group) ?? 0 }))}
+            partitions={model.partitions} failures={model.causes}
+            visibleIds={groups.flatMap(group => (model.groupFams.get(group) ?? []).map(family => family.root.id))}
+            selected={picked} setSelected={setPicked} titleOf={model.titleOf}
+            onExit={() => { exitOrEnterBatch() }} />
+        )}
         {board === null
           ? <div className="dshrc-empty">{failed ? t('board.emptyOnError') : t('board.loading')}</div>
           : (
@@ -1287,6 +1445,15 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
               </>
             )}
       </div>
+      {movingTask !== undefined && moving !== null && (
+        <ReassignDialog controller={controller} t={t} task={movingTask} partitions={model.partitions} focus={moving.focus}
+          onClose={() => { setMoving(null) }}
+          onDone={(text) => {
+            setMoving(null)
+            setLiveOf(null)
+            setNotice({ tone: 'ok', text })
+          }} />
+      )}
     </div>
   )
 }

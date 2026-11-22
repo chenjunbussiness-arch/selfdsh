@@ -35,4 +35,4 @@ export interface RosterProps {
  * @param props - partitions plus the rail's selection and control handles.
  * @returns the project list.
  */
-export declare function Roster({ partitions, selectedId, onSelect, onToggle, wired, onUnwired, t }: RosterProps): import("react/jsx-runtime").JSX.Element;
+export declare function Roster({ partitions, selectedId, onSelect, onToggle, wired, onUnwired, t }: RosterProps): import("react").JSX.Element;

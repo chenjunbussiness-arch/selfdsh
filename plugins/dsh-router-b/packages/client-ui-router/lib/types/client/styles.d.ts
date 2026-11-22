@@ -30,3 +30,241 @@ export declare const ROUTER_CSS = "\n.dshr-panel {\n  --dshr-text: var(--dsw-ali
  * their own styles, and a no-op without a DOM (server-side render, tests).
  */
 export declare function installStyles(): void;
+/**
+ * Task-board state palette: one hue per board status, three tiers each.
+ *
+ * - `dot`: the 6px status dot (≥3:1 against the panel background);
+ * - `text`: the status word (≥4.5:1 against the panel background);
+ * - `bg`: a pale wash for banners and tags, never a large saturated fill.
+ *
+ * Every value is a host theme token (`--dsw-static-*` / `--dsw-alias-*`) or a
+ * fixed mix of two of them; `from` names the source so the palette can be traced
+ * back to the theme. The values are literal hex rather than `color-mix()` so the
+ * contrast numbers in the design notes describe exactly what the browser paints.
+ */
+export declare const BOARD_PALETTE: {
+    readonly light: {
+        readonly surface: {
+            readonly base: "#ffffff";
+            readonly hover: "#cad2db";
+            readonly press: "#bec5cd";
+            readonly line: "rgba(0, 0, 0, 0.04)";
+            readonly ghostLine: "#858a91";
+            readonly meta: "#6e7278";
+            readonly id: "#8c9199";
+        };
+        readonly running: {
+            readonly dot: {
+                readonly hex: "#0071e3";
+                readonly from: "accent (light)";
+            };
+            readonly text: {
+                readonly hex: "#0060c0";
+                readonly from: "accent 85% + label-primary (≥4.5:1 on white)";
+            };
+            readonly bg: {
+                readonly hex: "#eaf3fe";
+                readonly from: "accent 8% on white";
+            };
+        };
+        readonly blocked: {
+            readonly dot: {
+                readonly hex: "#b0740e";
+                readonly from: "state-warn-primary (amber-500) 70% + label-primary";
+            };
+            readonly text: {
+                readonly hex: "#8e5f10";
+                readonly from: "amber-500 55% + label-primary";
+            };
+            readonly bg: {
+                readonly hex: "#fef5e7";
+                readonly from: "amber-100";
+            };
+        };
+        readonly done: {
+            readonly dot: {
+                readonly hex: "#488c66";
+                readonly from: "state-success-primary (green-500) 40% + label-secondary";
+            };
+            readonly text: {
+                readonly hex: "#517e68";
+                readonly from: "green-500 25% + label-secondary";
+            };
+            readonly bg: {
+                readonly hex: "#ecf7f1";
+                readonly from: "green-100 50% + neutral-bluish-75";
+            };
+        };
+        readonly failed: {
+            readonly dot: {
+                readonly hex: "#ec1313";
+                readonly from: "state-error-primary (red-600)";
+            };
+            readonly text: {
+                readonly hex: "#c01313";
+                readonly from: "red-600 80% + label-primary";
+            };
+            readonly bg: {
+                readonly hex: "#fef2f2";
+                readonly from: "red-50";
+            };
+        };
+        readonly cancelled: {
+            readonly dot: {
+                readonly hex: "#81858c";
+                readonly from: "label-tertiary (neutral-bluish-600)";
+            };
+            readonly text: {
+                readonly hex: "#61666b";
+                readonly from: "label-secondary (neutral-bluish-700)";
+            };
+            readonly bg: {
+                readonly hex: "#f1f3f5";
+                readonly from: "interactive-bg-hover-solid (neutral-bluish-75)";
+            };
+        };
+    };
+    readonly dark: {
+        readonly surface: {
+            readonly base: "#151517";
+            readonly hover: "#43454a";
+            readonly press: "#4f5257";
+            readonly line: "rgba(255, 255, 255, 0.06)";
+            readonly ghostLine: "#686b72";
+            readonly meta: "#adb2b8";
+            readonly id: "#8f9398";
+        };
+        readonly running: {
+            readonly dot: {
+                readonly hex: "#2997ff";
+                readonly from: "accent (dark)";
+            };
+            readonly text: {
+                readonly hex: "#8ec5ff";
+                readonly from: "accent 55% + white (≥4.5:1 on the dark base)";
+            };
+            readonly bg: {
+                readonly hex: "#14273d";
+                readonly from: "accent 16% on the dark base";
+            };
+        };
+        readonly blocked: {
+            readonly dot: {
+                readonly hex: "#f7ad31";
+                readonly from: "amber-400";
+            };
+            readonly text: {
+                readonly hex: "#f8c46e";
+                readonly from: "amber-400 70% + label-primary";
+            };
+            readonly bg: {
+                readonly hex: "#27241f";
+                readonly from: "amber-900";
+            };
+        };
+        readonly done: {
+            readonly dot: {
+                readonly hex: "#5abd82";
+                readonly from: "state-success-primary (green-500) 60% + label-tertiary";
+            };
+            readonly text: {
+                readonly hex: "#a2d2b7";
+                readonly from: "green-400 35% + label-secondary";
+            };
+            readonly bg: {
+                readonly hex: "#1d2c24";
+                readonly from: "green-900 60% + bg-base";
+            };
+        };
+        readonly failed: {
+            readonly dot: {
+                readonly hex: "#f25a5a";
+                readonly from: "state-error-primary (red-400)";
+            };
+            readonly text: {
+                readonly hex: "#f48a8a";
+                readonly from: "red-400 70% + label-primary";
+            };
+            readonly bg: {
+                readonly hex: "#331112";
+                readonly from: "red-900 45% + bg-base";
+            };
+        };
+        readonly cancelled: {
+            readonly dot: {
+                readonly hex: "#81858c";
+                readonly from: "neutral-bluish-600";
+            };
+            readonly text: {
+                readonly hex: "#adb2b8";
+                readonly from: "label-tertiary (neutral-bluish-400)";
+            };
+            readonly bg: {
+                readonly hex: "#232324";
+                readonly from: "bg-layer-1 (neutral-bluish-875)";
+            };
+        };
+    };
+};
+/** Board states that own a colour; queued and stale reuse `cancelled` (neutral). */
+export type BoardTone = 'running' | 'blocked' | 'done' | 'failed' | 'cancelled';
+/**
+ * Neutral surfaces, type and depth of one theme. A quiet, product-page look:
+ * white (or near-black) canvas, one pale grey for grouped surfaces, hairline
+ * dividers, a single blue accent, soft two-layer shadows and generous radii.
+ * Colours are this plugin's own (not the host's), so the panel looks the same
+ * wherever it is docked and can be switched independently of the host.
+ */
+export declare const UI_THEME: {
+    readonly light: {
+        readonly bg: "#ffffff";
+        readonly surface: "#f5f5f7";
+        readonly raised: "#ffffff";
+        readonly text: "#1d1d1f";
+        readonly text2: "#424245";
+        readonly meta: "#6e6e73";
+        readonly id: "#86868b";
+        readonly line: "rgba(0,0,0,.1)";
+        readonly lineSoft: "rgba(0,0,0,.06)";
+        readonly pill: "#e8e8ed";
+        readonly hover: "rgba(0,0,0,.04)";
+        readonly press: "rgba(0,0,0,.08)";
+        readonly ghostLine: "rgba(0,0,0,.18)";
+        readonly accent: "#0071e3";
+        readonly accentHover: "#0077ed";
+        readonly onAccent: "#ffffff";
+        readonly shadow1: "0 1px 2px rgba(0,0,0,.04),0 2px 10px rgba(0,0,0,.05)";
+        readonly shadow2: "0 12px 40px rgba(0,0,0,.14),0 2px 8px rgba(0,0,0,.06)";
+        readonly scrim: "rgba(0,0,0,.28)";
+        readonly code: "#f5f5f7";
+    };
+    readonly dark: {
+        readonly bg: "#161617";
+        readonly surface: "#1d1d1f";
+        readonly raised: "#242426";
+        readonly text: "#f5f5f7";
+        readonly text2: "#d2d2d7";
+        readonly meta: "#a1a1a6";
+        readonly id: "#86868b";
+        readonly line: "rgba(255,255,255,.12)";
+        readonly lineSoft: "rgba(255,255,255,.07)";
+        readonly pill: "#2c2c2e";
+        readonly hover: "rgba(255,255,255,.06)";
+        readonly press: "rgba(255,255,255,.1)";
+        readonly ghostLine: "rgba(255,255,255,.22)";
+        readonly accent: "#2997ff";
+        readonly accentHover: "#47a6ff";
+        readonly onAccent: "#ffffff";
+        readonly shadow1: "0 1px 2px rgba(0,0,0,.5),0 2px 10px rgba(0,0,0,.35)";
+        readonly shadow2: "0 16px 48px rgba(0,0,0,.6),0 2px 8px rgba(0,0,0,.4)";
+        readonly scrim: "rgba(0,0,0,.5)";
+        readonly code: "#0f0f10";
+    };
+};
+/**
+ * Board design tokens as CSS, shared by the board, the workspace page and the
+ * desk (approvals, live output, 改派, batch). Light on `.dshrc`, dark on
+ * `.dshrc[data-theme="dark"]`; the root's `data-theme` comes from theme.tsx
+ * (跟随系统 / 白天 / 黑夜). Spacing sits on a 4px grid.
+ */
+export declare const BOARD_TOKENS_CSS: string;

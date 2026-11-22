@@ -197,3 +197,15 @@ Copy-Item "$bak\*" "C:\Users\13558\.dsh\profiles\desktop\" -Force
 - **控制面**：`task_control` 新增 `cancel_tree`（停止该任务和它下面所有没结束的任务，先停上层）。面板发出的 `cancel` 和 `cancel_tree` 会标「人工停止」，并通知还在跑的上级 manager 不要重派。面板「停止」和「停止整个需求」要点两次确认，界面先变，失败再回滚。工作区页有「停止全部」。已停止的任务可以重试。
 - **HTTP**：`GET/POST/DELETE /api/router/memory`（读分区记忆、加笔记、删笔记）。
 - **部署**：host 的 `lib/` 不在仓库里重建，合并后执行 `scripts/safe-build-host.sh`，再执行 `scripts/safe-restart.sh`。client 的 `lib/client.js` 已重建并提交。
+
+## 出口 + 作战台 + 日夜主题（第二期）
+
+完整说明见 [ARCHITECTURE.md](./ARCHITECTURE.md)，待确认的默认值见 [ROADMAP.md 第 6 节](./ROADMAP.md)。
+
+- **代码出口**：`git_publish`（推工作分支、开/更新 PR，拒绝推默认分支）、`pr_status`、`pr_merge`（只生成确认卡，同意时核对头提交）。托管方在分区 `git.scm` 里配，GitHub 与 Gitea 同一套接口；令牌只从环境变量读。
+- **运维出口**：`ops_run` 按 只读 / 变更 / 危险 分级；危险命令永远要确认。`browser_capture` 无头截图或取正文，结果存 `.dsh-artifacts/<任务>/`，可配域名白名单。
+- **确认队列与审计**：`<boardDir>/approvals.json`、`<boardDir>/audit/YYYY-MM.jsonl`；面板顶部「等你确认」卡片，不可撤回的要点两次。
+- **改派 / 换模型、实时输出、批量**：面板行内「输出」「改派」，头部「批量」；对应接口 `/api/router/live`、`/reassign`、`/batch`。
+- **主题**：面板与工作区右上角的太阳/月亮按钮在 跟随系统 → 白天 → 黑夜 之间切换，选择记在浏览器里。
+- **测试**：`node --test packages/host-router/tests/outlets.test.mjs`（19 项）、`node --test packages/client-ui-router/tests/desk.test.mjs`（9 项）。
+- **部署**：同第一期，宿主 `lib/` 本地用 `scripts/safe-build-host.sh` + `scripts/safe-restart.sh`；`lib/client.js` 已重建并提交。需要的环境变量：`GITHUB_TOKEN`（或分区配置里写的变量名）。

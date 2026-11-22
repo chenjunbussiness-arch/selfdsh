@@ -1,0 +1,7 @@
+/* Two panes as the shell would host them: the right sidebar board and a page. */
+#root{height:100%}
+.pv{display:flex;gap:16px;height:100%;padding:16px;box-sizing:border-box}
+.pv-board{flex:0 0 440px;min-width:0;height:100%;overflow:hidden;border-radius:18px;box-shadow:0 1px 2px rgba(0,0,0,.06),0 8px 28px rgba(0,0,0,.08)}
+.pv-ws{flex:1 1 auto;min-width:0;height:100%;overflow:hidden;border-radius:18px;box-shadow:0 1px 2px rgba(0,0,0,.06),0 8px 28px rgba(0,0,0,.08)}
+.pv-ws>*{height:100%}
+@media (max-width:900px){.pv{flex-direction:column}.pv-board{flex-basis:auto;height:70%}.pv-ws{display:none}}

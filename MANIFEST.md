@@ -11,7 +11,7 @@
   两份文档后为 **398**）
 - 398 的构成：**347 基线 + 49 新增**（`dsh-secrets` 22、`vendor/exa-mcp-server` 19、nginx 模板 5、
   `scripts/browser` + `scripts/browser.py` 2、`docs/MANIFEST.md` 1）+ 根目录 2
-- 运行基线：DSH `0.2.2-rc.5`、Node >= 22、profile `web`
+- 运行基线：DSH `0.2.2-rc.5`、Node >= 24.9（DSH 0.2.2-rc.5 本身的要求）、profile `web`
 - 仓库：`https://8.134.170.38:8444/dev/dsh-warroom.git`（私有，mTLS；见 `CLONE.md`）
 
 > 本文件里的路径都以**仓库根目录**为起点。仓库用 `plugins/<插件名>/` 布局；下载包 zip 可能
@@ -427,7 +427,7 @@ export WS="$(dirname "$(pwd)")"           # 你的工作区根；仅作示例
 apt-get update
 apt-get install -y nginx apache2-utils python3 curl openssl xz-utils git
 
-# Node >= 22（示例用官方二进制；也可用 nvm / NodeSource）
+# Node >= 24.9（DSH 0.2.2-rc.5 要求；示例用官方二进制；也可用 nvm / NodeSource）
 cd /tmp
 curl -fLO https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz
 tar -xJf node-v24.22.3-linux-x64.tar.xz -C /usr/local --strip-components=1
