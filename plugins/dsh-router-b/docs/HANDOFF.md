@@ -161,3 +161,39 @@ Copy-Item "$bak\*" "C:\Users\13558\.dsh\profiles\desktop\" -Force
 | **真实进程挂载** | ❌ **未验证** |
 | **浏览器里真 fetch / SSE** | ❌ 未验证 |
 | **真 pnpm 下 file: 依赖解析** | ❌ 未验证（按 hoisted linker 推断） |
+
+## 十、任务顺序、挂起、工作区（2026-11-21）
+
+### 顺序
+- `route_task` 新增 `stage`（同一个父任务下的批次，数字小的先做完）和 `depends_on`（要先完成的任务 id）。
+- 排队的任务只有在前置全部 `done/verified/reported` 后才会被派出；前置失败或被取消，它会变成 `blocked`，备注写明是哪个前置。前置重试成功后自动回到队列。
+- manager 提示词要求一次把所有子任务发出（带 stage / depends_on），然后用 `task_wait`（按 `parent_task`）等子任务全部结束再汇报；manager 提前结束时路由器会提醒它继续等。
+
+### 挂起
+- 新工具 `task_suspend`（task_id、reason，可选 prerequisite / partition / wait_for）。给了 prerequisite 会自动建一个前置任务；前置完成后挂起的任务自动在原会话里继续，并带上前置的结果。已经交付的任务也能挂起再补。
+- `task_control` 新增 `suspend`；`resume` 可以不等前置直接继续。
+- 面板：右侧任务板「已挂起 · 等前置」分组；运行中/排队的行悬停有「挂起」，失败的行有「重试」。
+
+### 进度提醒
+- 任务开始、完成、挂起、唤醒时，路由器把合并后的【进度提醒】发到作战室，作战室用一两句话转述。配置：`progressNotices`（默认 true）、`progressNoticeDelayMs`（默认 3000，合并窗口）。
+- 快照里新增 `groups`（每个需求的完成进度）和 `notices`（最近的提醒），任务板顶部显示整体进度条，底部显示最近提醒。
+
+### 工作区
+- 左侧栏新增「工作区」：左边是分区列表和分区根目录的文件树（按需逐层读取，不在 include/exclude 范围内的灰显），右边是根目录、include/exclude、启动时发现的配置问题、分区规范和这个分区的未完成任务。
+- 接口：`GET /api/router/files?partition=<名字>&path=<相对目录>`，只返回名字、类型、大小、修改时间，不返回内容；不允许 `..`、绝对路径或指向根目录外的符号链接。
+- worker 的分区说明里新增硬规则：只改分区内文件；需要改分区外或发现缺前置时调用 `task_suspend`；交付时在 `touched:` 下列出改过的路径。
+
+### 生效方式
+宿主侧改的是 `packages/host-router/src`，`lib/` 没动：在 Windows 上跑 `scripts/safe-build-host.sh` 生成 `lib.next/`，再跑 `scripts/safe-restart.sh`。界面的 `lib/client.js` 已经重新打包。
+
+## routing → manager → session → worker（第一期整体改造）
+
+整体方案和后续分期见 [ROADMAP.md](./ROADMAP.md)。本期改动：
+
+- **路由快速转发**：作战室只识别分区，用户原话加上下文按分区各发一条 `route_task`，跨分区用 `depends_on`。只有标「无 manager」的分区由路由自己拆。
+- **分区记忆**（`host-router/src/memory.ts`，存于 `<boardDir>/memory/<分区>.json`）：常驻笔记（最多 80 条）和工作日志（最多 300 条）。任务结束时自动记录，首次启动时用已结束的任务回填。每次派 manager 都把「本分区记得什么」注入提示词。
+- **manager 新工具**：`session_list`、`session_read`（只读本路由派出的 session）、`partition_memory`（read / note / forget）。
+- **manager 模型**：`tiers.json` 新增 `manager` 字段，默认 `strongest`。取值顺序：面板指定的模型 → 已保存的「高级」档（用最高推理档）→ 运行时可用模型里按名字最强的一个（opus/ultra/max/pro/reasoner/thinking/r1/large，其次比版本号、推理档数）→ 跟随默认模型。实际用的模型写在任务行的 `tierReason` 里，面板「模型档位」的 Manager 一行也会显示。
+- **控制面**：`task_control` 新增 `cancel_tree`（停止该任务和它下面所有没结束的任务，先停上层）。面板发出的 `cancel` 和 `cancel_tree` 会标「人工停止」，并通知还在跑的上级 manager 不要重派。面板「停止」和「停止整个需求」要点两次确认，界面先变，失败再回滚。工作区页有「停止全部」。已停止的任务可以重试。
+- **HTTP**：`GET/POST/DELETE /api/router/memory`（读分区记忆、加笔记、删笔记）。
+- **部署**：host 的 `lib/` 不在仓库里重建，合并后执行 `scripts/safe-build-host.sh`，再执行 `scripts/safe-restart.sh`。client 的 `lib/client.js` 已重建并提交。

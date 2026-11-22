@@ -19,15 +19,16 @@ var __copyProps = (to, from, except, desc) => {
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/client/index.ts
-var client_exports = {};
-__export(client_exports, {
+var index_exports = {};
+__export(index_exports, {
   PANEL_ID: () => PANEL_ID,
   TAB_ID: () => TAB_ID,
   TAB_KIND: () => TAB_KIND,
+  WORKSPACE_ID: () => WORKSPACE_ID,
   apply: () => apply,
   inject: () => inject
 });
-module.exports = __toCommonJS(client_exports);
+module.exports = __toCommonJS(index_exports);
 
 // src/client/credentials.ts
 var SOURCES = ["file", "env", "unset", "unknown"];
@@ -51,6 +52,7 @@ function asCredentialViews(refs, value) {
 }
 
 // src/client/controller.ts
+var CLOSED_HOST = /* @__PURE__ */ new Set(["done", "verified", "reported", "failed", "cancelled"]);
 var INITIAL = { board: null, status: "idle", publishing: false };
 var RouterBoardController = class {
   /**
@@ -166,8 +168,9 @@ var RouterBoardController = class {
   /**
    * Run one `task_control` action, then re-read the board.
    *
+   * `cancel` / `cancel_tree` move the rows to 已取消 the same way.
    * `resume` is applied optimistically: the row is moved to `running` in the
-   * local snapshot before the request, so it leaves 已挂起 at once. A fresh read
+   * local snapshot before the request, so it leaves 已暂停 at once. A fresh read
    * (not a join of an older in-flight one) follows a success; a failure restores
    * the snapshot taken before the optimistic patch and re-reads.
    * @param taskId - the task.
@@ -175,10 +178,36 @@ var RouterBoardController = class {
    * @param value - its optional `value`.
    * @returns undefined on success, else the human-readable failure.
    */
-  async control(taskId, action, value) {
+  async control(taskId, action, value, extra) {
     const source = this.source;
     if (source.control === void 0) return "task_control is not wired on this source";
     const before = this.state.board;
+    if ((action === "cancel" || action === "cancel_tree") && before !== null) {
+      const ids = /* @__PURE__ */ new Set([taskId]);
+      if (action === "cancel_tree") {
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (const task of before.tasks) {
+            if (task.parentId !== void 0 && ids.has(task.parentId) && !ids.has(task.id)) {
+              ids.add(task.id);
+              grew = true;
+            }
+          }
+        }
+      }
+      this.emit({
+        ...this.state,
+        board: {
+          ...before,
+          tasks: before.tasks.map((task) => !ids.has(task.id) || CLOSED_HOST.has(task.hostState ?? "") ? task : {
+            ...task,
+            state: "rejected",
+            hostState: "cancelled"
+          })
+        }
+      });
+    }
     if (action === "resume" && before !== null) {
       this.emit({
         ...this.state,
@@ -194,7 +223,7 @@ var RouterBoardController = class {
       });
     }
     try {
-      await source.control(taskId, action, value);
+      await source.control(taskId, action, value, extra);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (before !== null) this.emit({ ...this.state, board: before });
@@ -208,6 +237,41 @@ var RouterBoardController = class {
     } catch {
     }
     return void 0;
+  }
+  /** Whether the source can list partition files (the 工作区 page). */
+  get canListFiles() {
+    return typeof this.source.listFiles === "function";
+  }
+  /**
+   * List one directory level of one partition.
+   * @throws {Error} when the source cannot list files or the Host refuses.
+   */
+  async listFiles(partition, path) {
+    const source = this.source;
+    if (source.listFiles === void 0) throw new Error("listing files is not wired on this source");
+    return source.listFiles(partition, path);
+  }
+  /** Whether the source can read partition memory. */
+  get canReadMemory() {
+    return typeof this.source.readMemory === "function";
+  }
+  /** Read one partition's memory. */
+  async readMemory(partition) {
+    const source = this.source;
+    if (source.readMemory === void 0) throw new Error("partition memory is not wired on this source");
+    return source.readMemory(partition);
+  }
+  /** Add a note to one partition's memory. */
+  async addMemoryNote(partition, text) {
+    const source = this.source;
+    if (source.addMemoryNote === void 0) throw new Error("partition memory is not wired on this source");
+    return source.addMemoryNote(partition, text);
+  }
+  /** Remove a note from one partition's memory. */
+  async removeMemoryNote(partition, id) {
+    const source = this.source;
+    if (source.removeMemoryNote === void 0) throw new Error("partition memory is not wired on this source");
+    await source.removeMemoryNote(partition, id);
   }
   /** Clear the publish banner after the view has shown it. */
   clearPublishNotice() {
@@ -314,6 +378,12 @@ function duration(seconds) {
   const minutes = Math.floor(seconds / 60);
   const rest = Math.round(seconds % 60);
   return rest === 0 ? `${minutes}m` : `${minutes}m${rest}s`;
+}
+function bytes(bytes2) {
+  if (bytes2 === void 0) return "";
+  if (bytes2 < 1024) return `${bytes2} B`;
+  if (bytes2 < 1024 * 1024) return `${(bytes2 / 1024).toFixed(1)} KB`;
+  return `${(bytes2 / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // src/client/native-todos.ts
@@ -1998,7 +2068,7 @@ var TABS = [
   { id: "resolved", key: "seg.resolved" }
 ];
 var TAB_GROUPS = {
-  active: ["running", "blocked"],
+  active: ["running", "blocked", "suspended"],
   next: ["queued"],
   scheduled: ["stale"],
   resolved: ["done", "failed", "cancelled"]
@@ -2006,6 +2076,7 @@ var TAB_GROUPS = {
 var GROUP_KEY = {
   running: "grp.running",
   blocked: "grp.blocked",
+  suspended: "grp.suspended",
   queued: "grp.queued",
   stale: "grp.stale",
   done: "grp.done",
@@ -2044,11 +2115,12 @@ function groupOf(task, live) {
   if (host === "failed") return isCancelled(task) ? "cancelled" : "failed";
   if (!live.has(task.partitionId)) return "stale";
   if (host === "blocked") return "blocked";
+  if (host === "suspended") return "suspended";
   if (host === "queued") return "queued";
   return "running";
 }
-var isLive = (g) => g === "running" || g === "queued" || g === "blocked";
-var GROUP_ORDER = ["running", "blocked", "queued", "stale", "failed", "cancelled", "done"];
+var isLive = (g) => g === "running" || g === "queued" || g === "blocked" || g === "suspended";
+var GROUP_ORDER = ["running", "blocked", "suspended", "queued", "stale", "failed", "cancelled", "done"];
 function isAborted(task) {
   return /aborted|interrupted|已中止/i.test(`${task.error ?? ""} ${task.rejectionReason ?? ""}`);
 }
@@ -2068,7 +2140,9 @@ function statusKeyOf(task, live) {
   }
   if (!live.has(task.partitionId)) return "status.stale";
   if (host === "blocked") return "status.blocked";
+  if (host === "suspended") return "status.suspended";
   if (host === "interrupted") return "status.resuming";
+  if (host === "queued" && (task.waitingFor?.length ?? 0) > 0) return "status.waiting";
   if (host === "queued" || host === "dispatched") return "status.queued";
   return "status.running";
 }
@@ -2128,7 +2202,9 @@ var TONE_COLOR = {
   running: "running",
   resuming: "running",
   blocked: "blocked",
+  suspended: "blocked",
   queued: "cancelled",
+  waiting: "cancelled",
   stale: "cancelled",
   done: "done",
   failed: "failed",
@@ -2186,6 +2262,7 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-ico svg{width:16px;height:16px;display:block}
 .dshrc-tabs{display:flex;align-items:center;gap:var(--sp-1);flex:none;padding:var(--sp-1) var(--sp-3) var(--sp-2) var(--sp-4);overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--c-line-soft)}
 .dshrc-tabs::-webkit-scrollbar{display:none}
+.dshrc-find{flex:0 1 160px;min-width:72px;height:24px;margin-left:auto;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px}
 .dshrc-tab{flex:none;height:var(--h-ctl);padding:0 var(--sp-3);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text2);font-size:12px;font-weight:500;line-height:var(--h-ctl);cursor:pointer;white-space:nowrap;transition:background-color .12s ease,color .12s ease}
 .dshrc-tab:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-tab:active{background:var(--c-press)}
@@ -2226,7 +2303,7 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-st[data-color="blocked"]{color:var(--st-blocked-text)}.dshrc-st[data-color="blocked"] .dshrc-dot{background:var(--st-blocked-dot)}
 .dshrc-st[data-color="done"]{color:var(--st-done-text)}.dshrc-st[data-color="done"] .dshrc-dot{background:var(--st-done-dot)}
 .dshrc-st[data-color="failed"]{color:var(--st-failed-text)}.dshrc-st[data-color="failed"] .dshrc-dot{background:var(--st-failed-dot)}
-.dshrc-st[data-tone="queued"] .dshrc-dot,.dshrc-st[data-tone="stale"] .dshrc-dot,.dshrc-st[data-tone="aborted"] .dshrc-dot{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
+.dshrc-st[data-tone="queued"] .dshrc-dot,.dshrc-st[data-tone="waiting"] .dshrc-dot,.dshrc-st[data-tone="suspended"] .dshrc-dot,.dshrc-st[data-tone="stale"] .dshrc-dot,.dshrc-st[data-tone="aborted"] .dshrc-dot{background:transparent;box-shadow:inset 0 0 0 1.5px currentColor}
 @keyframes dshrc-pulse{0%,100%{opacity:1}50%{opacity:.4}}
 /* Worker fold chip: ghost button, 28x28 minimum hit area, 16px caret. The
    negative block margin keeps it from growing the 44px family row. */
@@ -2255,10 +2332,46 @@ display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw
 .dshrc-notice{flex:none;margin:var(--sp-2) var(--sp-3) 0;padding:var(--sp-1) var(--sp-3);border-radius:var(--r-ctl);background:var(--st-done-bg);color:var(--st-done-text);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .dshrc-notice[data-tone="bad"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
 .dshrc-empty{padding:36px var(--sp-4);color:var(--c-text3);text-align:center;font-size:12px}
+/* Row actions: hidden until the row is hovered or focused, so a quiet list stays quiet. */
+.dshrc-acts-row{flex:none;display:flex;align-items:center;gap:2px;opacity:.55;transition:opacity .12s ease}
+.dshrc-row:hover .dshrc-acts-row,.dshrc-row:focus-within .dshrc-acts-row,.dshrc-acts-row[data-busy]{opacity:1}
+.dshrc-act{height:22px;margin-block:-3px;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:var(--dsw-alias-bg-base,transparent);color:var(--c-text2);font-size:11px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.dshrc-act[data-tone="stop"]:hover{color:var(--st-failed-text)}
+.dshrc-act[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
+.dshrc-act:hover:not(:disabled){color:var(--c-text);background:var(--c-hover)}
+.dshrc-act:active:not(:disabled){background:var(--c-press)}
+.dshrc-wait{display:flex;align-items:center;gap:var(--sp-2);min-width:0;margin:-4px 0 var(--sp-1);padding:0 var(--sp-3) 0 28px;font-size:12px;line-height:16px;color:var(--c-text3)}
+.dshrc-wait-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshrc-wait .dshrc-id{color:var(--c-text2)}
+.dshrc-sform{display:flex;flex-direction:column;gap:var(--sp-2);margin:0 var(--sp-2) var(--sp-2) 28px;padding:var(--sp-2) var(--sp-3);border:1px solid var(--c-line);border-radius:var(--r-ctl);background:var(--c-line-soft)}
+.dshrc-sform label{display:flex;flex-direction:column;gap:2px;font-size:11px;line-height:16px;color:var(--c-text2)}
+.dshrc-sform input{height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-line);border-radius:var(--r-ctl);background:var(--dsw-alias-bg-base,#fff);color:var(--c-text);font:inherit;font-size:12px}
+.dshrc-sform input:focus-visible{outline:2px solid var(--c-focus);outline-offset:0}
+.dshrc-sform-hint{font-size:11px;color:var(--c-text3)}
+.dshrc-sform-btns{display:flex;justify-content:flex-end;gap:var(--sp-2)}
+.dshrc-sform-err{font-size:11px;color:var(--st-failed-text)}
+.dshrc-prog{display:flex;flex-direction:column;gap:var(--sp-2);margin:var(--sp-3) var(--sp-2) 0;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-ctl);background:var(--c-line-soft)}
+.dshrc-prog-h,.dshrc-nt-h{font-size:11px;font-weight:600;line-height:16px;letter-spacing:.02em;color:var(--c-text2)}
+.dshrc-prog-item{display:flex;flex-direction:column;gap:3px;min-width:0}
+.dshrc-prog-top{display:flex;align-items:baseline;gap:var(--sp-2);min-width:0;font-size:12px;line-height:16px}
+.dshrc-prog-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-text)}
+.dshrc-prog-num{flex:none;font-variant-numeric:tabular-nums;color:var(--c-text2)}
+.dshrc-bar{position:relative;display:flex;height:4px;border-radius:2px;overflow:hidden;background:var(--c-line)}
+.dshrc-bar>span{display:block;height:100%}
+.dshrc-bar>[data-k="done"]{background:var(--st-done-dot)}
+.dshrc-bar>[data-k="run"]{background:var(--st-running-dot)}
+.dshrc-bar>[data-k="susp"]{background:var(--st-blocked-dot)}
+.dshrc-bar>[data-k="fail"]{background:var(--st-failed-dot)}
+.dshrc-prog-sub{font-size:11px;line-height:16px;color:var(--c-text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dshrc-nt{margin:var(--sp-4) var(--sp-2) 0;padding-top:var(--sp-3);border-top:1px solid var(--c-line-soft)}
+.dshrc-nt-list{display:flex;flex-direction:column;gap:var(--sp-1);margin:var(--sp-2) 0 0;padding:0;list-style:none}
+.dshrc-nt-item{display:flex;gap:var(--sp-2);padding:0 var(--sp-1);font-size:12px;line-height:18px;color:var(--c-text2)}
+.dshrc-nt-time{flex:none;min-width:44px;color:var(--c-text3);font-variant-numeric:tabular-nums}
+.dshrc-nt-text{min-width:0;overflow-wrap:anywhere}
 @media (prefers-reduced-motion:reduce){.dshrc *{transition:none!important;animation:none!important}}
 /* Narrow rail (about 340px at a 1024 viewport): title and status dot only. */
 @container (max-width:379px){
-.dshrc-meta,.dshrc-id,.dshrc-sub>.dshrc-rm,.dshrc-chip-text{display:none}
+.dshrc-meta,.dshrc-id,.dshrc-sub>.dshrc-rm,.dshrc-chip-text,.dshrc-sub .dshrc-tag{display:none}
 .dshrc-st-text{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .dshrc-chip{padding:0 var(--sp-1)}
 .dshrc-st{padding:0 var(--sp-1)}
@@ -2270,6 +2383,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const sessionFace = sessions ?? NO_SESSIONS;
   const sessionList = (0, import_react3.useSyncExternalStore)(sessionFace.list.subscribe, sessionFace.list.getSnapshot, sessionFace.list.getSnapshot);
   const [tab, setTab] = (0, import_react3.useState)("active");
+  const [query, setQuery] = (0, import_react3.useState)("");
   const [collapsed, setCollapsed] = (0, import_react3.useState)(readCollapsedFamilies);
   const [open, setOpen] = (0, import_react3.useState)(() => /* @__PURE__ */ new Set());
   const [folded, setFolded] = (0, import_react3.useState)(() => new Set(FOLDED_GROUPS));
@@ -2277,6 +2391,21 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const [resuming, setResuming] = (0, import_react3.useState)(() => /* @__PURE__ */ new Set());
   const [resumeError, setResumeError] = (0, import_react3.useState)(() => /* @__PURE__ */ new Map());
   const [notice, setNotice] = (0, import_react3.useState)(null);
+  const [busy, setBusy] = (0, import_react3.useState)(() => /* @__PURE__ */ new Set());
+  const [suspending, setSuspending] = (0, import_react3.useState)(null);
+  const [formReason, setFormReason] = (0, import_react3.useState)("");
+  const [formPrereq, setFormPrereq] = (0, import_react3.useState)("");
+  const [formError, setFormError] = (0, import_react3.useState)("");
+  const [arming, setArming] = (0, import_react3.useState)(null);
+  (0, import_react3.useEffect)(() => {
+    if (arming === null) return;
+    const timer = setTimeout(() => {
+      setArming(null);
+    }, 4e3);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [arming]);
   const [refreshing, setRefreshing] = (0, import_react3.useState)(false);
   const refresh = () => {
     if (refreshing) return;
@@ -2319,6 +2448,43 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       setNotice({ tone: "bad", text: t("hold.resumeFailed", { message: failure }) });
     }
   };
+  const act = async (task, action, value, extra) => {
+    const key = `${task.id}:${action}`;
+    if (busy.has(key)) return false;
+    setBusy((previous) => new Set(previous).add(key));
+    const failure = await controller.control(task.id, action, value, extra);
+    setBusy((previous) => {
+      const next = new Set(previous);
+      next.delete(key);
+      return next;
+    });
+    if (failure === void 0) {
+      setNotice({ tone: "ok", text: t("act.done", { action: t(`act.${action}`), title: task.title }) });
+      return true;
+    }
+    setNotice({ tone: "bad", text: t("act.failed", { message: failure }) });
+    return false;
+  };
+  const openSuspend = (task) => {
+    if (suspending === task.id) {
+      setSuspending(null);
+      return;
+    }
+    setSuspending(task.id);
+    setFormReason("");
+    setFormPrereq("");
+    setFormError("");
+  };
+  const submitSuspend = async (task) => {
+    const reason = formReason.trim();
+    if (reason === "") {
+      setFormError(t("susp.form.empty"));
+      return;
+    }
+    const prerequisite = formPrereq.trim();
+    const ok = await act(task, "suspend", reason, prerequisite === "" ? void 0 : { prerequisite });
+    if (ok) setSuspending(null);
+  };
   const toggleFolded = (group) => {
     setFolded((previous) => {
       const next = new Set(previous);
@@ -2341,7 +2507,10 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     const nameOf = new Map(partitions2.map((partition) => [partition.id, partition.name]));
     const workerName = /* @__PURE__ */ new Map();
     for (const partition of partitions2) for (const worker2 of partition.workers) workerName.set(worker2.id, worker2.name);
-    const families = buildFamilies(tasks, live);
+    const titleOf = new Map(tasks.map((task) => [task.id, task.title]));
+    const needle = query.trim().toLowerCase();
+    const matches = (task) => [task.title, task.id, nameOf.get(task.partitionId) ?? ""].some((text) => text.toLowerCase().includes(needle));
+    const families = buildFamilies(tasks, live).filter((family) => needle === "" || family.members.some(matches));
     const groupFams = /* @__PURE__ */ new Map();
     for (const group of Object.keys(TAB_GROUPS).flatMap((id) => TAB_GROUPS[id])) groupFams.set(group, []);
     for (const family of families) {
@@ -2350,9 +2519,10 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     }
     const counts = /* @__PURE__ */ new Map();
     for (const [group, list] of groupFams) counts.set(group, list.length);
-    const anyLive = [...counts].some(([group, count]) => count > 0 && isLive(group));
-    return { live, nameOf, workerName, groupFams, counts, anyLive };
-  }, [board]);
+    const anyShown = [...counts].some(([group, count]) => count > 0 && isLive(group));
+    const anyLive = needle === "" ? anyShown : buildFamilies(tasks, live).some((family) => isLive(family.group));
+    return { live, nameOf, workerName, titleOf, groupFams, counts, anyLive };
+  }, [board, query]);
   (0, import_react3.useEffect)(() => {
     if (!model.anyLive) return;
     const hidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
@@ -2468,23 +2638,201 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const childRow = (task, group) => {
     const click = openOf(task);
     const status = statusOf(task);
+    return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-child", "data-child": task.id, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
+        "div",
+        {
+          className: "dshrc-row dshrc-sub",
+          "data-group": group,
+          "data-task": task.id,
+          ...linkProps(click),
+          title: tooltipOf(task, group, orderLines(task)),
+          children: [
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-rt", children: task.title }),
+            task.stage !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-tag", "data-tone": "stage", children: t("order.stage", { n: task.stage }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-rm", children: metaOf(task, group) }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-id", children: shortId(task.id) }),
+            rowActs(task, group),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(Status, { tone: status.tone, label: t(status.key) })
+          ]
+        }
+      ),
+      group === "suspended" && suspendLine(task),
+      group === "queued" && waitLine(task),
+      suspending === task.id && suspendForm(task)
+    ] }, task.id);
+  };
+  const namesOf = (ids) => ids.map((id) => model.titleOf.get(id) ?? shortId(id)).join("\u3001");
+  const orderLines = (task) => {
+    const lines = [];
+    if (task.stage !== void 0) lines.push(t("order.stage", { n: task.stage }));
+    if (task.dependsOn !== void 0 && task.dependsOn.length > 0) lines.push(t("order.after", { ids: task.dependsOn.join(", ") }));
+    if (task.waitingFor !== void 0 && task.waitingFor.length > 0) lines.push(t("order.waiting", { ids: task.waitingFor.join(", ") }));
+    return lines;
+  };
+  const hasChildren = (task) => (board?.tasks ?? []).some((other) => other.parentId === task.id);
+  const stop = (task, action) => {
+    const key = `${task.id}:${action}`;
+    if (arming !== key) {
+      setArming(key);
+      return;
+    }
+    setArming(null);
+    void act(task, action);
+  };
+  const rowActs = (task, group) => {
+    if (!controller.canControl) return null;
+    const open2 = group === "running" || group === "queued" || group === "blocked" || group === "suspended";
+    const canSuspend = group === "running" || group === "queued";
+    const canRetry = group === "failed" || group === "cancelled";
+    const canStopTree = open2 && hasChildren(task);
+    if (!open2 && !canRetry) return null;
+    const anyBusy = [...busy].some((key) => key.startsWith(`${task.id}:`));
+    const armed = (action) => arming === `${task.id}:${action}`;
     return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
-      "div",
+      "span",
       {
-        className: "dshrc-row dshrc-sub",
-        "data-group": group,
-        "data-task": task.id,
-        ...linkProps(click),
-        title: tooltipOf(task, group),
+        className: "dshrc-acts-row",
+        "data-busy": anyBusy || suspending === task.id || arming?.startsWith(`${task.id}:`) === true ? "" : void 0,
+        onClick: (event) => {
+          event.stopPropagation();
+        },
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-rt", children: task.title }),
-          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-rm", children: metaOf(task, group) }),
-          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-id", children: shortId(task.id) }),
-          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(Status, { tone: status.tone, label: t(status.key) })
+          canSuspend && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshrc-act",
+              title: t("act.suspendHint"),
+              "aria-expanded": suspending === task.id,
+              disabled: anyBusy,
+              onClick: () => {
+                openSuspend(task);
+              },
+              children: t("act.suspend")
+            }
+          ),
+          open2 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshrc-act",
+              "data-tone": "stop",
+              "data-armed": armed("cancel") ? "" : void 0,
+              title: t("act.stopHint"),
+              disabled: anyBusy,
+              onClick: () => {
+                stop(task, "cancel");
+              },
+              children: armed("cancel") ? t("act.confirmStop") : t("act.cancel")
+            }
+          ),
+          canStopTree && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshrc-act",
+              "data-tone": "stop",
+              "data-armed": armed("cancel_tree") ? "" : void 0,
+              title: t("act.stopTreeHint"),
+              disabled: anyBusy,
+              onClick: () => {
+                stop(task, "cancel_tree");
+              },
+              children: armed("cancel_tree") ? t("act.confirmStop") : t("act.cancel_tree")
+            }
+          ),
+          canRetry && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshrc-act",
+              title: t("act.retryHint"),
+              disabled: anyBusy,
+              onClick: () => {
+                void act(task, "retry");
+              },
+              children: t("act.retry")
+            }
+          )
         ]
-      },
-      task.id
+      }
     );
+  };
+  const suspendForm = (task) => /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
+    "form",
+    {
+      className: "dshrc-sform",
+      "data-suspend-form": task.id,
+      onClick: (event) => {
+        event.stopPropagation();
+      },
+      onSubmit: (event) => {
+        event.preventDefault();
+        void submitSuspend(task);
+      },
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("label", { children: [
+          t("susp.form.reason"),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+            "input",
+            {
+              value: formReason,
+              placeholder: t("susp.form.reasonHint"),
+              autoFocus: true,
+              onChange: (event) => {
+                setFormReason(event.target.value);
+                setFormError("");
+              }
+            }
+          )
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("label", { children: [
+          t("susp.form.prereq"),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("input", { value: formPrereq, onChange: (event) => {
+            setFormPrereq(event.target.value);
+          } }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-sform-hint", children: t("susp.form.prereqHint") })
+        ] }),
+        formError !== "" && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-sform-err", role: "alert", children: formError }),
+        /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-sform-btns", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { type: "button", className: "dshrc-hold-btn", onClick: () => {
+            setSuspending(null);
+          }, children: t("susp.form.cancel") }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { type: "submit", className: "dshrc-err-btn", disabled: busy.has(`${task.id}:suspend`), children: t("susp.form.submit") })
+        ] })
+      ]
+    }
+  );
+  const waitLine = (task) => {
+    const ids = task.waitingFor ?? [];
+    if (ids.length === 0) return null;
+    return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-wait", "data-wait": task.id, children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-wait-text", title: ids.join("\n"), children: t("order.waiting", { ids: namesOf(ids) }) }) });
+  };
+  const suspendLine = (task) => {
+    const why = task.suspendReason ?? task.resumeNote ?? "";
+    const ids = task.waitingOn ?? [];
+    const head = why === "" ? t("susp.noReason") : t("susp.reason", { reason: why });
+    const text = ids.length === 0 ? head : `${head} \xB7 ${t("susp.waitingOn", { ids: namesOf(ids) })}`;
+    const going = resuming.has(task.id);
+    const wired = controller.canControl;
+    return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-hold", "data-suspended": task.id, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-hold-why", title: text, children: text }),
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+        "button",
+        {
+          type: "button",
+          className: "dshrc-hold-btn",
+          disabled: going || !wired,
+          title: wired ? t("susp.resumeHint") : t("hold.notWired"),
+          onClick: (event) => {
+            event.stopPropagation();
+            void resume(task);
+          },
+          children: going ? t("hold.resuming") : t("hold.resume")
+        }
+      )
+    ] });
   };
   const familyRow = (family) => {
     const group = family.group;
@@ -2492,11 +2840,13 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     const hidden = family.members.filter((task) => task.id !== family.root.id);
     const foldKey = `${FAMILY_FOLD}${family.key}`;
     const expanded = !collapsed.has(foldKey);
+    const repHere = family.rep.id === family.root.id || !expanded;
     const status = statusOf(family.rep);
     const extra = [];
     if (hidden.length > 0) extra.push(t("compact.family", { n: family.members.length }));
     if (family.attempt > 1) extra.push(t("task.attempt", { count: family.attempt }));
     if (family.reason !== void 0) extra.push(family.reason);
+    extra.push(...orderLines(family.root));
     return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-family", "data-family": family.key, "data-group": group, children: [
       /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
         "div",
@@ -2533,17 +2883,21 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
                 ]
               }
             ),
+            rowActs(family.root, groupOfTask(family.root, model.live)),
             /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(Status, { tone: status.tone, label: t(status.key) })
           ]
         }
       ),
       group === "blocked" && holdLine(family.rep),
+      group === "suspended" && repHere && suspendLine(family.rep),
+      group === "queued" && repHere && waitLine(family.rep),
+      suspending === family.root.id && suspendForm(family.root),
       expanded && hidden.map((task) => childRow(task, groupOfTask(task, model.live)))
     ] }, family.key);
   };
   const holdLine = (task) => {
     const why = task.resumeNote ?? task.error ?? "";
-    const busy = resuming.has(task.id);
+    const busy2 = resuming.has(task.id);
     const failure = resumeError.get(task.id);
     const wired = controller.canControl;
     return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-hold", "data-hold": task.id, children: [
@@ -2554,15 +2908,69 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
         {
           type: "button",
           className: "dshrc-hold-btn",
-          disabled: busy || !wired,
+          disabled: busy2 || !wired,
           title: wired ? t("hold.resumeHint") : t("hold.notWired"),
           onClick: (event) => {
             event.stopPropagation();
             void resume(task);
           },
-          children: busy ? t("hold.resuming") : t("hold.resume")
+          children: busy2 ? t("hold.resuming") : t("hold.resume")
         }
       )
+    ] });
+  };
+  const progressItem = (group) => {
+    const total = Math.max(1, group.total);
+    const part = (n) => `${String(Math.round(n / total * 1e3) / 10)}%`;
+    const rest = [];
+    if (group.running > 0) rest.push(t("progress.running", { n: group.running }));
+    if (group.waiting > 0) rest.push(t("progress.waiting", { n: group.waiting }));
+    if (group.suspended > 0) rest.push(t("progress.suspended", { n: group.suspended }));
+    if (group.failed > 0) rest.push(t("progress.failed", { n: group.failed }));
+    const line = t("progress.line", { done: group.finished, total: group.total });
+    return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-prog-item", "data-progress-root": group.rootId, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-prog-top", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-prog-name", title: group.subject, children: group.subject }),
+        /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-prog-num", children: line })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
+        "div",
+        {
+          className: "dshrc-bar",
+          role: "progressbar",
+          "aria-valuemin": 0,
+          "aria-valuemax": group.total,
+          "aria-valuenow": group.finished,
+          "aria-label": `${group.subject} ${line}`,
+          children: [
+            group.finished > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { "data-k": "done", style: { width: part(group.finished) } }),
+            group.running > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { "data-k": "run", style: { width: part(group.running) } }),
+            group.suspended > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { "data-k": "susp", style: { width: part(group.suspended) } }),
+            group.failed > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { "data-k": "fail", style: { width: part(group.failed) } })
+          ]
+        }
+      ),
+      rest.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-prog-sub", children: rest.join(" \xB7 ") })
+    ] }, group.rootId);
+  };
+  const progressBlock = (list) => {
+    const underway = list.filter((group) => !group.complete && group.total > 1).slice(0, 4);
+    if (underway.length === 0) return null;
+    return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("section", { className: "dshrc-prog", "data-progress": true, "aria-label": t("progress.title"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-prog-h", children: t("progress.title") }),
+      underway.map(progressItem)
+    ] });
+  };
+  const noticeBlock = (list) => {
+    if (list.length === 0) return null;
+    const shown = list.slice(0, 5);
+    return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("section", { className: "dshrc-nt", "data-notices": true, "aria-label": t("notices.title"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-nt-h", children: t("notices.title") }),
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("ul", { className: "dshrc-nt-list", children: shown.map((item, index) => /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("li", { className: "dshrc-nt-item", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-nt-time", title: item.at, children: clockTime(item.at) }),
+        /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-nt-text", children: item.text })
+      ] }, `${item.at}-${String(index)}`)) }),
+      list.length > shown.length && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-prog-sub", children: t("notices.more", { n: list.length - shown.length }) })
     ] });
   };
   const groupBlock = (group) => {
@@ -2645,25 +3053,43 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
         )
       ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-tabs", role: "tablist", "aria-label": t("panel.title"), children: TABS.map((item) => /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
-      "button",
-      {
-        type: "button",
-        role: "tab",
-        className: "dshrc-tab",
-        "data-on": tab === item.id ? "" : void 0,
-        "aria-selected": tab === item.id,
-        onClick: () => {
-          setTab(item.id);
+    /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-tabs", role: "tablist", "aria-label": t("panel.title"), children: [
+      TABS.map((item) => /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
+        "button",
+        {
+          type: "button",
+          role: "tab",
+          className: "dshrc-tab",
+          "data-on": tab === item.id ? "" : void 0,
+          "aria-selected": tab === item.id,
+          onClick: () => {
+            setTab(item.id);
+          },
+          children: [
+            t(item.key),
+            (tabCounts.get(item.id) ?? 0) > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-tab-n", children: tabCounts.get(item.id) }),
+            item.id === "active" && waiting > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-tab-flag", title: t("seg.waiting", { n: waiting }), "aria-label": t("seg.waiting", { n: waiting }) })
+          ]
         },
-        children: [
-          t(item.key),
-          (tabCounts.get(item.id) ?? 0) > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-tab-n", children: tabCounts.get(item.id) }),
-          item.id === "active" && waiting > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-tab-flag", title: t("seg.waiting", { n: waiting }), "aria-label": t("seg.waiting", { n: waiting }) })
-        ]
-      },
-      item.id
-    )) }),
+        item.id
+      )),
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+        "input",
+        {
+          className: "dshrc-find",
+          type: "search",
+          value: query,
+          placeholder: t("board.find"),
+          "aria-label": t("board.find"),
+          onChange: (event) => {
+            setQuery(event.target.value);
+          },
+          onKeyDown: (event) => {
+            if (event.key === "Escape") setQuery("");
+          }
+        }
+      )
+    ] }),
     failed && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshrc-err", role: "alert", "data-router-error": true, children: [
       /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("span", { className: "dshrc-err-text", children: [
         /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshrc-err-msg", children: t("board.error", { message: state.error ?? "" }) }),
@@ -2673,7 +3099,11 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     ] }),
     board !== null && board.origin === "mock" && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-sample", "data-router-sample": true, title: t("board.mock.hint"), children: t("board.mock") }),
     notice !== null && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-notice", role: "status", "data-tone": notice.tone, children: notice.text }),
-    /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-list", children: board === null ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-empty", children: failed ? t("board.emptyOnError") : t("board.loading") }) : shownCount === 0 ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-empty", children: t("compact.empty") }) : groups.map(groupBlock) })
+    /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-list", children: board === null ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-empty", children: failed ? t("board.emptyOnError") : t("board.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(import_jsx_runtime5.Fragment, { children: [
+      tab === "active" && progressBlock(board.groups ?? []),
+      shownCount === 0 ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshrc-empty", children: t("compact.empty") }) : groups.map(groupBlock),
+      tab === "active" && noticeBlock(board.notices ?? [])
+    ] }) })
   ] });
 }
 
@@ -2690,9 +3120,562 @@ function WarRoomRedirect({ t, open }) {
   ] });
 }
 
-// src/client/ModelTiers.tsx
+// src/client/WorkspacePage.tsx
 var import_react5 = require("react");
 var import_jsx_runtime7 = require("react/jsx-runtime");
+var dirKey = (partition, path) => `${partition}\0${path}`;
+var STYLE2 = `${BOARD_TOKENS_CSS}
+.dshws{--c-text:var(--dsw-alias-label-primary,#0f1115);--c-text2:var(--dsw-alias-label-secondary,#61666b);--c-text3:var(--c-meta);--c-line:var(--dsw-alias-border-l2,rgba(0,0,0,.1));--c-line-soft:var(--dsw-alias-border-l1,rgba(0,0,0,.04));--c-pill:var(--dsw-alias-interactive-bg-hover-solid,#f1f3f5);--f-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw-alias-bg-base,transparent);color:var(--c-text);font-size:13px;line-height:1.45;text-align:left}
+.dshws *{box-sizing:border-box}
+:where(.dshws button){font:inherit}
+.dshws button:focus-visible{outline:2px solid var(--st-running-dot);outline-offset:1px}
+.dshws-head{display:flex;align-items:center;gap:var(--sp-3);flex:none;padding:var(--sp-4) var(--sp-4) var(--sp-3);border-bottom:1px solid var(--c-line-soft)}
+.dshws-ht{flex:1 1 auto;min-width:0}
+.dshws-title{margin:0;font-size:15px;font-weight:600;line-height:22px}
+.dshws-sub{margin:2px 0 0;font-size:12px;color:var(--c-text3)}
+.dshws-btn{flex:none;height:var(--h-ctl);padding:0 var(--sp-3);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px;cursor:pointer}
+.dshws-btn:hover{background:var(--c-hover)}
+.dshws-btn:active{background:var(--c-press)}
+.dshws-body{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(240px,340px) minmax(0,1fr)}
+.dshws-left{min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--c-line-soft)}
+.dshws-right{min-height:0;overflow:auto;padding:var(--sp-4)}
+.dshws-cap{display:block;padding:var(--sp-3) var(--sp-4) var(--sp-1);font-size:11px;font-weight:600;letter-spacing:.02em;color:var(--c-text2)}
+.dshws-parts{flex:none;display:flex;flex-direction:column;gap:2px;padding:0 var(--sp-2) var(--sp-2);max-height:40%;overflow:auto;border-bottom:1px solid var(--c-line-soft)}
+.dshws-part{display:flex;align-items:center;gap:var(--sp-2);width:100%;min-height:36px;padding:var(--sp-1) var(--sp-2);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text);text-align:left;cursor:pointer}
+.dshws-part:hover{background:var(--c-hover)}
+.dshws-part[data-on]{background:var(--c-pill)}
+.dshws-part[data-off] .dshws-pn{color:var(--c-text3)}
+.dshws-pmain{flex:1 1 auto;min-width:0;display:flex;flex-direction:column}
+.dshws-pn{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshws-pp{font-family:var(--f-mono);font-size:11px;color:var(--c-text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshws-badge{flex:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--st-cancelled-bg);color:var(--c-text2);font-size:11px;line-height:18px;text-align:center;font-variant-numeric:tabular-nums}
+.dshws-badge[data-tone="running"]{background:var(--st-running-bg);color:var(--st-running-text)}
+.dshws-badge[data-tone="warn"]{background:var(--st-blocked-bg);color:var(--st-blocked-text)}
+.dshws-badge[data-tone="error"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
+.dshws-tree{flex:1 1 auto;min-height:0;overflow:auto;padding:var(--sp-1) var(--sp-2) var(--sp-4);font-size:12px}
+.dshws-node{display:flex;align-items:center;gap:6px;width:100%;height:26px;padding:0 var(--sp-2);border:0;border-radius:4px;background:transparent;color:var(--c-text);text-align:left;white-space:nowrap;cursor:default}
+button.dshws-node{cursor:pointer}
+button.dshws-node:hover{background:var(--c-hover)}
+.dshws-node[data-out]{color:var(--c-text3)}
+.dshws-node[data-out] .dshws-nn{text-decoration:line-through;text-decoration-color:var(--c-line)}
+.dshws-caret{flex:none;width:12px;height:12px;color:var(--c-text3);transition:transform .12s ease}
+.dshws-caret[data-open]{transform:rotate(90deg)}
+.dshws-ico{flex:none;width:14px;height:14px;color:var(--c-text3)}
+.dshws-node[data-kind="dir"] .dshws-ico{color:var(--st-blocked-dot)}
+.dshws-nn{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.dshws-ns{flex:none;color:var(--c-text3);font-variant-numeric:tabular-nums;font-size:11px}
+.dshws-note{padding:var(--sp-1) var(--sp-2);color:var(--c-text3);font-size:12px}
+.dshws-note[data-tone="error"]{color:var(--st-failed-text)}
+.dshws-sec{margin:0 0 var(--sp-4)}
+.dshws-sec h3{margin:0 0 var(--sp-2);font-size:12px;font-weight:600;color:var(--c-text2)}
+.dshws-sech{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);margin-bottom:var(--sp-2)}
+.dshws-sech h3{margin:0}
+.dshws-btn[data-tone="stop"]:hover{color:var(--st-failed-text)}
+.dshws-btn[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
+.dshws-h4{margin:var(--sp-3) 0 var(--sp-1);font-size:11px;font-weight:600;color:var(--c-text3)}
+.dshws-notes{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
+.dshws-mnote{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:0 var(--sp-2);padding:var(--sp-1) var(--sp-2);border-radius:var(--r-ctl);background:var(--c-line-soft);font-size:12px}
+.dshws-mtext{grid-column:1;overflow-wrap:anywhere}
+.dshws-mmeta{grid-column:1;font-size:11px;color:var(--c-text3)}
+.dshws-x{grid-column:2;grid-row:1/3;width:20px;height:20px;padding:0;border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text3);cursor:pointer}
+.dshws-x:hover{background:var(--c-hover);color:var(--st-failed-text)}
+.dshws-addnote{display:flex;gap:var(--sp-2);margin-top:var(--sp-2)}
+.dshws-addnote input{flex:1 1 auto;min-width:0;height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px}
+.dshws-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--sp-1) var(--sp-3);margin:0;font-size:12px}
+.dshws-kv dt{color:var(--c-text3)}
+.dshws-kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.dshws-globs{display:flex;flex-wrap:wrap;gap:var(--sp-1)}
+.dshws-glob{padding:0 6px;border-radius:4px;background:var(--c-line-soft);font-family:var(--f-mono);font-size:11px;line-height:18px}
+.dshws-probs{display:flex;flex-direction:column;gap:var(--sp-1);margin:0;padding:0;list-style:none}
+.dshws-prob{padding:var(--sp-1) var(--sp-2);border-radius:var(--r-ctl);background:var(--st-blocked-bg);color:var(--st-blocked-text);font-size:12px}
+.dshws-prob[data-level="error"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
+.dshws-ok{color:var(--st-done-text);font-size:12px}
+.dshws-rules{margin:0;padding-left:18px;font-size:12px;color:var(--c-text2)}
+.dshws-rules li+li{margin-top:2px}
+.dshws-tasks{display:flex;flex-direction:column;margin:0;padding:0;list-style:none}
+.dshws-task{display:flex;flex-direction:column;gap:2px;padding:var(--sp-2) var(--sp-2);border-radius:var(--r-ctl)}
+.dshws-task+.dshws-task{border-top:1px solid var(--c-line-soft)}
+.dshws-task[data-link]{cursor:pointer}
+.dshws-task[data-link]:hover{background:var(--c-hover)}
+.dshws-tt{display:flex;align-items:baseline;gap:var(--sp-2);min-width:0}
+.dshws-tn{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.dshws-ts{flex:none;font-size:11px;color:var(--c-text2)}
+.dshws-ts[data-tone="running"]{color:var(--st-running-text)}
+.dshws-ts[data-tone="blocked"],.dshws-ts[data-tone="suspended"]{color:var(--st-blocked-text)}
+.dshws-tm{font-size:11px;color:var(--c-text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshws-empty{padding:48px var(--sp-4);color:var(--c-text3);text-align:center}
+@container (max-width:640px){.dshws-body{grid-template-columns:1fr}.dshws-left{border-right:0;border-bottom:1px solid var(--c-line-soft);max-height:55%}}
+.dshws-wrap{container-type:inline-size;height:100%}
+`;
+var CARET2 = "M4.5 3l3 3-3 3";
+var ICON_DIR = "M1.75 3.5h3.5l1.25 1.5h5.75v6.5h-10.5z";
+var ICON_FILE = "M3 1.75h5l3 3v7.5H3zM8 1.75V5h3";
+var ICON_LINK = "M5 7h4M4 9.5a2.5 2.5 0 0 1 0-5M10 4.5a2.5 2.5 0 0 1 0 5";
+function Glyph({ d, className, open }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    "svg",
+    {
+      className,
+      "data-open": open === true ? "" : void 0,
+      viewBox: "0 0 14 14",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: "1.3",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      "aria-hidden": "true",
+      focusable: "false",
+      children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("path", { d })
+    }
+  );
+}
+var OPEN_ORDER = ["running", "blocked", "suspended", "queued"];
+function WorkspacePage({ controller, t, onOpenSession }) {
+  const state = (0, import_react5.useSyncExternalStore)(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  const board = state.board;
+  const partitions2 = board?.partitions ?? [];
+  const [selected, setSelected] = (0, import_react5.useState)(null);
+  const [dirs, setDirs] = (0, import_react5.useState)(() => /* @__PURE__ */ new Map());
+  const [expanded, setExpanded] = (0, import_react5.useState)(() => /* @__PURE__ */ new Set());
+  const now = Date.now();
+  (0, import_react5.useEffect)(() => {
+    const detach = controller.start();
+    void controller.load();
+    return () => {
+      detach();
+    };
+  }, [controller]);
+  const current = partitions2.find((partition) => partition.id === selected) ?? partitions2[0];
+  const partitionId = current?.id;
+  const loadDir = (0, import_react5.useCallback)(async (partition, path) => {
+    const key = dirKey(partition, path);
+    setDirs((previous) => new Map(previous).set(key, { status: "loading" }));
+    try {
+      const listing = await controller.listFiles(partition, path);
+      setDirs((previous) => new Map(previous).set(key, { status: "ok", listing }));
+    } catch (error) {
+      const message2 = error instanceof Error ? error.message : String(error);
+      setDirs((previous) => new Map(previous).set(key, { status: "error", message: message2 }));
+    }
+  }, [controller]);
+  (0, import_react5.useEffect)(() => {
+    if (partitionId === void 0 || !controller.canListFiles) return;
+    if (dirs.has(dirKey(partitionId, ""))) return;
+    void loadDir(partitionId, "");
+  }, [partitionId, dirs, loadDir, controller]);
+  const [memory, setMemory] = (0, import_react5.useState)(null);
+  const [noteText, setNoteText] = (0, import_react5.useState)("");
+  const [noteBusy, setNoteBusy] = (0, import_react5.useState)(false);
+  const [stopArmed, setStopArmed] = (0, import_react5.useState)(false);
+  const [stopping, setStopping] = (0, import_react5.useState)(false);
+  const [message, setMessage] = (0, import_react5.useState)(null);
+  const loadMemory = (0, import_react5.useCallback)(async (partition) => {
+    if (!controller.canReadMemory) return;
+    try {
+      const view = await controller.readMemory(partition);
+      setMemory({ partition, view });
+    } catch (error) {
+      setMemory({ partition, error: error instanceof Error ? error.message : String(error) });
+    }
+  }, [controller]);
+  (0, import_react5.useEffect)(() => {
+    if (partitionId === void 0) return;
+    setNoteText("");
+    setStopArmed(false);
+    void loadMemory(partitionId);
+  }, [partitionId, loadMemory]);
+  (0, import_react5.useEffect)(() => {
+    if (!stopArmed) return;
+    const timer = setTimeout(() => {
+      setStopArmed(false);
+    }, 4e3);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [stopArmed]);
+  (0, import_react5.useEffect)(() => {
+    if (message === null) return;
+    const timer = setTimeout(() => {
+      setMessage(null);
+    }, 4e3);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [message]);
+  const toggleDir = (partition, path) => {
+    const key = dirKey(partition, path);
+    const opening = !expanded.has(key);
+    setExpanded((previous) => {
+      const next = new Set(previous);
+      if (opening) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+    if (opening && !dirs.has(key)) void loadDir(partition, path);
+  };
+  const refresh = () => {
+    void controller.load();
+    if (partitionId !== void 0) void loadMemory(partitionId);
+    if (partitionId === void 0 || !controller.canListFiles) return;
+    const open = [...expanded].filter((key) => key.startsWith(`${partitionId}\0`)).map((key) => key.slice(partitionId.length + 1));
+    for (const path of ["", ...open]) void loadDir(partitionId, path);
+  };
+  const live = (0, import_react5.useMemo)(() => new Set(partitions2.map((partition) => partition.id)), [partitions2]);
+  const titleOf = (0, import_react5.useMemo)(() => new Map((board?.tasks ?? []).map((task) => [task.id, task.title])), [board]);
+  const tasks = (0, import_react5.useMemo)(() => {
+    if (partitionId === void 0) return [];
+    return (board?.tasks ?? []).filter((task) => task.partitionId === partitionId).map((task) => ({ task, group: groupOf(task, live) })).filter((row) => OPEN_ORDER.includes(row.group)).sort((left, right) => OPEN_ORDER.indexOf(left.group) - OPEN_ORDER.indexOf(right.group));
+  }, [board, partitionId, live]);
+  const runningBy = (0, import_react5.useMemo)(() => {
+    const counts = /* @__PURE__ */ new Map();
+    for (const task of board?.tasks ?? []) {
+      if (groupOf(task, live) === "running") counts.set(task.partitionId, (counts.get(task.partitionId) ?? 0) + 1);
+    }
+    return counts;
+  }, [board, live]);
+  const names = (ids) => ids.map((id) => titleOf.get(id) ?? id).join("\u3001");
+  const entryRow = (partition, entry, depth) => {
+    const pad = { paddingLeft: `${String(8 + depth * 14)}px` };
+    const out = entry.inScope ? void 0 : "";
+    const title = [
+      entry.path,
+      entry.inScope ? void 0 : t("ws.outOfScope"),
+      entry.modifiedAt === void 0 ? void 0 : relativeTime(entry.modifiedAt, now)
+    ].filter((line) => line !== void 0 && line !== "").join("\n");
+    if (entry.kind === "dir") {
+      const key = dirKey(partition, entry.path);
+      const open = expanded.has(key);
+      return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { role: "treeitem", "aria-expanded": open, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+          "button",
+          {
+            type: "button",
+            className: "dshws-node",
+            "data-kind": "dir",
+            "data-out": out,
+            style: pad,
+            title,
+            onClick: () => {
+              toggleDir(partition, entry.path);
+            },
+            children: [
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Glyph, { className: "dshws-caret", d: CARET2, open }),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Glyph, { className: "dshws-ico", d: ICON_DIR }),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-nn", children: entry.name })
+            ]
+          }
+        ),
+        open && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { role: "group", children: dirBody(partition, entry.path, depth + 1) })
+      ] }, entry.path);
+    }
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { role: "treeitem", className: "dshws-node", "data-kind": entry.kind, "data-out": out, style: pad, title, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-caret" }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Glyph, { className: "dshws-ico", d: entry.kind === "link" ? ICON_LINK : ICON_FILE }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-nn", children: entry.name }),
+      entry.size !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ns", children: bytes(entry.size) })
+    ] }, entry.path);
+  };
+  const dirBody = (partition, path, depth) => {
+    const read = dirs.get(dirKey(partition, path));
+    const pad = { paddingLeft: `${String(8 + depth * 14)}px` };
+    if (read === void 0 || read.status === "loading") return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", style: pad, children: t("ws.loading") });
+    if (read.status === "error") return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", "data-tone": "error", style: pad, children: t("ws.error", { message: read.message }) });
+    if (read.listing.entries.length === 0) return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", style: pad, children: t("ws.empty") });
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(import_jsx_runtime7.Fragment, { children: [
+      read.listing.entries.map((entry) => entryRow(partition, entry, depth)),
+      read.listing.omitted > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", style: pad, children: t("ws.omitted", { n: read.listing.omitted }) })
+    ] });
+  };
+  const partitionRow = (partition) => {
+    const problems2 = partition.problems ?? [];
+    const worst = problems2.some((problem) => problem.level === "error") ? "error" : problems2.length > 0 ? "warn" : void 0;
+    const running = runningBy.get(partition.id) ?? 0;
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+      "button",
+      {
+        type: "button",
+        className: "dshws-part",
+        "data-on": partition.id === partitionId ? "" : void 0,
+        "data-off": partition.enabled === false ? "" : void 0,
+        onClick: () => {
+          setSelected(partition.id);
+        },
+        title: partition.path ?? partition.repo ?? partition.name,
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshws-pmain", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshws-pn", children: [
+              partition.name,
+              partition.enabled === false ? ` \xB7 ${t("ws.disabled")}` : ""
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-pp", children: partition.path ?? partition.repo ?? "" })
+          ] }),
+          worst !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-badge", "data-tone": worst, title: problems2.map((problem) => problem.message).join("\n"), children: "!" }),
+          running > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-badge", "data-tone": "running", children: running })
+        ]
+      },
+      partition.id
+    );
+  };
+  const taskRow = ({ task, group }) => {
+    const key = statusKeyOf(task, live);
+    const tone = key.replace("status.", "");
+    const lines = [];
+    if (task.waitingFor !== void 0 && task.waitingFor.length > 0) lines.push(t("order.waiting", { ids: names(task.waitingFor) }));
+    if (group === "suspended") {
+      lines.push(task.suspendReason === void 0 || task.suspendReason === "" ? t("susp.noReason") : t("susp.reason", { reason: task.suspendReason }));
+      if (task.waitingOn !== void 0 && task.waitingOn.length > 0) lines.push(t("susp.waitingOn", { ids: names(task.waitingOn) }));
+    }
+    if (group === "blocked") lines.push(task.resumeNote === void 0 || task.resumeNote === "" ? t("hold.noReason") : t("hold.reason", { reason: task.resumeNote }));
+    if (task.stage !== void 0) lines.push(t("order.stage", { n: task.stage }));
+    const open = task.workerSessionId !== void 0 && onOpenSession !== void 0 ? () => {
+      onOpenSession(task.workerSessionId);
+    } : void 0;
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("li", { className: "dshws-task", "data-link": open === void 0 ? void 0 : "", onClick: open, title: task.id, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshws-tt", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tn", children: task.title }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ts", "data-tone": tone, children: t(key) })
+      ] }),
+      lines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tm", title: line, children: line }, line))
+    ] }, task.id);
+  };
+  const stopAll = async () => {
+    if (!stopArmed) {
+      setStopArmed(true);
+      return;
+    }
+    setStopArmed(false);
+    const openIds = new Set(tasks.map((row) => row.task.id));
+    const tops = tasks.map((row) => row.task).filter((task) => task.parentId === void 0 || !openIds.has(task.parentId));
+    setStopping(true);
+    const failures = [];
+    for (const task of tops) {
+      const failure = await controller.control(task.id, "cancel_tree");
+      if (failure !== void 0) failures.push(`${task.title}: ${failure}`);
+    }
+    setStopping(false);
+    setMessage(failures.length === 0 ? { tone: "ok", text: t("ws.stopAllDone", { n: tops.length }) } : { tone: "bad", text: t("ws.stopAllFailed", { message: failures.join("\uFF1B") }) });
+    if (partitionId !== void 0) void loadMemory(partitionId);
+  };
+  const addNote = async () => {
+    const text = noteText.trim();
+    if (partitionId === void 0 || text === "" || noteBusy) return;
+    setNoteBusy(true);
+    try {
+      await controller.addMemoryNote(partitionId, text);
+      setNoteText("");
+      await loadMemory(partitionId);
+    } catch (error) {
+      setMessage({ tone: "bad", text: t("ws.mem.failed", { message: error instanceof Error ? error.message : String(error) }) });
+    } finally {
+      setNoteBusy(false);
+    }
+  };
+  const forgetNote = async (id) => {
+    if (partitionId === void 0) return;
+    try {
+      await controller.removeMemoryNote(partitionId, id);
+      await loadMemory(partitionId);
+    } catch (error) {
+      setMessage({ tone: "bad", text: t("ws.mem.failed", { message: error instanceof Error ? error.message : String(error) }) });
+    }
+  };
+  const MANAGER_SOURCE2 = {
+    strongest: t("ws.mem.src.strongest"),
+    hard: t("ws.mem.src.hard"),
+    saved: t("ws.mem.src.saved"),
+    inherit: t("ws.mem.src.inherit")
+  };
+  const memorySection = () => {
+    if (!controller.canReadMemory) return null;
+    const read = memory !== null && memory.partition === partitionId ? memory : void 0;
+    const view = read?.view;
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", "data-router-memory": true, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.mem.title") }),
+      read === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.loading") }) : read.error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", "data-tone": "error", children: t("ws.error", { message: read.error }) }) : view !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(import_jsx_runtime7.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("dl", { className: "dshws-kv", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dt", { children: t("ws.mem.manager") }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dd", { children: !view.manager.enabled ? t("ws.mem.noManager") : view.manager.route === void 0 ? MANAGER_SOURCE2[view.manager.source] ?? view.manager.source : `${view.manager.route.model}${view.manager.route.reasoningEffort === void 0 ? "" : ` \xB7 ${view.manager.route.reasoningEffort}`}\uFF08${MANAGER_SOURCE2[view.manager.source] ?? view.manager.source}\uFF09` })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.notes", { n: view.notes.length }) }),
+        view.notes.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.mem.noNotes") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-notes", children: view.notes.map((note) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("li", { className: "dshws-mnote", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-mtext", children: note.text }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshws-mmeta", children: [
+            t(`ws.mem.by.${note.by}`),
+            " \xB7 ",
+            relativeTime(note.at, now)
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshws-x",
+              title: t("ws.mem.forget"),
+              "aria-label": t("ws.mem.forget"),
+              onClick: () => {
+                void forgetNote(note.id);
+              },
+              children: "\xD7"
+            }
+          )
+        ] }, note.id)) }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("form", { className: "dshws-addnote", onSubmit: (event) => {
+          event.preventDefault();
+          void addNote();
+        }, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+            "input",
+            {
+              value: noteText,
+              maxLength: 600,
+              placeholder: t("ws.mem.placeholder"),
+              onChange: (event) => {
+                setNoteText(event.target.value);
+              }
+            }
+          ),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "submit", className: "dshws-btn", disabled: noteBusy || noteText.trim() === "", children: t("ws.mem.add") })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.work", { n: view.logTotal }) }),
+        view.log.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.mem.noWork") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-tasks", children: view.log.slice(0, 12).map((entry) => {
+          const open = entry.sessionId !== void 0 && onOpenSession !== void 0 ? () => {
+            onOpenSession(entry.sessionId);
+          } : void 0;
+          return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+            "li",
+            {
+              className: "dshws-task",
+              "data-link": open === void 0 ? void 0 : "",
+              onClick: open,
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-tt", children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tn", children: entry.subject }),
+                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ts", "data-tone": entry.state === "failed" || entry.state === "cancelled" ? "blocked" : void 0, children: t(`ws.mem.state.${entry.state}`) })
+                ] }),
+                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tm", children: [relativeTime(entry.at, now), entry.level === "manager" ? "manager" : entry.model, entry.summary ?? entry.error].filter((part) => part !== void 0 && part !== "").join(" \xB7 ") })
+              ]
+            },
+            `${entry.taskId}-${entry.at}`
+          );
+        }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.sessions", { n: view.sessions.length }) }),
+        view.sessions.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.mem.noSessions") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-tasks", children: view.sessions.slice(0, 12).map((ref) => {
+          const open = onOpenSession !== void 0 ? () => {
+            onOpenSession(ref.sessionId);
+          } : void 0;
+          return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("li", { className: "dshws-task", "data-link": open === void 0 ? void 0 : "", onClick: open, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-tt", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tn", children: ref.subject }),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ts", children: t(`ws.mem.state.${ref.state}`) })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tm", children: [ref.taskId, relativeTime(ref.updatedAt, now), ref.summary].filter((part) => part !== void 0 && part !== "").join(" \xB7 ") })
+          ] }, ref.sessionId);
+        }) })
+      ] })
+    ] });
+  };
+  const rootListing = partitionId === void 0 ? void 0 : dirs.get(dirKey(partitionId, ""));
+  const include = current?.include ?? (rootListing?.status === "ok" ? rootListing.listing.include : void 0);
+  const exclude = current?.exclude ?? (rootListing?.status === "ok" ? rootListing.listing.exclude : void 0);
+  const problems = current?.problems ?? [];
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-wrap", children: /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc dshws", "data-router-workspace": true, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("style", { children: STYLE2 }),
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("header", { className: "dshws-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-ht", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h2", { className: "dshws-title", children: t("ws.title") }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("p", { className: "dshws-sub", children: t("ws.subtitle") })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "button", className: "dshws-btn", onClick: refresh, children: t("ws.refresh") })
+    ] }),
+    board === null ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-empty", children: t("board.loading") }) : current === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-empty", children: t("ws.noPartition") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-body", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-left", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-cap", children: t("ws.partitions") }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-parts", children: partitions2.map(partitionRow) }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-cap", children: current.name }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-tree", role: "tree", "aria-label": current.name, children: controller.canListFiles ? dirBody(current.id, "", 0) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.notWired") }) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-right", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: current.name }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("dl", { className: "dshws-kv", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dt", { children: t("ws.root") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dd", { children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("code", { children: current.path ?? current.repo ?? "" }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dt", { children: t("ws.include") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dd", { children: include === void 0 || include.length === 1 && include[0] === "**" ? t("ws.all") : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-globs", children: include.map((glob) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-glob", children: glob }, glob)) }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dt", { children: t("ws.exclude") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dd", { children: exclude === void 0 || exclude.length === 0 ? t("ws.none") : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-globs", children: exclude.map((glob) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-glob", children: glob }, glob)) }) })
+          ] }),
+          current.description !== void 0 && current.description !== "" && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("p", { className: "dshws-sub", children: current.description })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.problems") }),
+          problems.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ok", children: t("ws.noProblems") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-probs", children: problems.map((problem) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { className: "dshws-prob", "data-level": problem.level, children: problem.message }, problem.message)) })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.rules") }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("ol", { className: "dshws-rules", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { children: t("ws.rule1") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { children: t("ws.rule2") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { children: t("ws.rule3") })
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-sech", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.tasks") }),
+            tasks.length > 0 && controller.canControl && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+              "button",
+              {
+                type: "button",
+                className: "dshws-btn",
+                "data-tone": "stop",
+                "data-armed": stopArmed ? "" : void 0,
+                disabled: stopping,
+                title: t("ws.stopAllHint"),
+                onClick: () => {
+                  void stopAll();
+                },
+                children: stopping ? t("ws.stopping") : stopArmed ? t("ws.stopAllConfirm", { n: tasks.length }) : t("ws.stopAll")
+              }
+            )
+          ] }),
+          message !== null && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", "data-tone": message.tone === "bad" ? "error" : void 0, role: "status", children: message.text }),
+          tasks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-sub", children: t("ws.noTasks") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-tasks", children: tasks.map(taskRow) })
+        ] }),
+        memorySection()
+      ] })
+    ] })
+  ] }) });
+}
+
+// src/client/WorkspaceIcon.tsx
+var import_jsx_runtime8 = require("react/jsx-runtime");
+function WorkspaceIcon({ size = 18, active = false }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
+    "svg",
+    {
+      width: size,
+      height: size,
+      viewBox: "0 0 18 18",
+      fill: "none",
+      "aria-hidden": "true",
+      stroke: "currentColor",
+      strokeWidth: "1.5",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      style: { opacity: active ? 1 : 0.72 },
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("path", { d: "M2 4.5h5l1.5 1.8H16v8.2H2z" }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("path", { d: "M5.5 9.5h3M5.5 12h5", opacity: "0.72" })
+      ]
+    }
+  );
+}
+
+// src/client/ModelTiers.tsx
+var import_react6 = require("react");
+var import_jsx_runtime9 = require("react/jsx-runtime");
 var TIERS = ["easy", "medium", "hard"];
 var LABEL = { easy: "\u521D\u7EA7", medium: "\u4E2D\u7EA7", hard: "\u9AD8\u7EA7" };
 var HINT = {
@@ -2700,6 +3683,14 @@ var HINT = {
   medium: "\u5E38\u89C4\u4FEE\u6539\uFF1A\u52A0\u529F\u80FD\u3001\u4FEE\u5C0F\u95EE\u9898",
   hard: "\u5927\u6539\u52A8\uFF1A\u91CD\u6784\u3001\u6539\u7248\u3001\u8DE8\u6587\u4EF6\u6392\u67E5"
 };
+var MANAGER_SOURCE = {
+  strongest: "\u81EA\u52A8\u9009\u6700\u5F3A",
+  hard: "\u8DDF\u9AD8\u7EA7\u6863",
+  saved: "\u6307\u5B9A",
+  inherit: "\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B"
+};
+var STRONGEST = "__strongest";
+var INHERIT = "__inherit";
 var keyOf = (route) => route == null ? "" : `${route.provider}\0${route.model}`;
 function shortName(name) {
   const slash = name.lastIndexOf("/");
@@ -2755,6 +3746,7 @@ var CSS = `
 .dmt-dot[data-tier="easy"] { background: var(--dmt-easy); }
 .dmt-dot[data-tier="medium"] { background: var(--dmt-medium); }
 .dmt-dot[data-tier="hard"] { background: var(--dmt-hard); }
+.dmt-dot[data-tier="manager"] { background: var(--dmt-text); }
 .dmt-line-label { font-size: 11px; color: var(--dmt-text2); white-space: nowrap; }
 .dmt-line-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dmt-text); text-align: right; }
 .dmt-root[data-off] .dmt-line { opacity: .5; }
@@ -2828,8 +3820,8 @@ function installModelTierStyles() {
   document.head.appendChild(tag);
 }
 function usePlacement(open, anchor) {
-  const [placement, setPlacement] = (0, import_react5.useState)(null);
-  (0, import_react5.useEffect)(() => {
+  const [placement, setPlacement] = (0, import_react6.useState)(null);
+  (0, import_react6.useEffect)(() => {
     if (!open) return;
     const place = () => {
       const box = anchor.current?.getBoundingClientRect();
@@ -2853,14 +3845,14 @@ function usePlacement(open, anchor) {
   return open ? placement : null;
 }
 function ModelTiers({ wide = true }) {
-  const [doc, setDoc] = (0, import_react5.useState)(null);
-  const [msg, setMsg] = (0, import_react5.useState)(null);
-  const [busy, setBusy] = (0, import_react5.useState)(false);
-  const [open, setOpen] = (0, import_react5.useState)(false);
-  const rootRef = (0, import_react5.useRef)(null);
-  const popRef = (0, import_react5.useRef)(null);
+  const [doc, setDoc] = (0, import_react6.useState)(null);
+  const [msg, setMsg] = (0, import_react6.useState)(null);
+  const [busy, setBusy] = (0, import_react6.useState)(false);
+  const [open, setOpen] = (0, import_react6.useState)(false);
+  const rootRef = (0, import_react6.useRef)(null);
+  const popRef = (0, import_react6.useRef)(null);
   const placement = usePlacement(open, rootRef);
-  const load = (0, import_react5.useCallback)(async () => {
+  const load = (0, import_react6.useCallback)(async () => {
     try {
       const response = await fetch("/api/router/tiers", { cache: "no-store", credentials: "same-origin" });
       if (!response.ok) throw new Error(`HTTP ${String(response.status)}`);
@@ -2870,10 +3862,10 @@ function ModelTiers({ wide = true }) {
       setMsg({ text: `\u8BFB\u53D6\u5931\u8D25\uFF1A${error instanceof Error ? error.message : String(error)}`, bad: true });
     }
   }, []);
-  (0, import_react5.useEffect)(() => {
+  (0, import_react6.useEffect)(() => {
     void load();
   }, [load]);
-  (0, import_react5.useEffect)(() => {
+  (0, import_react6.useEffect)(() => {
     if (msg === null || msg.bad === true || busy) return;
     const timer = setTimeout(() => {
       setMsg((previous) => previous === msg ? null : previous);
@@ -2882,10 +3874,10 @@ function ModelTiers({ wide = true }) {
       clearTimeout(timer);
     };
   }, [msg, busy]);
-  (0, import_react5.useEffect)(() => {
+  (0, import_react6.useEffect)(() => {
     if (open) void load();
   }, [open, load]);
-  const save = (0, import_react5.useCallback)(async (body, done) => {
+  const save = (0, import_react6.useCallback)(async (body, done) => {
     setBusy(true);
     setMsg({ text: "\u4FDD\u5B58\u4E2D\u2026" });
     try {
@@ -2911,7 +3903,7 @@ function ModelTiers({ wide = true }) {
       setBusy(false);
     }
   }, []);
-  (0, import_react5.useEffect)(() => {
+  (0, import_react6.useEffect)(() => {
     if (!open) return;
     const onPointerDown = (event) => {
       const target = event.target;
@@ -2929,7 +3921,7 @@ function ModelTiers({ wide = true }) {
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [open]);
-  const groups = (0, import_react5.useMemo)(() => {
+  const groups = (0, import_react6.useMemo)(() => {
     const out = [];
     for (const model of doc?.models ?? []) {
       const group = out.find((entry) => entry.name === model.providerName);
@@ -2947,8 +3939,8 @@ function ModelTiers({ wide = true }) {
   if (!wide) return null;
   const auto = doc?.auto ?? true;
   const offAttr = doc !== null && !auto ? { "data-off": "" } : {};
-  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dmt-root", "data-model-tiers": "", ref: rootRef, ...offAttr, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-root", "data-model-tiers": "", ref: rootRef, ...offAttr, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
       "button",
       {
         type: "button",
@@ -2959,27 +3951,37 @@ function ModelTiers({ wide = true }) {
           setOpen((previous) => !previous);
         },
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dmt-head", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-title", children: "\u6A21\u578B\u6863\u4F4D" }),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-badge", ...auto ? { "data-on": "" } : {}, children: doc === null ? "\u2026" : auto ? "\u81EA\u52A8\u9009\u62E9" : "\u5DF2\u5173\u95ED" }),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-caret", "aria-hidden": true, children: open ? "\u25BE" : "\u25B4" })
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-head", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-title", children: "\u6A21\u578B\u6863\u4F4D" }),
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-badge", ...auto ? { "data-on": "" } : {}, children: doc === null ? "\u2026" : auto ? "\u81EA\u52A8\u9009\u62E9" : "\u5DF2\u5173\u95ED" }),
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-caret", "aria-hidden": true, children: open ? "\u25BE" : "\u25B4" })
           ] }),
-          doc === null ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-note", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u52A0\u8F7D\u4E2D\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-lines", children: TIERS.map((tier) => {
-            const route = doc.effective[tier];
-            const effort = route?.reasoningEffort;
-            return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dmt-line", title: route == null ? "" : `${optionOf(route)?.providerName ?? route.provider} \xB7 ${route.model}`, children: [
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-line-label", children: LABEL[tier] }),
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dmt-line-model", children: [
-                labelOf(route),
-                effort === void 0 ? "" : ` \xB7 ${EFFORT_LABEL[effort] ?? effort}`
+          doc === null ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-note", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u52A0\u8F7D\u4E2D\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-lines", children: [
+            TIERS.map((tier) => {
+              const route = doc.effective[tier];
+              const effort = route?.reasoningEffort;
+              return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-line", title: route == null ? "" : `${optionOf(route)?.providerName ?? route.provider} \xB7 ${route.model}`, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-line-label", children: LABEL[tier] }),
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-line-model", children: [
+                  labelOf(route),
+                  effort === void 0 ? "" : ` \xB7 ${EFFORT_LABEL[effort] ?? effort}`
+                ] })
+              ] }, tier);
+            }),
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-line", title: "\u6BCF\u4E2A\u5206\u533A\u7684 manager \u7528\u7684\u6A21\u578B", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-dot", "data-tier": "manager" }),
+              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-line-label", children: "Manager" }),
+              /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-line-model", children: [
+                doc.managerEffective?.route === void 0 ? labelOf(doc.defaultModel) : labelOf(doc.managerEffective.route),
+                doc.managerEffective?.route?.reasoningEffort === void 0 ? "" : ` \xB7 ${EFFORT_LABEL[doc.managerEffective.route.reasoningEffort] ?? doc.managerEffective.route.reasoningEffort}`
               ] })
-            ] }, tier);
-          }) })
+            ] })
+          ] })
         ]
       }
     ),
-    placement === null ? null : /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+    placement === null ? null : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
       "div",
       {
         ref: popRef,
@@ -2989,19 +3991,19 @@ function ModelTiers({ wide = true }) {
         ...offAttr,
         style: { left: placement.left, bottom: placement.bottom, width: placement.width, maxHeight: placement.maxHeight },
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dmt-pop-head", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-pop-title", children: "\u6A21\u578B\u6863\u4F4D" }),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "button", className: "dmt-close", "aria-label": "\u5173\u95ED", onClick: () => {
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-pop-head", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-pop-title", children: "\u6A21\u578B\u6863\u4F4D" }),
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("button", { type: "button", className: "dmt-close", "aria-label": "\u5173\u95ED", onClick: () => {
               setOpen(false);
             }, children: "\xD7" })
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dmt-pop-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dmt-switch-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dmt-switch-text", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-switch-title", children: "\u81EA\u52A8\u6309\u96BE\u5EA6\u9009\u62E9" }),
-                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-switch-hint", children: auto ? "\u6D3E\u4EFB\u52A1\u65F6\u5148\u5224\u65AD\u96BE\u5EA6\uFF0C\u518D\u7528\u5BF9\u5E94\u6863\u4F4D\u7684\u6A21\u578B" : `\u5DF2\u5173\u95ED\uFF1A\u6240\u6709\u4EFB\u52A1\u4F7F\u7528\u9ED8\u8BA4\u6A21\u578B ${labelOf(doc?.defaultModel)}` })
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-pop-body", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-switch-row", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dmt-switch-text", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-switch-title", children: "\u81EA\u52A8\u6309\u96BE\u5EA6\u9009\u62E9" }),
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-switch-hint", children: auto ? "\u6D3E\u4EFB\u52A1\u65F6\u5148\u5224\u65AD\u96BE\u5EA6\uFF0C\u518D\u7528\u5BF9\u5E94\u6863\u4F4D\u7684\u6A21\u578B" : `\u5DF2\u5173\u95ED\uFF1A\u6240\u6709\u4EFB\u52A1\u4F7F\u7528\u9ED8\u8BA4\u6A21\u578B ${labelOf(doc?.defaultModel)}` })
               ] }),
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
                 "button",
                 {
                   type: "button",
@@ -3017,17 +4019,17 @@ function ModelTiers({ wide = true }) {
                 }
               )
             ] }),
-            doc === null ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dmt-note", children: "\u52A0\u8F7D\u4E2D\u2026" }) : TIERS.map((tier) => {
+            doc === null ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dmt-note", children: "\u52A0\u8F7D\u4E2D\u2026" }) : TIERS.map((tier) => {
               const route = doc.effective[tier];
               const option = optionOf(route);
               const efforts = option?.efforts ?? [];
               const saved = doc.saved[tier] !== void 0;
-              return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dmt-tier", "data-tier-block": tier, children: [
-                /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dmt-tier-head", children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
-                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-tier-name", children: LABEL[tier] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-tier-hint", title: HINT[tier], children: HINT[tier] }),
-                  saved ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+              return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-tier", "data-tier-block": tier, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-tier-head", children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-tier-name", children: LABEL[tier] }),
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-tier-hint", title: HINT[tier], children: HINT[tier] }),
+                  saved ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
                     "button",
                     {
                       type: "button",
@@ -3038,10 +4040,10 @@ function ModelTiers({ wide = true }) {
                       },
                       children: "\u6062\u590D\u9ED8\u8BA4"
                     }
-                  ) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dmt-tag", children: "\u9ED8\u8BA4" })
+                  ) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-tag", children: "\u9ED8\u8BA4" })
                 ] }),
-                /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dmt-fields", ...efforts.length === 0 ? { "data-single": "" } : {}, children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-fields", ...efforts.length === 0 ? { "data-single": "" } : {}, children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
                     "select",
                     {
                       className: "dmt-select",
@@ -3058,12 +4060,12 @@ function ModelTiers({ wide = true }) {
                         }, `${LABEL[tier]}\u5DF2\u6539\u4E3A ${shortName(next.name)}\uFF0C\u4E0B\u4E00\u4E2A\u4EFB\u52A1\u751F\u6548`);
                       },
                       children: [
-                        option === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("option", { value: keyOf(route), children: route == null ? "\uFF08\u9ED8\u8BA4\u6A21\u578B\uFF09" : `${route.model}\uFF08\u4E0D\u53EF\u7528\uFF09` }) : null,
-                        groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("optgroup", { label: group.name, children: group.models.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("option", { value: keyOf(entry), children: shortName(entry.name) }, keyOf(entry))) }, group.name))
+                        option === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: keyOf(route), children: route == null ? "\uFF08\u9ED8\u8BA4\u6A21\u578B\uFF09" : `${route.model}\uFF08\u4E0D\u53EF\u7528\uFF09` }) : null,
+                        groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("optgroup", { label: group.name, children: group.models.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: keyOf(entry), children: shortName(entry.name) }, keyOf(entry))) }, group.name))
                       ]
                     }
                   ),
-                  efforts.length === 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+                  efforts.length === 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
                     "select",
                     {
                       className: "dmt-select",
@@ -3079,16 +4081,74 @@ function ModelTiers({ wide = true }) {
                         }, `${LABEL[tier]}\u63A8\u7406\u5F3A\u5EA6\u5DF2\u4FDD\u5B58`);
                       },
                       children: [
-                        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("option", { value: "", children: "\u63A8\u7406\uFF1A\u9ED8\u8BA4" }),
-                        efforts.map((effort) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("option", { value: effort, children: `\u63A8\u7406\uFF1A${EFFORT_LABEL[effort] ?? effort}` }, effort))
+                        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: "", children: "\u63A8\u7406\uFF1A\u9ED8\u8BA4" }),
+                        efforts.map((effort) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: effort, children: `\u63A8\u7406\uFF1A${EFFORT_LABEL[effort] ?? effort}` }, effort))
                       ]
                     }
                   )
                 ] })
               ] }, tier);
-            })
+            }),
+            doc === null ? null : (() => {
+              const choice = doc.manager ?? "strongest";
+              const value = choice === "strongest" ? STRONGEST : choice === "inherit" ? INHERIT : keyOf(choice);
+              const effective = doc.managerEffective;
+              return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-tier", "data-tier-block": "manager", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dmt-tier-head", children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-dot", "data-tier": "manager" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-tier-name", children: "Manager" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-tier-hint", title: "\u6BCF\u4E2A\u5206\u533A\u7684 manager \u8D1F\u8D23\u62C6\u4EFB\u52A1\u3001\u6392\u987A\u5E8F\u3001\u8BB0\u4F4F\u5206\u533A\u505A\u8FC7\u4EC0\u4E48", children: "\u62C6\u4EFB\u52A1\u3001\u6392\u987A\u5E8F\u3001\u8BB0\u4F4F\u5206\u533A\u5386\u53F2" }),
+                  choice === "strongest" ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dmt-tag", children: "\u9ED8\u8BA4" }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+                    "button",
+                    {
+                      type: "button",
+                      className: "dmt-reset",
+                      disabled: busy,
+                      onClick: () => {
+                        void save({ manager: null }, "Manager \u5DF2\u6062\u590D\u4E3A\u81EA\u52A8\u9009\u6700\u5F3A");
+                      },
+                      children: "\u6062\u590D\u9ED8\u8BA4"
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dmt-fields", "data-single": "", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
+                  "select",
+                  {
+                    className: "dmt-select",
+                    "data-tier": "manager",
+                    "aria-label": "Manager \u6A21\u578B",
+                    disabled: busy,
+                    value,
+                    onChange: (event) => {
+                      const picked = event.currentTarget.value;
+                      if (picked === STRONGEST) {
+                        void save({ manager: "strongest" }, "Manager \u6539\u4E3A\u81EA\u52A8\u9009\u6700\u5F3A\uFF0C\u4E0B\u4E00\u4E2A\u9700\u6C42\u751F\u6548");
+                        return;
+                      }
+                      if (picked === INHERIT) {
+                        void save({ manager: "inherit" }, "Manager \u6539\u4E3A\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B\uFF0C\u4E0B\u4E00\u4E2A\u9700\u6C42\u751F\u6548");
+                        return;
+                      }
+                      const next = doc.models.find((entry) => keyOf(entry) === picked);
+                      if (next === void 0) return;
+                      const top = next.efforts?.at(-1);
+                      void save(
+                        { manager: { provider: next.provider, model: next.model, ...top === void 0 ? {} : { reasoningEffort: top } } },
+                        `Manager \u5DF2\u6539\u4E3A ${shortName(next.name)}\uFF0C\u4E0B\u4E00\u4E2A\u9700\u6C42\u751F\u6548`
+                      );
+                    },
+                    children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: STRONGEST, children: "\u81EA\u52A8\u9009\u6700\u5F3A" }),
+                      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: INHERIT, children: "\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B" }),
+                      groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("optgroup", { label: group.name, children: group.models.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("option", { value: keyOf(entry), children: shortName(entry.name) }, keyOf(entry))) }, group.name))
+                    ]
+                  }
+                ) }),
+                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dmt-switch-hint", "data-manager-effective": "", children: effective === void 0 ? "\u5BBF\u4E3B\u8FD8\u6CA1\u66F4\u65B0\uFF0Cmanager \u6682\u65F6\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B" : `\u5B9E\u9645\u4F7F\u7528\uFF1A${effective.route === void 0 ? labelOf(doc.defaultModel) : labelOf(effective.route)}${effective.route?.reasoningEffort === void 0 ? "" : ` \xB7 \u63A8\u7406${EFFORT_LABEL[effective.route.reasoningEffort] ?? effective.route.reasoningEffort}`}\uFF08${MANAGER_SOURCE[effective.source] ?? effective.source}\uFF09` })
+              ] });
+            })()
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dmt-pop-foot", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u4FEE\u6539\u7ACB\u5373\u4FDD\u5B58\uFF0C\u4ECE\u4E0B\u4E00\u4E2A\u6D3E\u51FA\u7684\u4EFB\u52A1\u5F00\u59CB\u751F\u6548" })
+          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dmt-pop-foot", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u4FEE\u6539\u7ACB\u5373\u4FDD\u5B58\uFF0C\u4ECE\u4E0B\u4E00\u4E2A\u6D3E\u51FA\u7684\u4EFB\u52A1\u5F00\u59CB\u751F\u6548" })
         ]
       }
     )
@@ -3109,6 +4169,7 @@ var zh = {
   "board.refreshing": "\u5237\u65B0\u4E2D\u2026",
   "seg.waiting": "\u6709 {n} \u4E2A\u4EFB\u52A1\u5728\u7B49\u4F60\u8F93\u5165",
   "board.loading": "\u6B63\u5728\u8BFB\u53D6\u4EFB\u52A1\u677F\u2026",
+  "board.find": "\u641C\u7D22\u4EFB\u52A1 / \u7F16\u53F7 / \u5DE5\u4F5C\u533A",
   "board.empty": "\u8FD9\u4E2A\u72B6\u6001\u6682\u65F6\u6CA1\u6709\u4EFB\u52A1",
   "board.stale": "\u5BBF\u4E3B\u6682\u65F6\u8BFB\u4E0D\u5230\uFF0C\u4EE5\u4E0B\u662F\u4E0A\u6B21\u7ED3\u679C",
   "tab.active": "\u73B0\u5728",
@@ -3232,9 +4293,9 @@ var zh = {
   "seg.scheduled": "\u6392\u7A0B\u4EFB\u52A1",
   "seg.resolved": "\u5DF2\u7ED3\u675F",
   "grp.running": "\u8FDB\u884C\u4E2D",
-  "grp.blocked": "\u5DF2\u6302\u8D77 \xB7 \u9700\u8981\u8F93\u5165",
-  "hold.reason": "\u6302\u8D77\u539F\u56E0\uFF1A{reason}",
-  "hold.noReason": "\u6302\u8D77\u539F\u56E0\uFF1A\u672A\u586B\u5199",
+  "grp.blocked": "\u5DF2\u6682\u505C \xB7 \u9700\u8981\u5904\u7406",
+  "hold.reason": "\u6682\u505C\u539F\u56E0\uFF1A{reason}",
+  "hold.noReason": "\u6682\u505C\u539F\u56E0\uFF1A\u672A\u586B\u5199",
   "hold.resume": "\u6062\u590D",
   "hold.resuming": "\u6062\u590D\u4E2D\u2026",
   "hold.resumeHint": "\u8C03\u7528 task_control resume\uFF0C\u5728\u539F\u4F1A\u8BDD\u91CC\u7EE7\u7EED\u8FD9\u4E2A\u4EFB\u52A1",
@@ -3267,7 +4328,107 @@ var zh = {
   "artifact.title": "\u4EA7\u7269",
   "artifact.download": "\u4E0B\u8F7D",
   "workers.idle": "\u7A7A\u95F2",
-  "workers.none": "\u6682\u65E0 worker"
+  "workers.none": "\u6682\u65E0 worker",
+  "grp.suspended": "\u5DF2\u6302\u8D77 \xB7 \u7B49\u524D\u7F6E",
+  "status.suspended": "\u5DF2\u6302\u8D77",
+  "status.waiting": "\u7B49\u524D\u7F6E",
+  "order.waiting": "\u7B49\u524D\u7F6E\uFF1A{ids}",
+  "order.stage": "\u7B2C {n} \u6279",
+  "order.after": "\u5728 {ids} \u4E4B\u540E",
+  "susp.reason": "\u6302\u8D77\uFF1A{reason}",
+  "susp.noReason": "\u6302\u8D77\uFF1A\u672A\u586B\u5199\u539F\u56E0",
+  "susp.waitingOn": "\u7B49 {ids} \u5B8C\u6210\u540E\u81EA\u52A8\u7EE7\u7EED",
+  "susp.resumeHint": "\u4E0D\u7B49\u524D\u7F6E\uFF0C\u73B0\u5728\u5C31\u7EE7\u7EED\u8FD9\u4E2A\u4EFB\u52A1",
+  "act.suspend": "\u6302\u8D77",
+  "act.suspendHint": "\u5148\u653E\u4E00\u653E\uFF1A\u9700\u8981\u7684\u524D\u7F6E\u505A\u5B8C\u540E\u81EA\u52A8\u7EE7\u7EED",
+  "act.retry": "\u91CD\u8BD5",
+  "act.retryHint": "\u7528\u539F\u6765\u7684\u9700\u6C42\u91CD\u65B0\u6D3E\u4E00\u6B21",
+  "act.cancel": "\u505C\u6B62",
+  "act.cancel_tree": "\u505C\u6B62\u6574\u4E2A\u9700\u6C42",
+  "act.stopHint": "\u505C\u6B62\u8FD9\u4E2A\u4EFB\u52A1\u7684 worker\uFF08\u518D\u70B9\u4E00\u6B21\u786E\u8BA4\uFF09",
+  "act.stopTreeHint": "\u505C\u6B62\u5B83\u548C\u5B83\u4E0B\u9762\u6240\u6709\u8FD8\u6CA1\u7ED3\u675F\u7684\u4EFB\u52A1\uFF08\u518D\u70B9\u4E00\u6B21\u786E\u8BA4\uFF09",
+  "act.confirmStop": "\u786E\u8BA4\u505C\u6B62?",
+  "act.done": "\u5DF2\u63D0\u4EA4\uFF1A{action} {title}",
+  "act.failed": "\u64CD\u4F5C\u5931\u8D25\uFF1A{message}",
+  "susp.form.reason": "\u4E3A\u4EC0\u4E48\u6302\u8D77",
+  "susp.form.reasonHint": "\u4F8B\u5982\uFF1A\u8981\u5148\u628A\u63A5\u53E3\u6539\u5B8C",
+  "susp.form.prereq": "\u524D\u7F6E\u4EFB\u52A1\uFF08\u53EF\u9009\uFF09",
+  "susp.form.prereqHint": "\u5199\u4E00\u53E5\u8981\u5148\u505A\u4EC0\u4E48\uFF0C\u4F1A\u81EA\u52A8\u5EFA\u6210\u4EFB\u52A1\uFF1B\u4E0D\u586B\u5C31\u53EA\u662F\u6682\u505C",
+  "susp.form.submit": "\u6302\u8D77",
+  "susp.form.cancel": "\u7B97\u4E86",
+  "susp.form.empty": "\u5148\u5199\u6302\u8D77\u539F\u56E0",
+  "progress.title": "\u6574\u4F53\u8FDB\u5EA6",
+  "progress.line": "{done}/{total} \u5B8C\u6210",
+  "progress.running": "{n} \u8FDB\u884C\u4E2D",
+  "progress.waiting": "{n} \u7B49\u524D\u7F6E",
+  "progress.suspended": "{n} \u6302\u8D77",
+  "progress.failed": "{n} \u5931\u8D25",
+  "notices.title": "\u8FDB\u5EA6\u63D0\u9192",
+  "notices.more": "\u8FD8\u6709 {n} \u6761",
+  "ws.open": "\u5DE5\u4F5C\u533A",
+  "ws.title": "\u5DE5\u4F5C\u533A",
+  "ws.subtitle": "\u6BCF\u4E2A\u5206\u533A\u7684\u6839\u76EE\u5F55\u91CC\u6709\u54EA\u4E9B\u6587\u4EF6\uFF0C\u54EA\u4E9B\u5728\u5206\u533A\u8303\u56F4\u5185",
+  "ws.partitions": "\u5206\u533A",
+  "ws.root": "\u6839\u76EE\u5F55",
+  "ws.include": "\u5305\u542B",
+  "ws.exclude": "\u6392\u9664",
+  "ws.all": "\u5168\u90E8\u6587\u4EF6",
+  "ws.none": "\u65E0",
+  "ws.problems": "\u914D\u7F6E\u95EE\u9898",
+  "ws.noProblems": "\u914D\u7F6E\u68C0\u67E5\u901A\u8FC7",
+  "ws.outOfScope": "\u4E0D\u5728\u5206\u533A\u8303\u56F4\u5185",
+  "ws.loading": "\u8BFB\u53D6\u4E2D\u2026",
+  "ws.empty": "\u8FD9\u4E2A\u76EE\u5F55\u662F\u7A7A\u7684",
+  "ws.omitted": "\u8FD8\u6709 {n} \u9879\u6CA1\u6709\u5217\u51FA",
+  "ws.error": "\u8BFB\u53D6\u5931\u8D25\uFF1A{message}",
+  "ws.notWired": "\u5F53\u524D\u6570\u636E\u6E90\u4E0D\u652F\u6301\u8BFB\u53D6\u6587\u4EF6\u5217\u8868",
+  "ws.noPartition": "\u8FD8\u6CA1\u6709\u914D\u7F6E\u5206\u533A",
+  "ws.tasks": "\u8FD9\u4E2A\u5206\u533A\u7684\u4EFB\u52A1",
+  "ws.noTasks": "\u6682\u65E0\u8FDB\u884C\u4E2D\u7684\u4EFB\u52A1",
+  "ws.rules": "\u5206\u533A\u89C4\u8303",
+  "ws.rule1": "worker \u53EA\u6539\u6839\u76EE\u5F55\u4E0B\u3001\u4E14\u5728\u5305\u542B\u89C4\u5219\u5185\u7684\u6587\u4EF6",
+  "ws.rule2": "\u9700\u8981\u6539\u522B\u7684\u5206\u533A\u6216\u53D1\u73B0\u7F3A\u524D\u7F6E\u65F6\uFF0C\u6302\u8D77\u4EFB\u52A1\u5E76\u5199\u660E\u524D\u7F6E",
+  "ws.rule3": "\u4EA4\u4ED8\u65F6\u5728 touched: \u4E0B\u5217\u51FA\u6539\u8FC7\u7684\u8DEF\u5F84",
+  "ws.up": "\u4E0A\u4E00\u7EA7",
+  "ws.stopAll": "\u505C\u6B62\u5168\u90E8",
+  "ws.stopAllHint": "\u505C\u6B62\u8FD9\u4E2A\u5206\u533A\u6240\u6709\u8FD8\u6CA1\u7ED3\u675F\u7684\u4EFB\u52A1\u548C worker\uFF08\u518D\u70B9\u4E00\u6B21\u786E\u8BA4\uFF09",
+  "ws.stopAllConfirm": "\u786E\u8BA4\u505C\u6B62 {n} \u4E2A?",
+  "ws.stopping": "\u6B63\u5728\u505C\u6B62\u2026",
+  "ws.stopAllDone": "\u5DF2\u505C\u6B62 {n} \u4E2A\u9700\u6C42",
+  "ws.stopAllFailed": "\u6709\u4EFB\u52A1\u6CA1\u505C\u4E0B\uFF1A{message}",
+  "ws.mem.title": "\u5206\u533A\u8BB0\u5FC6",
+  "ws.mem.manager": "Manager \u6A21\u578B",
+  "ws.mem.noManager": "\u672A\u542F\u7528 manager\uFF08\u7531\u8DEF\u7531\u76F4\u63A5\u62C6\u5206\uFF09",
+  "ws.mem.src.strongest": "\u81EA\u52A8\u9009\u6700\u5F3A",
+  "ws.mem.src.hard": "\u8DDF\u9AD8\u7EA7\u6863",
+  "ws.mem.src.saved": "\u6307\u5B9A",
+  "ws.mem.src.inherit": "\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B",
+  "ws.mem.notes": "\u5E38\u9A7B\u7B14\u8BB0\uFF08{n}\uFF09",
+  "ws.mem.noNotes": "\u8FD8\u6CA1\u6709\u7B14\u8BB0\u3002manager \u4F1A\u628A\u957F\u671F\u6709\u6548\u7684\u7EA6\u5B9A\u8BB0\u5728\u8FD9\u91CC\uFF0C\u4F60\u4E5F\u53EF\u4EE5\u624B\u52A8\u52A0\u3002",
+  "ws.mem.placeholder": "\u52A0\u4E00\u6761\u8FD9\u4E2A\u5206\u533A\u7684\u957F\u671F\u7EA6\u5B9A\uFF0C\u4F8B\u5982\uFF1A\u63A5\u53E3\u7EDF\u4E00\u8D70 /api/v2",
+  "ws.mem.add": "\u8BB0\u4E0B",
+  "ws.mem.forget": "\u5220\u9664\u8FD9\u6761",
+  "ws.mem.failed": "\u8BB0\u5FC6\u64CD\u4F5C\u5931\u8D25\uFF1A{message}",
+  "ws.mem.by.manager": "manager \u8BB0\u7684",
+  "ws.mem.by.human": "\u4F60\u8BB0\u7684",
+  "ws.mem.by.router": "\u8DEF\u7531\u8BB0\u7684",
+  "ws.mem.work": "\u6700\u8FD1\u5B8C\u6210\u7684\u5DE5\u4F5C\uFF08\u5171 {n} \u6761\uFF09",
+  "ws.mem.noWork": "\u8FD9\u4E2A\u5206\u533A\u8FD8\u6CA1\u6709\u7ED3\u675F\u7684\u4EFB\u52A1\u3002",
+  "ws.mem.sessions": "Worker session\uFF08{n}\uFF09",
+  "ws.mem.noSessions": "\u8FD8\u6CA1\u6709 worker session\u3002",
+  "ws.mem.state.queued": "\u6392\u961F",
+  "ws.mem.state.dispatched": "\u5DF2\u6D3E\u53D1",
+  "ws.mem.state.running": "\u8FDB\u884C\u4E2D",
+  "ws.mem.state.interrupted": "\u5DF2\u4E2D\u65AD",
+  "ws.mem.state.suspended": "\u5DF2\u6302\u8D77",
+  "ws.mem.state.blocked": "\u5F85\u51B3\u5B9A",
+  "ws.mem.state.done": "\u5DF2\u5B8C\u6210",
+  "ws.mem.state.verified": "\u5DF2\u9A8C\u6536",
+  "ws.mem.state.reported": "\u5DF2\u6C47\u62A5",
+  "ws.mem.state.failed": "\u5931\u8D25",
+  "ws.mem.state.cancelled": "\u5DF2\u505C\u6B62",
+  "ws.refresh": "\u5237\u65B0",
+  "ws.disabled": "\u5DF2\u505C\u7528"
 };
 var en = {
   "panel.title": "Task board",
@@ -3281,6 +4442,7 @@ var en = {
   "board.refreshing": "Refreshing\u2026",
   "seg.waiting": "{n} task(s) waiting on your input",
   "board.loading": "Reading the board\u2026",
+  "board.find": "Find task / id / workspace",
   "board.empty": "Nothing in this state",
   "board.stale": "Host unreachable; showing the last result",
   "tab.active": "Active",
@@ -3439,7 +4601,107 @@ var en = {
   "artifact.title": "Artifacts",
   "artifact.download": "Download",
   "workers.idle": "idle",
-  "workers.none": "no workers"
+  "workers.none": "no workers",
+  "grp.suspended": "Suspended \xB7 waiting",
+  "status.suspended": "Suspended",
+  "status.waiting": "Waiting",
+  "order.waiting": "waiting for {ids}",
+  "order.stage": "batch {n}",
+  "order.after": "after {ids}",
+  "susp.reason": "Suspended: {reason}",
+  "susp.noReason": "Suspended: no reason given",
+  "susp.waitingOn": "continues once {ids} finish",
+  "susp.resumeHint": "Continue now without waiting",
+  "act.suspend": "Suspend",
+  "act.suspendHint": "Put aside; it continues once its prerequisite finishes",
+  "act.retry": "Retry",
+  "act.retryHint": "Dispatch the original demand again",
+  "act.cancel": "Stop",
+  "act.cancel_tree": "Stop request",
+  "act.stopHint": "Stop this task's worker (click again to confirm)",
+  "act.stopTreeHint": "Stop it and every open task under it (click again to confirm)",
+  "act.confirmStop": "Confirm stop?",
+  "act.done": "Sent: {action} {title}",
+  "act.failed": "Action failed: {message}",
+  "susp.form.reason": "Why suspend",
+  "susp.form.reasonHint": "e.g. the API change has to land first",
+  "susp.form.prereq": "Prerequisite (optional)",
+  "susp.form.prereqHint": "One line of what must happen first; it becomes a task. Leave empty to just pause",
+  "susp.form.submit": "Suspend",
+  "susp.form.cancel": "Never mind",
+  "susp.form.empty": "Give a reason first",
+  "progress.title": "Progress",
+  "progress.line": "{done}/{total} done",
+  "progress.running": "{n} running",
+  "progress.waiting": "{n} waiting",
+  "progress.suspended": "{n} suspended",
+  "progress.failed": "{n} failed",
+  "notices.title": "Progress notices",
+  "notices.more": "{n} more",
+  "ws.open": "Workspace",
+  "ws.title": "Workspace",
+  "ws.subtitle": "Files under each partition root, and which ones are in scope",
+  "ws.partitions": "Partitions",
+  "ws.root": "Root",
+  "ws.include": "Include",
+  "ws.exclude": "Exclude",
+  "ws.all": "all files",
+  "ws.none": "none",
+  "ws.problems": "Configuration problems",
+  "ws.noProblems": "Configuration looks fine",
+  "ws.outOfScope": "Outside the partition scope",
+  "ws.loading": "Loading\u2026",
+  "ws.empty": "This directory is empty",
+  "ws.omitted": "{n} more not listed",
+  "ws.error": "Could not read: {message}",
+  "ws.notWired": "This source cannot list files",
+  "ws.noPartition": "No partitions configured",
+  "ws.tasks": "Tasks in this partition",
+  "ws.noTasks": "No open tasks",
+  "ws.rules": "Partition rules",
+  "ws.rule1": "Workers only change files under the root that the include rules cover",
+  "ws.rule2": "Work in another partition or a missing prerequisite: suspend and name it",
+  "ws.rule3": "Deliveries list changed paths under touched:",
+  "ws.up": "Up",
+  "ws.stopAll": "Stop all",
+  "ws.stopAllHint": "Stop every open task and worker in this partition (click again to confirm)",
+  "ws.stopAllConfirm": "Stop {n}?",
+  "ws.stopping": "Stopping\u2026",
+  "ws.stopAllDone": "Stopped {n} request(s)",
+  "ws.stopAllFailed": "Some tasks did not stop: {message}",
+  "ws.mem.title": "Partition memory",
+  "ws.mem.manager": "Manager model",
+  "ws.mem.noManager": "No manager (the router splits requests itself)",
+  "ws.mem.src.strongest": "strongest available",
+  "ws.mem.src.hard": "same as Hard tier",
+  "ws.mem.src.saved": "chosen",
+  "ws.mem.src.inherit": "default model",
+  "ws.mem.notes": "Standing notes ({n})",
+  "ws.mem.noNotes": "No notes yet. The manager keeps lasting conventions here; you can add some too.",
+  "ws.mem.placeholder": "Add a lasting convention for this partition, e.g. all APIs go through /api/v2",
+  "ws.mem.add": "Save",
+  "ws.mem.forget": "Delete this note",
+  "ws.mem.failed": "Memory action failed: {message}",
+  "ws.mem.by.manager": "by manager",
+  "ws.mem.by.human": "by you",
+  "ws.mem.by.router": "by router",
+  "ws.mem.work": "Recent work ({n} in all)",
+  "ws.mem.noWork": "No finished tasks in this partition yet.",
+  "ws.mem.sessions": "Worker sessions ({n})",
+  "ws.mem.noSessions": "No worker sessions yet.",
+  "ws.mem.state.queued": "queued",
+  "ws.mem.state.dispatched": "dispatched",
+  "ws.mem.state.running": "running",
+  "ws.mem.state.interrupted": "interrupted",
+  "ws.mem.state.suspended": "suspended",
+  "ws.mem.state.blocked": "needs decision",
+  "ws.mem.state.done": "done",
+  "ws.mem.state.verified": "verified",
+  "ws.mem.state.reported": "reported",
+  "ws.mem.state.failed": "failed",
+  "ws.mem.state.cancelled": "stopped",
+  "ws.refresh": "Refresh",
+  "ws.disabled": "disabled"
 };
 var DICTIONARIES = { zh, en };
 
@@ -3514,7 +4776,9 @@ function asBoardSnapshot(value) {
     ...typeof candidate.staleSince === "string" ? { staleSince: candidate.staleSince } : {},
     // Additive fields are forwarded only when the Host sent them, so a view can
     // tell "the Host did not describe credentials" from "it described none".
-    ...Array.isArray(candidate.credentials) ? { credentials: candidate.credentials } : {}
+    ...Array.isArray(candidate.credentials) ? { credentials: candidate.credentials } : {},
+    ...Array.isArray(candidate.groups) ? { groups: candidate.groups } : {},
+    ...Array.isArray(candidate.notices) ? { notices: candidate.notices } : {}
   };
 }
 function createHostSource(remote, subscribeChanges) {
@@ -3645,12 +4909,41 @@ function createHttpSource(options = {}) {
         jsonPost({ taskId, verdict, ...note === void 0 ? {} : { note } })
       );
     },
-    async control(taskId, action, value) {
+    async control(taskId, action, value, extra) {
       await requestJson(
         requireFetch(),
         `${base}/control`,
-        jsonPost({ taskId, action, ...value === void 0 ? {} : { value } })
+        jsonPost({
+          taskId,
+          action,
+          ...value === void 0 ? {} : { value },
+          ...extra?.prerequisite === void 0 || extra.prerequisite === "" ? {} : { prerequisite: extra.prerequisite },
+          ...extra?.waitFor === void 0 || extra.waitFor.length === 0 ? {} : { waitFor: extra.waitFor }
+        })
       );
+    },
+    async listFiles(partition, path) {
+      const query = new URLSearchParams({ partition, path });
+      const body = await requestJson(requireFetch(), `${base}/files?${query.toString()}`);
+      if (typeof body !== "object" || body === null || !Array.isArray(body.entries)) {
+        throw new Error("GET /api/router/files returned a payload that is not a listing");
+      }
+      return body;
+    },
+    async readMemory(partition) {
+      const query = new URLSearchParams({ partition });
+      const body = await requestJson(requireFetch(), `${base}/memory?${query.toString()}`);
+      if (typeof body !== "object" || body === null || !Array.isArray(body.notes)) {
+        throw new Error("GET /api/router/memory returned a payload that is not a partition memory");
+      }
+      return body;
+    },
+    async addMemoryNote(partition, text) {
+      return await requestJson(requireFetch(), `${base}/memory`, jsonPost({ partition, text }));
+    },
+    async removeMemoryNote(partition, id) {
+      const query = new URLSearchParams({ partition, id });
+      await requestJson(requireFetch(), `${base}/memory?${query.toString()}`, { method: "DELETE" });
     },
     subscribe(listener) {
       let stream;
@@ -3708,6 +5001,7 @@ function resolveSource(factory) {
 var TAB_ID = "dsh-client-ui-router/board";
 var TAB_KIND = "router-board";
 var PANEL_ID = "router/routing";
+var WORKSPACE_ID = "router/workspace";
 var inject = ["slots", "locale", "sidebarRightTabs", "sidebarRight"];
 function boardTabDefinition(t) {
   return {
@@ -3871,6 +5165,26 @@ function applyInner(ctx) {
     locale: NS,
     label: () => t("warroom.open")
   }, RoutingIcon));
+  ctx.slots.inject("main", () => ctx.slots.register({
+    name: "main",
+    key: WORKSPACE_ID,
+    locale: NS,
+    inject: () => {
+      const face = panelFace();
+      return {
+        controller: face.controller,
+        t: face.t,
+        ...face.onOpenSession === void 0 ? {} : { onOpenSession: face.onOpenSession }
+      };
+    }
+  }, WorkspacePage));
+  ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({
+    name: "sidebar.panellist",
+    id: WORKSPACE_ID,
+    order: -39,
+    locale: NS,
+    label: () => t("ws.open")
+  }, WorkspaceIcon));
   installModelTierStyles();
   ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
     name: "sidebar.footer.action",

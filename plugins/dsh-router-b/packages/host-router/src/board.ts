@@ -52,6 +52,12 @@ export type TaskState =
    * boot instead of starting the work over.
    */
   | 'interrupted'
+  /**
+   * Parked until other tasks finish: the task (or a human) found it needs a
+   * prerequisite first. Its session is kept; when every row in `waitingOn` is
+   * finished the router continues that same session. Holds no worker slot.
+   */
+  | 'suspended'
 
 /** How a task was dispatched, so the board shows the routing level. */
 export type DispatchLevel =
@@ -122,6 +128,36 @@ export interface RouterTask {
   readonly resumeNote?: string
   /** How many times this row's session was resumed after an interruption. */
   readonly resumes?: number
+  /**
+   * Task ids that must finish before this row may start. A queued row whose
+   * prerequisites are still open waits in the queue; one whose prerequisite
+   * failed or was cancelled is parked as `blocked` for a human.
+   */
+  readonly dependsOn?: readonly string[]
+  /**
+   * Ordered phase among siblings (rows with the same `parentId`). A row starts
+   * only after every sibling with a lower stage has finished. Absent = stage 0
+   * with no ordering among rows that carry no stage.
+   */
+  readonly stage?: number
+  /** While `suspended`: the task ids it waits for. */
+  readonly waitingOn?: readonly string[]
+  /** Why the row was suspended, in the words of whoever suspended it. */
+  readonly suspendReason?: string
+  /** How many times this row was suspended so far. */
+  readonly suspends?: number
+  /** State the row had when it was suspended, so a resume knows whether it had finished once. */
+  readonly suspendedFrom?: TaskState
+  /** How many times a manager that ended with open children was woken to keep waiting. */
+  readonly rewakes?: number
+  /**
+   * Set on a `blocked` row the router parked because a prerequisite failed:
+   * the state to return to once that prerequisite is retried and finishes.
+   * Only meaningful together with a non-empty `waitingOn`.
+   */
+  readonly blockedFrom?: 'queued' | 'suspended'
+  /** A human chose to start this row without waiting for its prerequisites. */
+  readonly ignoreOrder?: boolean
   /** Human remarks recorded while the task was in flight. */
   readonly notes?: readonly string[]
   /** Difficulty tier chosen before dispatch (`easy | medium | hard`). */
@@ -182,13 +218,24 @@ export function mark(state: TaskState): string {
     case 'blocked': return '[B]'
     case 'cancelled': return '[-]'
     case 'interrupted': return '[^]'
+    case 'suspended': return '[z]'
   }
 }
 
 /** States a dispatched child can still be occupying a slot in. */
 export function isOpen(state: TaskState): boolean {
   return state === 'queued' || state === 'dispatched' || state === 'running' || state === 'reported'
-    || state === 'interrupted'
+    || state === 'interrupted' || state === 'suspended'
+}
+
+/** States that count as "finished" for a prerequisite. */
+export function isFinished(state: TaskState): boolean {
+  return state === 'done' || state === 'verified' || state === 'reported'
+}
+
+/** States that can never become finished without a human (a prerequisite in one of these is dead). */
+export function isDead(state: TaskState): boolean {
+  return state === 'failed' || state === 'cancelled'
 }
 
 /** Order tasks for execution: priority first, then arrival. */
@@ -219,8 +266,13 @@ export function summarize(
     const age = Math.max(0, Math.round((Date.now() - Date.parse(task.updatedAt)) / 1000))
     const parent = task.parentId === undefined ? '' : ` <- ${task.parentId}`
     const worker = task.worker === undefined ? '-' : task.worker
+    const order = [
+      task.stage === undefined ? '' : ` stage ${String(task.stage)}`,
+      (task.dependsOn?.length ?? 0) === 0 ? '' : ` after ${task.dependsOn!.join(',')}`,
+      task.state === 'suspended' && (task.waitingOn?.length ?? 0) > 0 ? ` waiting-on ${task.waitingOn!.join(',')}` : '',
+    ].join('')
     const row = `${mark(task.state)} ${task.id} ${task.partition}/${task.level} ${worker} `
-      + `p${String(task.priority)} ${task.subject}${parent} (${String(age)}s)`
+      + `p${String(task.priority)} ${task.subject}${parent}${order} (${String(age)}s)`
     // What the worker reported is what the next routing decision reads, so the
     // board shows it rather than making the caller open each row.
     const did = task.summary === undefined ? '' : `    did: ${task.summary}`
@@ -228,18 +280,24 @@ export function summarize(
       ? ''
       : `    touched: ${task.touched!.slice(0, 8).join(', ')}`
         + (task.touched!.length > 8 ? ` +${String(task.touched!.length - 8)} more` : '')
-    return did === '' && touched === '' ? [row] : [row, did, touched]
+    const why = task.state === 'suspended' && task.suspendReason !== undefined ? `    suspended: ${task.suspendReason}` : ''
+    return [row, did, touched, why].filter(line => line !== '')
   })
   return [header, ...rows].join('\n')
 }
 
 /** Error text on a row the harness stopped mid-flight; the session itself is intact. */
+/** States after which a row does not change on its own. */
+export const SETTLED: ReadonlySet<TaskState> = new Set<TaskState>(['done', 'verified', 'reported', 'failed', 'cancelled'])
+
 export const INTERRUPTED_NOTE = 'the harness stopped while this task was in flight; its session will be resumed from its log'
 
 /** The board file. One instance per plugin activation. */
 export class TaskBoard {
   private tasks: RouterTask[] = []
   private partitions: Record<string, PartitionRecord> = {}
+  /** Called after a row enters a settled state (see `SETTLED`). */
+  private readonly settleListeners: ((task: RouterTask, from: TaskState) => void)[] = []
 
   private constructor(
     private readonly file: string,
@@ -303,6 +361,7 @@ export class TaskBoard {
   async patch(id: string, change: Partial<RouterTask>): Promise<RouterTask> {
     const index = this.tasks.findIndex(task => task.id === id)
     if (index < 0) throw new Error(`host-router: unknown task ${id}`)
+    const previousState = this.tasks[index]!.state
     const updated: RouterTask = {
       ...this.tasks[index]!,
       ...change,
@@ -310,7 +369,30 @@ export class TaskBoard {
     }
     this.tasks = [...this.tasks.slice(0, index), updated, ...this.tasks.slice(index + 1)]
     await this.flush()
+    const from = previousState
+    if (SETTLED.has(updated.state) && !SETTLED.has(from)) {
+      for (const listener of this.settleListeners) {
+        try {
+          listener(updated, from)
+        } catch {
+          // A listener must never fail a board write.
+        }
+      }
+    }
     return updated
+  }
+
+  /**
+   * Run `listener` each time a row enters a settled state (done, verified,
+   * reported, failed, cancelled) from an unsettled one.
+   * @returns a function that removes the listener.
+   */
+  onSettled(listener: (task: RouterTask, from: TaskState) => void): () => void {
+    this.settleListeners.push(listener)
+    return () => {
+      const at = this.settleListeners.indexOf(listener)
+      if (at >= 0) this.settleListeners.splice(at, 1)
+    }
   }
 
   /** Merge a patch into one partition record and persist. */
