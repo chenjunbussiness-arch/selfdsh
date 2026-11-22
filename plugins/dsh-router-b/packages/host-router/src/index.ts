@@ -41,7 +41,7 @@
 
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 import {
   DEFAULT_CONTEXT_LIMIT,
@@ -69,6 +69,11 @@ import type { BridgeDeps, PublishResult, UiCredentialView } from './bridge.ts'
 import { randomUUID } from 'node:crypto'
 import { TIERS, TierStore, classifyTier, defaultTiers, isTier, managerRouteOf, normaliseManager, normaliseSettings } from './tier.ts'
 import { MemoryStore, entryOf, memoryBrief, renderTranscript, sessionRoster, workLine } from './memory.ts'
+import { DEFAULT_POLICY, OutletStore, classifyCommand, gitFacts, hostAllowed, pushableBranch, run, runShell } from './outlets.ts'
+import type { Approval, OutletKind, OutletMode } from './outlets.ts'
+import { createScmClient, envToken } from './scm.ts'
+import type { ScmClient } from './scm.ts'
+import { liveSegments } from './live.ts'
 import type { ModelOption, Tier, TierDecision, TierRoute } from './tier.ts'
 import type { ContentBlock, CredentialsServiceLike, LiveAgent, LlmRuntimeLike, PluginContext, SubagentActivation, ToolRunContext } from './types.ts'
 
@@ -162,6 +167,13 @@ function managerPrompt(input: {
     '  later phase early, and never wait to publish it "later": publish it now with its stage.',
     '- A worker may suspend itself (`task_suspend`) when it finds a missing prerequisite; the router then',
     '  creates the prerequisite as a sibling task and continues the suspended worker when it finishes.',
+    '- **Dispatch now, do not wait for approval**: start the workers as soon as the plan is clear; the human',
+    '  does not review plans. Stop and ask only when you are genuinely unsure: the request can be read two ways',
+    '  that build different things, or a step could destroy data that cannot be recovered. Then call',
+    `  \`task_control\` with action \`block\` on your own task "${input.taskId}" with the question as \`value\`, and end.`,
+    '- Code goes out through `git_publish` (push + pull request) and merges only through `pr_merge`, which',
+    '  waits for the human. Server changes go through `ops_run`. A worker that failed for a reason another',
+    '  partition or a stronger model would fix can be moved with `task_reassign` instead of a blind retry.',
     '',
     '- Keep a checklist with `todo_write`: before the first `route_task` write the split plan (one step per',
     '  worker plus a final consolidate step); update it each time you start a worker and each time a worker',
@@ -334,6 +346,7 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
    * next manager of that partition starts knowing what was done before.
    */
   const memory = await MemoryStore.open(join(boardDir, 'memory'), partitions.map(partition => partition.name))
+  const outlets = await OutletStore.open(boardDir)
   {
     // First boot with memory: the board already holds the partition's history.
     const byId = new Map(board.list().map(row => [row.id, row]))
@@ -1134,6 +1147,9 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
       } catch (error) {
         ctx.logger.warn(`host-router: manager route for ${task.id} unavailable: ${String(error)}`)
       }
+    } else if (task.routeOverride !== undefined) {
+      // A human picked the model (改派 / 换模型重跑).
+      route = { ...task.routeOverride }
     } else if (task.tier !== undefined && (tierStore.get().auto || task.tierSource === 'explicit')) {
       try {
         route = (await effectiveTiers())[task.tier]
@@ -2116,13 +2132,13 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
    * Tell the manager that owns a row, when that manager is still working, that a
    * human stopped the row, so it neither waits for it nor dispatches it again.
    */
-  const tellManager = async (task: RouterTask, reason: string | undefined): Promise<void> => {
+  const tellManager = async (task: RouterTask, reason: string | undefined, notice?: string): Promise<void> => {
     const parent = task.parentId === undefined ? undefined : board.get(task.parentId)
     if (parent === undefined || parent.level !== 'manager' || parent.sessionId === undefined) return
     if (parent.state !== 'running' && parent.state !== 'dispatched') return
     const sender = liveAgent(parent.dispatchFrom) ?? await ensureAnchor().catch(() => undefined)
     if (sender === undefined) return
-    const text = [
+    const text = notice ?? [
       `【系统通知】用户手动停止了你的子任务 ${task.id}「${task.subject}」${reason === undefined || reason.trim() === '' ? '' : `，原因：${reason.trim()}`}。`,
       '不要重新派发它，也不要再等它。其余子任务照常进行；汇总时说明这一项已被人工停止。',
     ].join('\n')
@@ -2469,6 +2485,554 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
     },
   }))
 
+  // --- Outlets: code host, server commands, headless browser ---------------------
+  //
+  // Each outlet call is checked against the partition's policy (outlets.ts). A call
+  // a human must see becomes an approval; the human's 同意 in the panel runs it once
+  // and the outcome goes back to the session that asked.
+
+  const policyOf = (partition: Partition, kind: OutletKind): OutletMode => {
+    if (kind === 'merge') return 'confirm'
+    return partition.outlets?.[kind] ?? DEFAULT_POLICY[kind]
+  }
+
+  /** The routed row whose session made this call, if any. */
+  const callerTask = (exec: ToolRunContext): RouterTask | undefined => {
+    const id = exec.agent?.session.id
+    return id === undefined ? undefined : board.list().find(task => task.sessionId === id)
+  }
+
+  /** Partition of an outlet call: the caller's row, else the explicit name. */
+  const outletPartition = (explicit: string | undefined, exec: ToolRunContext): Partition => {
+    const mine = callerTask(exec)
+    if (mine !== undefined) return partitionOf(mine)
+    return partitionForCall(explicit, exec)
+  }
+
+  const scmClients = new Map<string, ScmClient>()
+  // Test seam: a fake fetch for the code host. Never set in production config.
+  const scmFetch = (config as { scmFetch?: Parameters<typeof createScmClient>[2] }).scmFetch
+  const scmOf = (partition: Partition): ScmClient => {
+    const scm = partition.git?.scm
+    if (scm === undefined) throw new Error(`partition "${partition.name}" has no code host configured (git.scm)`)
+    let client = scmClients.get(partition.name)
+    if (client === undefined) {
+      client = createScmClient(scm, () => envToken(scm), ...scmFetch === undefined ? [] : [scmFetch])
+      scmClients.set(partition.name, client)
+    }
+    return client
+  }
+
+  /**
+   * Tell whoever is still working on a row what became of its outlet call: the
+   * worker itself while it runs, else its manager while that runs.
+   */
+  const notifyCaller = async (taskId: string | undefined, text: string): Promise<void> => {
+    const task = taskId === undefined ? undefined : board.get(taskId)
+    if (task === undefined) return
+    const live = (row: RouterTask): boolean => row.sessionId !== undefined && (row.state === 'running' || row.state === 'dispatched')
+    const target = live(task) ? task : task.parentId === undefined ? undefined : board.get(task.parentId)
+    if (target === undefined || !live(target)) return
+    const sender = liveAgent(target.dispatchFrom) ?? await ensureAnchor().catch(() => undefined)
+    if (sender === undefined) return
+    try {
+      await continueWorker(ctx.get('subagents')!, sender, target.sessionId!, text, AbortSignal.timeout(30_000))
+    } catch (error) {
+      ctx.logger.warn(`host-router: could not tell ${target.id} about an outlet result: ${String(error)}`)
+    }
+  }
+
+  /** Queue an approval and say so in the words the agent gets back. */
+  const askHuman = async (input: Omit<Approval, 'id' | 'state' | 'createdAt'>): Promise<string> => {
+    const approval = await outlets.request(input)
+    await publishSnapshot().catch(() => {})
+    return [
+      `需要人工确认：已提交确认单 ${approval.id}（${approval.action}）。`,
+      '用户在面板点「同意」后由路由执行一次，结果会发回你的会话（你已结束时发给你的 manager）。',
+      '不要重复提交，也不要换别的方式绕过这一步。可以先继续做不依赖它的部分。',
+    ].join('\n')
+  }
+
+  /** Commit the named paths (when asked), push the current branch, open or update its PR. */
+  const publishBranch = async (
+    partition: Partition,
+    args: { readonly title?: string; readonly body?: string; readonly draft?: boolean; readonly paths?: readonly string[]; readonly commit_message?: string },
+    taskId: string | undefined,
+  ): Promise<string> => {
+    const client = scmOf(partition)
+    const cwd = partition.dir
+    if (args.commit_message !== undefined && args.commit_message.trim() !== '') {
+      const paths = args.paths ?? []
+      if (paths.length === 0) throw new Error('commit_message needs the paths to commit (paths); the tree is shared, so nothing is added wholesale')
+      for (const path of paths) {
+        if (path.startsWith('-') || path.includes('..') || isAbsolute(path)) throw new Error(`path "${path}" must be relative to the partition and stay inside it`)
+      }
+      const added = await run('git', ['add', '--', ...paths], cwd)
+      if (added.code !== 0) throw new Error(`git add failed: ${added.stderr.trim()}`)
+      const committed = await run('git', ['commit', '-m', args.commit_message.trim()], cwd)
+      if (committed.code !== 0 && !/nothing to commit/.test(committed.stdout + committed.stderr)) {
+        throw new Error(`git commit failed: ${(committed.stderr || committed.stdout).trim()}`)
+      }
+    }
+    const facts = await gitFacts(cwd)
+    const base = await client.defaultBranch()
+    const refused = pushableBranch(facts.branch, base)
+    if (refused !== undefined) throw new Error(refused)
+    const remote = partition.git?.scm?.remote ?? 'origin'
+    const pushed = await run('git', ['push', '-u', remote, facts.branch], cwd, 180_000)
+    if (pushed.code !== 0) throw new Error(`git push failed: ${pushed.stderr.trim() || pushed.stdout.trim()}`)
+    let pr = await client.findOpen(facts.branch)
+    let verb = 'updated'
+    if (pr === undefined) {
+      const title = args.title?.trim() || (taskId === undefined ? facts.branch : board.get(taskId)?.subject ?? facts.branch)
+      pr = await client.open({ head: facts.branch, base, title, body: args.body ?? '', ...args.draft === true ? { draft: true } : {} })
+      verb = 'opened'
+    } else if ((args.title !== undefined && args.title.trim() !== '') || args.body !== undefined) {
+      pr = await client.update(pr.number, {
+        ...args.title !== undefined && args.title.trim() !== '' ? { title: args.title.trim() } : {},
+        ...args.body === undefined ? {} : { body: args.body },
+      })
+    }
+    if (taskId !== undefined && board.get(taskId) !== undefined) {
+      await board.patch(taskId, { pr: { number: pr.number, url: pr.url, provider: client.provider } })
+    }
+    await outlets.audit({ kind: 'git', partition: partition.name, ...taskId === undefined ? {} : { taskId }, action: `push ${facts.branch}; ${verb} PR #${String(pr.number)}`, target: pr.url, outcome: 'ran', by: 'agent' })
+    const dirty = facts.dirty.length === 0 ? '' : `\nnote: ${String(facts.dirty.length)} uncommitted path(s) stay local (not in the PR).`
+    return `pushed ${facts.branch} to ${remote}; ${verb} PR #${String(pr.number)} -> ${pr.base}: ${pr.url}${dirty}`
+  }
+
+  /** Merge one PR, refusing when its head moved since the human approved. */
+  const mergePull = async (partition: Partition, number: number, method: 'merge' | 'squash' | 'rebase', sha: string | undefined): Promise<string> => {
+    const client = scmOf(partition)
+    const pr = await client.get(number)
+    if (pr.state !== 'open') throw new Error(`PR #${String(number)} is ${pr.state}`)
+    if (sha !== undefined && pr.headSha !== sha) throw new Error(`PR #${String(number)} changed after it was approved (head ${pr.headSha.slice(0, 7)}, approved ${sha.slice(0, 7)}); ask again`)
+    const out = await client.merge(number, method, pr.headSha)
+    if (!out.merged) throw new Error(`not merged: ${out.message}`)
+    return `merged PR #${String(number)} (${method}) into ${pr.base}: ${pr.url}`
+  }
+
+  const screenshotCommand = config.screenshotCommand ?? '/srv/workspace/bin/screenshot'
+
+  /** Headless screenshot (or page text) of one URL, saved under the partition's artifacts. */
+  const capturePage = async (partition: Partition, url: string, mode: 'screenshot' | 'text', full: boolean, taskId: string | undefined): Promise<string> => {
+    let parsed: URL
+    try { parsed = new URL(url) } catch { throw new Error(`"${url}" is not a URL`) }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('only http(s) pages can be opened')
+    if (!hostAllowed(parsed.hostname, partition.outlets?.browserAllow)) {
+      throw new Error(`${parsed.hostname} is not in this partition's browser allowlist (outlets.browserAllow)`)
+    }
+    if (mode === 'text') {
+      const response = await fetch(parsed, { signal: AbortSignal.timeout(20_000), headers: { 'user-agent': 'dsh-router' } })
+      const html = await response.text()
+      const text = html
+        .replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/\s+/g, ' ')
+        .trim()
+      return `HTTP ${String(response.status)} ${parsed.href}\n${text.slice(0, 6000)}${text.length > 6000 ? '…' : ''}`
+    }
+    const dir = join(partition.dir, '.dsh-artifacts', taskId ?? 'manual')
+    await mkdir(dir, { recursive: true })
+    const out = join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, '-')}.png`)
+    const shot = await run(screenshotCommand, [parsed.href, out, ...full ? ['--full'] : []], partition.dir, 90_000)
+    if (shot.code !== 0) throw new Error(`screenshot failed: ${(shot.stderr || shot.stdout).trim()}`)
+    return out
+  }
+
+  /** Run one approved (or allowed) outlet action. */
+  const executeOutlet = async (approval: Approval): Promise<string> => {
+    const partition = partitions.find(entry => entry.name === approval.partition)
+    if (partition === undefined) throw new Error(`partition "${approval.partition}" is gone`)
+    const params = approval.params as Record<string, unknown>
+    switch (approval.kind) {
+      case 'merge':
+        return await mergePull(partition, Number(params['number']), (params['method'] as 'merge' | 'squash' | 'rebase' | undefined) ?? 'squash', params['sha'] as string | undefined)
+      case 'ops': {
+        const result = await runShell(String(params['command']), partition.dir, 300_000)
+        const text = [`exit ${String(result.code)}`, result.stdout.trim(), result.stderr.trim()].filter(part => part !== '').join('\n')
+        if (result.code !== 0) throw new Error(text)
+        return text
+      }
+      case 'git':
+        return await publishBranch(partition, params as Parameters<typeof publishBranch>[1], approval.taskId)
+      case 'browser':
+        return await capturePage(partition, String(params['url']), params['mode'] === 'text' ? 'text' : 'screenshot', params['full'] === true, approval.taskId)
+    }
+  }
+
+  /** A human's decision on one approval: run it once, or refuse it. */
+  const decideApproval = async (id: string, decision: 'approve' | 'reject', note: string | undefined): Promise<Approval> => {
+    await outlets.expire()
+    const approval = outlets.get(id)
+    if (approval === undefined) throw new BridgeError(404, 'not-found', `unknown approval "${id}"`)
+    if (approval.state !== 'pending') throw new Error(`${id} is already ${approval.state}`)
+    const base = { kind: approval.kind, partition: approval.partition, ...approval.taskId === undefined ? {} : { taskId: approval.taskId }, action: approval.action, target: approval.target }
+    const at = new Date().toISOString()
+    if (decision === 'reject') {
+      const rejected = await outlets.patch(id, { state: 'rejected', decidedAt: at, ...note === undefined ? {} : { note } })
+      await outlets.audit({ ...base, outcome: 'rejected', by: 'human', ...note === undefined ? {} : { detail: note } })
+      await notifyCaller(approval.taskId, `【系统通知】用户拒绝了确认单 ${id}（${approval.action}）${note === undefined ? '' : `，说明：${note}`}。不要再执行这一步，也不要换方式绕过；在汇报里说明。`)
+      await publishSnapshot().catch(() => {})
+      return rejected
+    }
+    await outlets.patch(id, { state: 'approved', decidedAt: at, ...note === undefined ? {} : { note } })
+    await outlets.audit({ ...base, outcome: 'approved', by: 'human', ...note === undefined ? {} : { detail: note } })
+    let settled: Approval
+    try {
+      const result = await executeOutlet(approval)
+      settled = await outlets.patch(id, { state: 'done', result: result.slice(0, 4000) })
+      await outlets.audit({ ...base, outcome: 'ran', by: 'router', detail: result })
+      await notifyCaller(approval.taskId, `【系统通知】确认单 ${id} 已获用户同意并执行：${approval.action}\n结果：${result.slice(0, 1500)}`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      settled = await outlets.patch(id, { state: 'failed', result: message.slice(0, 4000) })
+      await outlets.audit({ ...base, outcome: 'failed', by: 'router', detail: message })
+      await notifyCaller(approval.taskId, `【系统通知】确认单 ${id} 已获同意，但执行失败：${message.slice(0, 1500)}`)
+    }
+    await publishSnapshot().catch(() => {})
+    return settled
+  }
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'git_publish',
+    description: 'Publish committed work: push the current branch of this partition\'s checkout and open its pull '
+      + 'request (or update the open one). Optionally commit first: pass `commit_message` with the exact `paths` you '
+      + 'changed (the checkout is shared, so nothing is added wholesale). Refuses the default branch. Needs `git.scm` '
+      + 'on the partition. Returns the PR URL.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        title: { type: 'string', description: 'PR title (default: the task subject).' },
+        body: { type: 'string', description: 'PR description.' },
+        draft: { type: 'boolean', description: 'Open as a draft (GitHub).' },
+        commit_message: { type: 'string', description: 'Commit these paths first with this message.' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Paths to commit, relative to the partition root.' },
+        partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+      },
+    },
+    output: textOutput,
+    isConcurrencySafe: () => false,
+    async execute(raw, exec: ToolRunContext) {
+      const args = raw as { title?: string; body?: string; draft?: boolean; commit_message?: string; paths?: string[]; partition?: string }
+      const partition = outletPartition(args.partition, exec)
+      const task = callerTask(exec)
+      const mode = policyOf(partition, 'git')
+      if (mode === 'off') throw new Error(`git publishing is off for partition "${partition.name}"`)
+      scmOf(partition)
+      if (mode === 'confirm') {
+        return { text: await askHuman({ kind: 'git', partition: partition.name, ...task === undefined ? {} : { taskId: task.id }, action: `推送分支并开/更新 PR：${args.title ?? task?.subject ?? ''}`.trim(), target: partition.git!.scm!.repo, reason: args.body?.slice(0, 300) ?? '', reversible: true, params: args }) }
+      }
+      return { text: await publishBranch(partition, args, task?.id) }
+    },
+  }))
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'pr_status',
+    description: 'Read a pull request of this partition\'s repository: state, mergeability and CI checks (failing and '
+      + 'pending check names). Without `number` it reads the PR of the current branch.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        number: { type: 'integer', minimum: 1, description: 'PR number.' },
+        partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+      },
+    },
+    output: textOutput,
+    isConcurrencySafe: () => true,
+    async execute(raw, exec: ToolRunContext) {
+      const args = raw as { number?: number; partition?: string }
+      const partition = outletPartition(args.partition, exec)
+      const client = scmOf(partition)
+      const pr = args.number !== undefined
+        ? await client.get(args.number)
+        : await client.findOpen((await gitFacts(partition.dir)).branch)
+      if (pr === undefined) return { text: 'no open pull request for the current branch' }
+      const checks = await client.checks(pr.headSha)
+      return {
+        text: [
+          `PR #${String(pr.number)} ${pr.state}${pr.draft ? ' (draft)' : ''}: ${pr.title}`,
+          `${pr.head} -> ${pr.base} @ ${pr.headSha.slice(0, 7)}; mergeable: ${pr.mergeable === undefined ? 'unknown' : String(pr.mergeable)}`,
+          `checks: ${checks.state} (${String(checks.total)})`
+            + (checks.failing.length > 0 ? `; failing: ${checks.failing.join(', ')}` : '')
+            + (checks.pending.length > 0 ? `; pending: ${checks.pending.join(', ')}` : ''),
+          pr.url,
+        ].join('\n'),
+      }
+    },
+  }))
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'pr_merge',
+    description: 'Ask to merge a pull request. Never merges by itself: it files an approval the human sees in the panel; '
+      + 'on 同意 the router merges exactly the head it was shown (a later push voids it) and tells you the result.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['number', 'reason'],
+      properties: {
+        number: { type: 'integer', minimum: 1, description: 'PR number.' },
+        method: { type: 'string', enum: ['merge', 'squash', 'rebase'], description: 'Merge method (default squash).' },
+        reason: { type: 'string', description: 'Why it is ready: checks, review, what it changes.' },
+        partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+      },
+    },
+    output: textOutput,
+    isConcurrencySafe: () => false,
+    async execute(raw, exec: ToolRunContext) {
+      const args = raw as { number: number; method?: 'merge' | 'squash' | 'rebase'; reason: string; partition?: string }
+      const partition = outletPartition(args.partition, exec)
+      const task = callerTask(exec)
+      const client = scmOf(partition)
+      const pr = await client.get(args.number)
+      if (pr.state !== 'open') throw new Error(`PR #${String(pr.number)} is ${pr.state}`)
+      const checks = await client.checks(pr.headSha)
+      return {
+        text: await askHuman({
+          kind: 'merge', partition: partition.name, ...task === undefined ? {} : { taskId: task.id },
+          action: `合并 PR #${String(pr.number)}「${pr.title}」到 ${pr.base}（${args.method ?? 'squash'}）`,
+          target: pr.url,
+          reason: `${args.reason.trim()}\nCI：${checks.state}${checks.failing.length > 0 ? `，失败：${checks.failing.join('、')}` : ''}`,
+          reversible: false,
+          params: { number: pr.number, method: args.method ?? 'squash', sha: pr.headSha },
+        }),
+      }
+    },
+  }))
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'ops_run',
+    description: 'Run one command on the server, in the partition root, with its risk checked first. Read-only looks '
+      + '(logs, status, disk, nginx -t, curl -I) run at once; changes run and are logged; dangerous commands (restart '
+      + 'or stop a service, delete files, firewall, users, reboot, force-push) are not run: they become an approval '
+      + 'the human sees, and run once on 同意. Always give the reason.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['command', 'reason'],
+      properties: {
+        command: { type: 'string', description: 'Shell command line.' },
+        reason: { type: 'string', description: 'Why, and what you expect it to do.' },
+        partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+      },
+    },
+    output: textOutput,
+    isConcurrencySafe: () => false,
+    async execute(raw, exec: ToolRunContext) {
+      const args = raw as { command: string; reason: string; partition?: string }
+      const partition = outletPartition(args.partition, exec)
+      const task = callerTask(exec)
+      const mode = policyOf(partition, 'ops')
+      if (mode === 'off') throw new Error(`server commands are off for partition "${partition.name}"`)
+      const level = classifyCommand(args.command, partition.outlets?.danger)
+      const where = { partition: partition.name, ...task === undefined ? {} : { taskId: task.id } }
+      if (level === 'danger' || (mode === 'confirm' && level !== 'read')) {
+        return {
+          text: `[${level}] ${await askHuman({ kind: 'ops', ...where, action: `${level === 'danger' ? '危险' : '变更'}命令`, target: args.command, reason: args.reason, reversible: level !== 'danger', params: { command: args.command } })}`,
+        }
+      }
+      const result = await runShell(args.command, partition.dir, 300_000)
+      await outlets.audit({ kind: 'ops', ...where, action: `${level} command`, target: args.command, outcome: result.code === 0 ? 'ran' : 'failed', by: 'agent', detail: `exit ${String(result.code)}; ${args.reason}` })
+      return { text: [`[${level}] exit ${String(result.code)}`, result.stdout.trim(), result.stderr.trim()].filter(part => part !== '').join('\n') }
+    },
+  }))
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'browser_capture',
+    description: 'Open a page in a headless browser on the server and save a screenshot under the partition\'s '
+      + '`.dsh-artifacts/<task>/` (mode `screenshot`), or read the page as plain text (mode `text`). Use screenshots as '
+      + 'evidence for UI and site checks and list their paths in your report. Hosts may be limited per partition.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['url'],
+      properties: {
+        url: { type: 'string', description: 'http(s) URL.' },
+        mode: { type: 'string', enum: ['screenshot', 'text'], description: 'Default screenshot.' },
+        full: { type: 'boolean', description: 'Whole page instead of the first screen.' },
+        partition: { type: 'string', description: 'Partition, when the caller is not a routed task.' },
+      },
+    },
+    output: textOutput,
+    isConcurrencySafe: () => true,
+    async execute(raw, exec: ToolRunContext) {
+      const args = raw as { url: string; mode?: 'screenshot' | 'text'; full?: boolean; partition?: string }
+      const partition = outletPartition(args.partition, exec)
+      const task = callerTask(exec)
+      const mode = policyOf(partition, 'browser')
+      if (mode === 'off') throw new Error(`the browser is off for partition "${partition.name}"`)
+      if (mode === 'confirm') {
+        return { text: await askHuman({ kind: 'browser', partition: partition.name, ...task === undefined ? {} : { taskId: task.id }, action: `无头浏览器打开页面（${args.mode ?? 'screenshot'}）`, target: args.url, reason: '', reversible: true, params: args }) }
+      }
+      const out = await capturePage(partition, args.url, args.mode ?? 'screenshot', args.full === true, task?.id)
+      await outlets.audit({ kind: 'browser', partition: partition.name, ...task === undefined ? {} : { taskId: task.id }, action: args.mode ?? 'screenshot', target: args.url, outcome: 'ran', by: 'agent' })
+      return { text: out }
+    },
+  }))
+
+  // --- 改派 / 换模型, live output, batch ------------------------------------------
+
+  /**
+   * Move a task's work to another partition and/or model. The old row stops (if
+   * it still runs) and points at the new one; the new row keeps the parent, the
+   * stage and the prerequisites, and every row that waited on the old one now
+   * waits on the new one. With `keepProgress` the new worker's brief carries what
+   * the old one did and its last output; without it, only the original request.
+   */
+  const reassignTask = async (input: {
+    readonly taskId: string
+    readonly partition?: string
+    readonly model?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+    readonly keepProgress: boolean
+    readonly note?: string
+  }, caller?: LiveAgent): Promise<{ readonly from: string; readonly to: string; readonly partition: string; readonly text: string }> => {
+    const task = board.get(input.taskId)
+    if (task === undefined) throw new Error(`unknown task "${input.taskId}"`)
+    if (task.reassignedTo !== undefined) throw new Error(`${task.id} was already reassigned to ${task.reassignedTo}`)
+    const target = input.partition === undefined ? partitionOf(task) : partitions.find(entry => entry.name === input.partition)
+    if (target === undefined) throw new Error(`unknown partition "${input.partition ?? ''}"`)
+    if (input.model !== undefined) {
+      const known = await cachedModelOptions().catch(() => [] as ModelOption[])
+      if (known.length > 0 && !known.some(option => option.provider === input.model!.provider && option.model === input.model!.model)) {
+        throw new Error(`model ${input.model.provider}/${input.model.model} is not offered by the runtime`)
+      }
+    }
+    if (target.name === task.partition && input.model === undefined && !input.keepProgress) {
+      // Same place, same model, from scratch: that is a retry, which keeps the row.
+      throw new Error('nothing to change: pick another partition or model, or use retry')
+    }
+    const wasOpen = !SETTLED.has(task.state)
+    let transcript: string[] = []
+    if (input.keepProgress && task.sessionId !== undefined) {
+      transcript = renderTranscript(await readLog(task.sessionId), 10, 500)
+    }
+    const why = input.note ?? task.error ?? (wasOpen ? '人工改派' : undefined)
+    const lines = [
+      task.body,
+      '',
+      `--- 改派说明（原任务 ${task.id}，${task.partition}${task.model === undefined ? '' : ` / ${task.model}`}）---`,
+      ...why === undefined ? [] : [`原因：${why}`],
+    ]
+    if (input.keepProgress) {
+      lines.push(
+        ...task.summary === undefined ? [] : [`上一个 worker 已做：${task.summary}`],
+        ...task.touched === undefined || task.touched.length === 0 ? [] : [`它改过的文件：${task.touched.join('、')}`],
+        ...task.left === undefined ? [] : [`它留下没做的：${task.left}`],
+        ...transcript.length === 0 ? [] : ['它最后的输出：', ...transcript],
+        '接着它的进度继续：先检查上面这些文件的现状再动手，不要从头重做已经完成的部分。',
+      )
+    } else {
+      lines.push('从头开始做，不要沿用上一个 worker 的改动结论（先看文件现状）。')
+    }
+    if (wasOpen) await stopRow(task, `改派${why === undefined ? '' : `：${why}`}`, false)
+    const created = await enqueue(
+      {
+        text: lines.join('\n'),
+        subject: task.subject,
+        priority: task.priority,
+        ...task.parentId === undefined ? {} : { parent_task: task.parentId },
+        ...task.dependsOn === undefined ? {} : { depends_on: task.dependsOn },
+        ...task.stage === undefined ? {} : { stage: task.stage },
+      },
+      { partition: target, reason: 'explicit', because: [`reassigned from ${task.id}`] },
+      task.level === 'manager' && target.managerEnabled ? 'manager' : 'worker',
+      caller ?? liveAgent(task.dispatchFrom) ?? lastCaller,
+    )
+    await board.patch(created.id, {
+      reassignedFrom: task.id,
+      ...input.model === undefined ? {} : { routeOverride: input.model, tierSource: 'explicit', tierReason: `换模型：${input.model.model}` },
+    })
+    await board.patch(task.id, { reassignedTo: created.id, ...wasOpen ? {} : {} })
+    // Rows that waited on the old task now wait on the new one.
+    for (const row of board.list()) {
+      if (row.id === created.id || row.dependsOn === undefined || !row.dependsOn.includes(task.id)) continue
+      await board.patch(row.id, { dependsOn: row.dependsOn.map(id => id === task.id ? created.id : id) })
+    }
+    const parentAgent = caller ?? liveAgent(task.dispatchFrom) ?? lastCaller ?? await ensureAnchor().catch(() => undefined)
+    await pump(target.name, parentAgent)
+    const moved = `${task.id} -> ${created.id}（${target.name}${input.model === undefined ? '' : ` / ${input.model.model}`}，${input.keepProgress ? '接着做' : '从头来'}）`
+    await tellManager(task, undefined, `【系统通知】你的子任务 ${task.id}「${task.subject}」被改派为 ${created.id}（${target.name}${input.model === undefined ? '' : `，模型 ${input.model.model}`}）。不要再等 ${task.id}，改为等 ${created.id}；不要重复派发。`)
+    await afterChange().catch(() => {})
+    await publishSnapshot().catch(() => {})
+    return { from: task.id, to: created.id, partition: target.name, text: `reassigned ${moved}` }
+  }
+
+  /** One action over many rows, each reported on its own. */
+  const BATCH_ACTIONS: ReadonlySet<string> = new Set(['cancel', 'cancel_tree', 'retry', 'suspend', 'resume', 'reassign'])
+  const batchControl = async (taskIds: readonly string[], action: string, value: string | undefined): Promise<{
+    readonly ok: number
+    readonly failed: number
+    readonly results: readonly { readonly id: string; readonly ok: boolean; readonly state?: string; readonly error?: string }[]
+  }> => {
+    if (!BATCH_ACTIONS.has(action)) throw new BridgeError(400, 'bad-request', `action must be one of ${[...BATCH_ACTIONS].join(', ')}`)
+    const results: { id: string; ok: boolean; state?: string; error?: string }[] = []
+    for (const id of taskIds) {
+      try {
+        if (action === 'reassign') {
+          const out = await reassignTask({ taskId: id, ...value === undefined || value === '' ? {} : { partition: value }, keepProgress: true })
+          results.push({ id, ok: true, state: `→ ${out.to}` })
+        } else if (action === 'suspend') {
+          const out = await controlFromPanel(id, 'suspend', value ?? '批量挂起')
+          results.push({ id, ok: true, state: out.state })
+        } else {
+          const out = await controlFromPanel(id, action, value)
+          results.push({ id, ok: true, state: out.state })
+        }
+      } catch (error) {
+        results.push({ id, ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return { ok: results.filter(row => row.ok).length, failed: results.filter(row => !row.ok).length, results }
+  }
+
+  /** A worker's live output since segment `after`. */
+  const liveOutput = async (taskId: string, after: number): Promise<unknown> => {
+    const task = board.get(taskId)
+    if (task === undefined) throw new BridgeError(404, 'not-found', `unknown task "${taskId}"`)
+    const base = { taskId: task.id, state: task.state, at: Date.now() }
+    if (task.sessionId === undefined) return { ...base, segments: [] }
+    const events = await readLog(task.sessionId)
+    return { ...base, sessionId: task.sessionId, segments: liveSegments(events, after, 80) }
+  }
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'task_reassign',
+    description: 'Move a task to another partition and/or model instead of retrying it blindly. The old row stops '
+      + 'and points at the new one; the new row keeps the parent, stage and prerequisites. `keep_progress` (default '
+      + 'true) hands the new worker what the old one did and its last output; false starts from the request alone.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['task_id'],
+      properties: {
+        task_id: { type: 'string' },
+        partition: { type: 'string', description: 'Target partition (default: the same).' },
+        provider: { type: 'string', description: 'Model provider, with `model`.' },
+        model: { type: 'string', description: 'Model id to run on.' },
+        reasoning_effort: { type: 'string' },
+        keep_progress: { type: 'boolean' },
+        note: { type: 'string', description: 'Why it moves.' },
+      },
+    },
+    output: textOutput,
+    isConcurrencySafe: () => false,
+    async execute(raw, exec: ToolRunContext) {
+      const args = raw as { task_id: string; partition?: string; provider?: string; model?: string; reasoning_effort?: string; keep_progress?: boolean; note?: string }
+      if ((args.provider === undefined) !== (args.model === undefined)) throw new Error('pass provider and model together')
+      const out = await reassignTask({
+        taskId: args.task_id,
+        ...args.partition === undefined ? {} : { partition: args.partition },
+        ...args.provider === undefined || args.model === undefined ? {} : { model: { provider: args.provider, model: args.model, ...args.reasoning_effort === undefined ? {} : { reasoningEffort: args.reasoning_effort } } },
+        keepProgress: args.keep_progress !== false,
+        ...args.note === undefined ? {} : { note: args.note },
+      }, exec.agent)
+      return { text: out.text }
+    },
+  }))
+
   ctx.effect(() => ctx.tools.register({
     name: 'task_control',
     description: 'Change one task: `cancel` interrupts its worker and marks it cancelled; `cancel_tree` '
@@ -2740,6 +3304,17 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
         if (error instanceof FileListError) throw new BridgeError(error.status, error.code, error.message)
         throw error
       }
+    },
+    desk: {
+      approvals: async () => {
+        await outlets.expire()
+        return { pending: outlets.pending(), recent: outlets.list().filter(item => item.state !== 'pending').slice(0, 30) }
+      },
+      decide: (id, decision, note) => decideApproval(id, decision, note),
+      audit: async limit => ({ entries: await outlets.recentAudit(limit) }),
+      live: (taskId, after) => liveOutput(taskId, after),
+      reassign: input => reassignTask(input),
+      batch: (taskIds, action, value) => batchControl(taskIds, action, value),
     },
     memory: {
       read: async (name) => {

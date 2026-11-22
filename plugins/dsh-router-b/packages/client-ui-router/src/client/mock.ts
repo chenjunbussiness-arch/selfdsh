@@ -12,6 +12,7 @@
  */
 
 import type {
+  ApprovalView, LiveSegmentView, ModelChoiceView,
   ArtifactRef, BoardSnapshot, CredentialView, DemandView, ManagerView, PartitionView, PublishResult,
   TaskState, TaskView, TodoItem, WorkerPresence, WorkerView,
 } from './contract.ts'
@@ -211,6 +212,100 @@ const seedTasks = (): TaskView[] => [
   },
 ]
 
+/** Ops-flavoured rows: a PR waiting to merge, a failed transcode, and a 改派 pair. */
+const deskTasks = (): TaskView[] => [
+  {
+    id: 'task-010',
+    title: '给站点加订阅页并开 PR',
+    partitionId: 'deepseek-harness',
+    state: 'reported',
+    hostState: 'reported',
+    requestedAt: at(70),
+    updatedAt: at(6),
+    reportedAt: at(6),
+    attempt: 1,
+    pr: { number: 41, url: 'https://code.example/site/web/pull/41', provider: 'github' },
+    todos: [],
+  },
+  {
+    id: 'task-011',
+    title: '把本周视频转码成 webm 并截封面',
+    partitionId: 'slidecraft',
+    state: 'rejected',
+    hostState: 'failed',
+    requestedAt: at(55),
+    updatedAt: at(12),
+    attempt: 1,
+    error: 'ffmpeg: codec not found (libvpx-vp9)',
+    todos: [],
+  },
+  {
+    id: 'task-012',
+    title: '续签 nginx 证书并重载',
+    partitionId: 'rca-ab-test',
+    state: 'running',
+    hostState: 'running',
+    requestedAt: at(9),
+    updatedAt: at(1),
+    attempt: 1,
+    workerSessionId: 'ses_ops1',
+    model: 'claude-opus-5.5',
+    reassignedFrom: 'task-009',
+    todos: [todo('certbot renew --dry-run', 'completed'), todo('nginx -t', 'in_progress'), todo('systemctl reload nginx', 'pending')],
+  },
+  {
+    id: 'task-009',
+    title: '续签 nginx 证书并重载',
+    partitionId: 'deepseek-harness',
+    state: 'rejected',
+    hostState: 'cancelled',
+    requestedAt: at(30),
+    updatedAt: at(10),
+    attempt: 1,
+    reassignedTo: 'task-012',
+    error: '改派：这台机器上没有 certbot',
+    todos: [],
+  },
+]
+
+const seedApprovals = (): ApprovalView[] => [
+  {
+    id: 'ap-merge41', kind: 'merge', partition: 'deepseek-harness', taskId: 'task-010',
+    action: '合并 PR #41「给站点加订阅页」到 main（squash）', target: 'https://code.example/site/web/pull/41',
+    reason: '页面和表单校验都做完了，本地截图检查过\nCI：success', reversible: false, state: 'pending', createdAt: at(5),
+  },
+  {
+    id: 'ap-ops7', kind: 'ops', partition: 'rca-ab-test', taskId: 'task-012',
+    action: '危险命令', target: 'systemctl restart nginx',
+    reason: 'reload 后旧 worker 没退出，需要重启一次让新证书生效', reversible: false, state: 'pending', createdAt: at(1),
+  },
+]
+
+const seedRecent = (): ApprovalView[] => [
+  {
+    id: 'ap-ops6', kind: 'ops', partition: 'rca-ab-test', taskId: 'task-012',
+    action: '变更命令', target: 'certbot renew --cert-name example.com', reason: '证书 9 天后到期',
+    reversible: true, state: 'done', createdAt: at(8), decidedAt: at(7), result: 'exit 0\nCongratulations, all renewals succeeded',
+  },
+]
+
+const liveSample = (): LiveSegmentView[] => {
+  const now = Date.now()
+  return [
+    { seq: 3, kind: 'message', title: 'assistant', body: '先 dry-run 确认证书能续上，再检查 nginx 配置。', error: false, at: now - 300_000 },
+    { seq: 4, kind: 'command', title: 'ops_run: certbot renew --dry-run', body: 'Simulating renewal of an existing certificate for example.com\nCongratulations, all simulated renewals succeeded', error: false, at: now - 280_000 },
+    { seq: 6, kind: 'command', title: 'ops_run: nginx -t', body: 'nginx: [emerg] unknown directive "ssl_stapling_verifyy" in /etc/nginx/conf.d/site.conf:21\nnginx: configuration file /etc/nginx/nginx.conf test failed', error: true, at: now - 120_000 },
+    { seq: 8, kind: 'command', title: 'edit: /etc/nginx/conf.d/site.conf', body: '- ssl_stapling_verifyy on;\n+ ssl_stapling_verify on;', error: false, at: now - 60_000 },
+    { seq: 10, kind: 'command', title: 'ops_run: nginx -t', body: '', error: false, at: now - 5_000, running: true },
+  ]
+}
+
+const sampleModels: ModelChoiceView[] = [
+  { provider: 'kiro', providerName: 'Kiro', model: 'claude-opus-5.5', name: 'Claude Opus 5.5', efforts: ['high', 'max'] },
+  { provider: 'kiro', providerName: 'Kiro', model: 'claude-sonnet-5.5', name: 'Claude Sonnet 5.5' },
+  { provider: 'deepseek', providerName: 'DeepSeek', model: 'deepseek-chat', name: 'DeepSeek Chat' },
+]
+
 /** Sample demands; one is still waiting for routing. */
 const seedDemands = (): DemandView[] => [
   {
@@ -250,8 +345,10 @@ const LANE_OF: Record<TaskState, string> = {
  * @returns a BoardSource backed by module state, safe to publish and verify against.
  */
 export function createMockSource(): BoardSource {
-  let tasks = seedTasks()
+  let tasks = [...seedTasks(), ...deskTasks()]
   let demands = seedDemands()
+  let approvals = seedApprovals()
+  let recent = seedRecent()
 
   const snapshot = (): BoardSnapshot => ({
     fetchedAt: new Date().toISOString(),
@@ -318,6 +415,53 @@ export function createMockSource(): BoardSource {
       tasks = tasks.map(task => task.id !== taskId ? task : {
         ...task, state: 'running' as const, hostState: 'running' as const, resumeNote: undefined, updatedAt: new Date().toISOString(),
       })
+    },
+    async readApprovals() {
+      return { pending: approvals, recent }
+    },
+    async decideApproval(id, decision, note) {
+      const item = approvals.find(entry => entry.id === id)
+      if (item === undefined) throw new Error(`unknown approval "${id}"`)
+      const decided: ApprovalView = {
+        ...item, decidedAt: new Date().toISOString(), ...(note === undefined ? {} : { note }),
+        ...(decision === 'approve' ? { state: 'done' as const, result: '（示例数据）已执行' } : { state: 'rejected' as const }),
+      }
+      approvals = approvals.filter(entry => entry.id !== id)
+      recent = [decided, ...recent]
+      return decided
+    },
+    async readAudit() {
+      return []
+    },
+    async readLive(taskId, after = -1) {
+      const task = tasks.find(entry => entry.id === taskId)
+      const segments = task?.state === 'running' ? liveSample() : []
+      return { taskId, state: task?.hostState ?? task?.state ?? 'unknown', at: Date.now(), segments: segments.filter(segment => segment.seq > after || segment.running === true) }
+    },
+    async listModels() {
+      return sampleModels
+    },
+    async reassign(input) {
+      const old = tasks.find(entry => entry.id === input.taskId)
+      if (old === undefined) throw new Error(`unknown task "${input.taskId}"`)
+      const to = `task-${String(tasks.length + 1).padStart(3, '0')}`
+      const now = new Date().toISOString()
+      const partitionId = input.partition ?? old.partitionId
+      tasks = [
+        { ...old, id: to, partitionId, state: 'queued', hostState: 'queued', updatedAt: now, requestedAt: now, reassignedFrom: old.id, reassignedTo: undefined, error: undefined, ...(input.model === undefined ? {} : { model: input.model.model }) },
+        ...tasks.map(entry => entry.id !== old.id ? entry : { ...entry, reassignedTo: to, state: 'rejected' as const, hostState: 'cancelled' as const }),
+      ]
+      return { from: old.id, to, partition: partitionId, text: `reassigned ${old.id} -> ${to}` }
+    },
+    async batch(taskIds, action) {
+      const results = taskIds.map((id) => {
+        const found = tasks.some(entry => entry.id === id)
+        return found ? { id, ok: true, state: action } : { id, ok: false, error: `unknown task "${id}"` }
+      })
+      if (action === 'cancel' || action === 'cancel_tree') {
+        tasks = tasks.map(entry => !taskIds.includes(entry.id) ? entry : { ...entry, state: 'rejected' as const, hostState: 'cancelled' as const })
+      }
+      return { ok: results.filter(entry => entry.ok).length, failed: results.filter(entry => !entry.ok).length, results }
     },
     subscribe() {
       return () => {}

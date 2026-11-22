@@ -1601,9 +1601,9 @@ export const BOARD_PALETTE = {
       id: '#8c9199',
     },
     running: {
-      dot: { hex: '#4176e6', from: 'state-business-primary (deepseek-500)' },
-      text: { hex: '#4868b2', from: 'deepseek-600' },
-      bg: { hex: '#edf3fe', from: 'deepseek-50' },
+      dot: { hex: '#0071e3', from: 'accent (light)' },
+      text: { hex: '#0060c0', from: 'accent 85% + label-primary (≥4.5:1 on white)' },
+      bg: { hex: '#eaf3fe', from: 'accent 8% on white' },
     },
     blocked: {
       dot: { hex: '#b0740e', from: 'state-warn-primary (amber-500) 70% + label-primary' },
@@ -1637,9 +1637,9 @@ export const BOARD_PALETTE = {
       id: '#8f9398',
     },
     running: {
-      dot: { hex: '#7aaaff', from: 'state-business-primary (deepseek-400)' },
-      text: { hex: '#b7c8fe', from: 'deepseek-300' },
-      bg: { hex: '#222935', from: 'deepseek-900 70% + bg-base' },
+      dot: { hex: '#2997ff', from: 'accent (dark)' },
+      text: { hex: '#8ec5ff', from: 'accent 55% + white (≥4.5:1 on the dark base)' },
+      bg: { hex: '#14273d', from: 'accent 16% on the dark base' },
     },
     blocked: {
       dot: { hex: '#f7ad31', from: 'amber-400' },
@@ -1669,16 +1669,10 @@ export type BoardTone = 'running' | 'blocked' | 'done' | 'failed' | 'cancelled'
 
 const BOARD_TONES: readonly BoardTone[] = ['running', 'blocked', 'done', 'failed', 'cancelled']
 
-/** Declarations for one theme: `--st-<tone>-<tier>` plus the row surfaces. */
+/** Declarations for one theme: `--st-<tone>-<tier>`. */
 function boardVars(theme: 'light' | 'dark'): string {
   const set = BOARD_PALETTE[theme]
-  const lines = [
-    `--c-hover:${set.surface.hover}`,
-    `--c-press:${set.surface.press}`,
-    `--c-ghost-line:${set.surface.ghostLine}`,
-    `--c-meta:${set.surface.meta}`,
-    `--c-id:${set.surface.id}`,
-  ]
+  const lines: string[] = []
   for (const tone of BOARD_TONES) {
     for (const tier of ['dot', 'text', 'bg'] as const) lines.push(`--st-${tone}-${tier}:${set[tone][tier].hex}`)
   }
@@ -1686,11 +1680,48 @@ function boardVars(theme: 'light' | 'dark'): string {
 }
 
 /**
- * Board design tokens as CSS: light on `.dshrc`, dark when the host sets
- * `body[data-ds-dark-theme]` (the attribute the host theme keys its own dark
- * palette on). Spacing sits on a 4px grid; see DESIGN-NOTES.md.
+ * Neutral surfaces, type and depth of one theme. A quiet, product-page look:
+ * white (or near-black) canvas, one pale grey for grouped surfaces, hairline
+ * dividers, a single blue accent, soft two-layer shadows and generous radii.
+ * Colours are this plugin's own (not the host's), so the panel looks the same
+ * wherever it is docked and can be switched independently of the host.
+ */
+export const UI_THEME = {
+  light: {
+    bg: '#ffffff', surface: '#f5f5f7', raised: '#ffffff', text: '#1d1d1f', text2: '#424245', meta: '#6e6e73', id: '#86868b',
+    line: 'rgba(0,0,0,.1)', lineSoft: 'rgba(0,0,0,.06)', pill: '#e8e8ed', hover: 'rgba(0,0,0,.04)', press: 'rgba(0,0,0,.08)',
+    ghostLine: 'rgba(0,0,0,.18)', accent: '#0071e3', accentHover: '#0077ed', onAccent: '#ffffff',
+    shadow1: '0 1px 2px rgba(0,0,0,.04),0 2px 10px rgba(0,0,0,.05)', shadow2: '0 12px 40px rgba(0,0,0,.14),0 2px 8px rgba(0,0,0,.06)',
+    scrim: 'rgba(0,0,0,.28)', code: '#f5f5f7',
+  },
+  dark: {
+    bg: '#161617', surface: '#1d1d1f', raised: '#242426', text: '#f5f5f7', text2: '#d2d2d7', meta: '#a1a1a6', id: '#86868b',
+    line: 'rgba(255,255,255,.12)', lineSoft: 'rgba(255,255,255,.07)', pill: '#2c2c2e', hover: 'rgba(255,255,255,.06)', press: 'rgba(255,255,255,.1)',
+    ghostLine: 'rgba(255,255,255,.22)', accent: '#2997ff', accentHover: '#47a6ff', onAccent: '#ffffff',
+    shadow1: '0 1px 2px rgba(0,0,0,.5),0 2px 10px rgba(0,0,0,.35)', shadow2: '0 16px 48px rgba(0,0,0,.6),0 2px 8px rgba(0,0,0,.4)',
+    scrim: 'rgba(0,0,0,.5)', code: '#0f0f10',
+  },
+} as const
+
+function uiVars(theme: 'light' | 'dark'): string {
+  const u = UI_THEME[theme]
+  return [
+    `--c-bg:${u.bg}`, `--c-surface:${u.surface}`, `--c-raised:${u.raised}`, `--c-text:${u.text}`, `--c-text2:${u.text2}`,
+    `--c-meta:${u.meta}`, `--c-text3:${u.meta}`, `--c-id:${u.id}`, `--c-line:${u.line}`, `--c-line-soft:${u.lineSoft}`,
+    `--c-pill:${u.pill}`, `--c-hover:${u.hover}`, `--c-press:${u.press}`, `--c-ghost-line:${u.ghostLine}`,
+    `--c-accent:${u.accent}`, `--c-accent-hover:${u.accentHover}`, `--c-on-accent:${u.onAccent}`, `--c-focus:${u.accent}`,
+    `--shadow-1:${u.shadow1}`, `--shadow-2:${u.shadow2}`, `--c-scrim:${u.scrim}`, `--c-code:${u.code}`,
+    `color-scheme:${theme}`,
+  ].join(';')
+}
+
+/**
+ * Board design tokens as CSS, shared by the board, the workspace page and the
+ * desk (approvals, live output, 改派, batch). Light on `.dshrc`, dark on
+ * `.dshrc[data-theme="dark"]`; the root's `data-theme` comes from theme.tsx
+ * (跟随系统 / 白天 / 黑夜). Spacing sits on a 4px grid.
  */
 export const BOARD_TOKENS_CSS = `
-.dshrc{${boardVars('light')};--sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--h-ctl:28px;--r-ctl:6px;--h-row:44px;--h-sub:36px}
-body[data-ds-dark-theme] .dshrc{${boardVars('dark')}}
+.dshrc{${uiVars('light')};${boardVars('light')};--sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:24px;--h-ctl:28px;--r-ctl:8px;--r-card:14px;--r-pill:999px;--h-row:44px;--h-sub:36px;--ease:cubic-bezier(.25,.1,.25,1);--dur:.2s;--f-ui:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Helvetica Neue",Arial,sans-serif;--f-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-family:var(--f-ui);-webkit-font-smoothing:antialiased}
+.dshrc[data-theme="dark"]{${uiVars('dark')};${boardVars('dark')}}
 `
