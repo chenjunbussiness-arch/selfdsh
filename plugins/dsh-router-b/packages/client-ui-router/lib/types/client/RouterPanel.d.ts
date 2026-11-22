@@ -70,6 +70,6 @@ export declare const RAIL_STORAGE_KEY = "dshr.rail.open";
  * @param props - controller, translate, and the panel's outward actions.
  * @returns the rail and the task column.
  */
-export declare function RouterPanel(props: RouterPanelProps): import("react/jsx-runtime").JSX.Element;
+export declare function RouterPanel(props: RouterPanelProps): import("react").JSX.Element;
 /** Re-exported so a caller can compute the same progress the rows show. */
 export { todoProgress };

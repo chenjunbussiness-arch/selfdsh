@@ -4470,9 +4470,10 @@ function WorkspacePage({ controller, t, onOpenSession }) {
   }, [controller]);
   (0, import_react7.useEffect)(() => {
     if (partitionId === void 0 || !controller.canListFiles) return;
+    if (partitions2.find((partition) => partition.id === partitionId)?.quick === true) return;
     if (dirs.has(dirKey(partitionId, ""))) return;
     void loadDir(partitionId, "");
-  }, [partitionId, dirs, loadDir, controller]);
+  }, [partitionId, partitions2, dirs, loadDir, controller]);
   const [memory, setMemory] = (0, import_react7.useState)(null);
   const [noteText, setNoteText] = (0, import_react7.useState)("");
   const [noteBusy, setNoteBusy] = (0, import_react7.useState)(false);
@@ -4617,7 +4618,7 @@ function WorkspacePage({ controller, t, onOpenSession }) {
               partition.name,
               partition.enabled === false ? ` \xB7 ${t("ws.disabled")}` : ""
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-pp", children: partition.path ?? partition.repo ?? "" })
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-pp", children: partition.quick === true ? t("ws.quickHint") : partition.path ?? partition.repo ?? "" })
           ] }),
           worst !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-badge", "data-tone": worst, title: problems2.map((problem) => problem.message).join("\n"), children: "!" }),
           running > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-badge", "data-tone": "running", children: running })
@@ -4802,7 +4803,7 @@ function WorkspacePage({ controller, t, onOpenSession }) {
         /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-cap", children: t("ws.partitions") }),
         /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-parts", children: partitions2.map(partitionRow) }),
         /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-cap", children: current.name }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-tree", role: "tree", "aria-label": current.name, children: controller.canListFiles ? dirBody(current.id, "", 0) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", children: t("ws.notWired") }) })
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-tree", role: "tree", "aria-label": current.name, children: current.quick === true ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", children: t("ws.quickNoFiles") }) : controller.canListFiles ? dirBody(current.id, "", 0) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", children: t("ws.notWired") }) })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dshws-right", children: [
         /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("section", { className: "dshws-sec", children: [
@@ -4811,7 +4812,7 @@ function WorkspacePage({ controller, t, onOpenSession }) {
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dt", { children: t("ws.root") }),
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dd", { children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("code", { children: current.path ?? current.repo ?? "" }) }),
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dt", { children: t("ws.include") }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dd", { children: include === void 0 || include.length === 1 && include[0] === "**" ? t("ws.all") : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-globs", children: include.map((glob) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-glob", children: glob }, glob)) }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dd", { children: include === void 0 || include.length === 1 && include[0] === "**" ? t("ws.all") : include.length === 0 ? t("ws.none") : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-globs", children: include.map((glob) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-glob", children: glob }, glob)) }) }),
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dt", { children: t("ws.exclude") }),
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dd", { children: exclude === void 0 || exclude.length === 0 ? t("ws.none") : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-globs", children: exclude.map((glob) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-glob", children: glob }, glob)) }) })
           ] }),
@@ -4823,7 +4824,11 @@ function WorkspacePage({ controller, t, onOpenSession }) {
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("section", { className: "dshws-sec", children: [
           /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h3", { children: t("ws.rules") }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("ol", { className: "dshws-rules", children: [
+          current.quick === true ? /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("ol", { className: "dshws-rules", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.quickRule1") }),
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.quickRule2") }),
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.quickRule3") })
+          ] }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("ol", { className: "dshws-rules", children: [
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.rule1") }),
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.rule2") }),
             /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.rule3") })
@@ -5637,6 +5642,11 @@ var zh = {
   "ws.mem.state.cancelled": "\u5DF2\u505C\u6B62",
   "ws.refresh": "\u5237\u65B0",
   "ws.disabled": "\u5DF2\u505C\u7528",
+  "ws.quickHint": "\u5DE5\u4F5C\u533A\u5916\u7684\u5C0F\u6D3B \xB7 \u5FEB\u6A21\u578B",
+  "ws.quickNoFiles": "\u5FEB\u4EFB\u52A1\u4E0D\u5C5E\u4E8E\u4EFB\u4F55\u5DE5\u4F5C\u533A\uFF0C\u6CA1\u6709\u81EA\u5DF1\u7684\u6587\u4EF6\u3002",
+  "ws.quickRule1": "\u6BCF\u4E2A\u5FEB\u4EFB\u52A1\u6D3E\u4E00\u4E2A\u5FEB\u6A21\u578B worker \u76F4\u63A5\u505A\uFF0C\u4E0D\u7ECF\u8FC7 manager\uFF0C\u4E5F\u4E0D\u5360\u5DE5\u4F5C\u533A\u7684\u540D\u989D",
+  "ws.quickRule2": "\u4E0D\u6539\u5DE5\u4F5C\u533A\u91CC\u7684\u9879\u76EE\u4EE3\u7801\uFF1B\u505A\u7740\u53D1\u73B0\u662F\u9879\u76EE\u7684\u6D3B\uFF0C\u4F1A\u505C\u4E0B\u6765\u8BF4\u660E",
+  "ws.quickRule3": "\u91CD\u542F\u670D\u52A1\u3001\u5220\u6587\u4EF6\u3001\u6539\u9632\u706B\u5899\u8FD9\u7C7B\u5371\u9669\u547D\u4EE4\u8D70\u786E\u8BA4\u5355\uFF0C\u4F60\u70B9\u540C\u610F\u624D\u6267\u884C",
   "theme.now": "\u5916\u89C2\uFF1A{now}\uFF08\u70B9\u4E00\u4E0B\u6362\u6210{next}\uFF09",
   "theme.auto": "\u8DDF\u968F\u7CFB\u7EDF",
   "theme.light": "\u767D\u5929",
@@ -6010,6 +6020,11 @@ var en = {
   "ws.mem.state.cancelled": "stopped",
   "ws.refresh": "Refresh",
   "ws.disabled": "disabled",
+  "ws.quickHint": "small jobs outside workspaces \xB7 fast model",
+  "ws.quickNoFiles": "Quick jobs belong to no workspace and have no files of their own.",
+  "ws.quickRule1": "Each quick job gets one fast-model worker, no manager, and never takes a workspace slot",
+  "ws.quickRule2": "It does not edit project code; if the job turns out to be project work it stops and says so",
+  "ws.quickRule3": "Dangerous commands (restart, delete, firewall) wait for your approval",
   "theme.now": "Appearance: {now} (click for {next})",
   "theme.auto": "system",
   "theme.light": "light",
@@ -6151,6 +6166,17 @@ var partitions = [
     workers: [
       worker("w-s-1", "worker-1", "online", { sessionId: "ses_s1" }),
       worker("w-s-2", "worker-2", "released", { sessionId: "ses_s2" })
+    ]
+  },
+  {
+    // The built-in 快任务 group: jobs outside every workspace, no manager.
+    id: "quick",
+    name: "\u5FEB\u4EFB\u52A1",
+    quick: true,
+    workerCount: 2,
+    manager: manager("mgr:quick", "router", "online", 2, 0),
+    workers: [
+      worker("w-q-1", "worker-1", "released", { sessionId: "ses_q1" })
     ]
   }
 ];

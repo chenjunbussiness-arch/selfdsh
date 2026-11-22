@@ -4,7 +4,7 @@
 三栏 Web GUI 里的分区路由 / 任务面板、Token 用量统计、出口代理面板、VPN 面板、加密凭据保险库，
 以及把它们装进 DSH `web` profile 的配置和迁移文档。
 
-基线：DSH `0.2.2-rc.5`、Node >= 22、profile `web`。仓库规模 396 个文件、约 8.2 MB（不含 `.git`）。
+基线：DSH `0.2.2-rc.5`、Node >= 24.9（DSH 0.2.2-rc.5 本身的要求）、profile `web`。仓库规模 396 个文件、约 8.2 MB（不含 `.git`）。
 
 ---
 
@@ -69,7 +69,7 @@ dsh-warroom/
 
 先决条件：
 
-- Node >= 22（各插件 `engines.node` 要求）与 pnpm（装依赖 / 构建用），构建时另需 TypeScript；
+- Node >= 24.9（DSH 0.2.2-rc.5 要求；插件自己的 `engines.node` 写的是 >= 22）与 pnpm（装依赖 / 构建用），构建时另需 TypeScript；
 - 目标机已装好 DSH（基线 `0.2.2-rc.5`），`dsh` 在 PATH 里；
 - `~/.dsh/profiles/web/` 可写（源机以 root 运行，`DSH_HOME=/root/.dsh`）；
 - 若要 VPN 面板：装 `openfortivpn`；要 Exa stdio MCP：仓库已带 `vendor/exa-mcp-server`（见第 7 节），改一下路径即可；

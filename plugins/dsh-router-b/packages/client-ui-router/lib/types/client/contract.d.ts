@@ -88,7 +88,11 @@ export type HostTaskState =
 /** Parked on a human decision. */
  | 'blocked'
 /** Cancelled on request. */
- | 'cancelled';
+ | 'cancelled'
+/** The harness restarted mid-flight; the router resumes this session from its log. */
+ | 'interrupted'
+/** Put aside until a prerequisite finishes; the router wakes it again. */
+ | 'suspended';
 /**
  * One entry of a worker's checklist.
  *
@@ -173,6 +177,26 @@ export interface PartitionView {
     readonly manager: ManagerView;
     /** Workers this manager can hand tasks to. */
     readonly workers: readonly WorkerView[];
+    /** Suspended rows in this partition. */
+    readonly suspendedCount?: number;
+    /** Include globs (relative to the root); absent means everything. */
+    readonly include?: readonly string[];
+    /** Exclude globs (relative to the root). */
+    readonly exclude?: readonly string[];
+    /** One-line description from the config. */
+    readonly description?: string;
+    /** Configuration problems the Host found at boot. */
+    readonly problems?: readonly PartitionProblemView[];
+    /**
+     * The built-in 快任务 group: small jobs outside every workspace, one worker
+     * each on the fast model, with slots of its own. It has no files to browse.
+     */
+    readonly quick?: boolean;
+}
+/** One partition configuration problem a person should fix. */
+export interface PartitionProblemView {
+    readonly level: 'error' | 'warning';
+    readonly message: string;
 }
 /**
  * One credential the board may report on, for the rail's API-key block.
@@ -233,8 +257,26 @@ export interface TaskView {
      * cannot express. Absent means "the Host reported no reason".
      */
     readonly error?: string;
+    /**
+     * Why a `blocked` row is parked: the Host's `task_control block` writes its
+     * `value` into the board row's `resumeNote`. Absent when the Host does not
+     * forward it; the panel then falls back to {@link error}.
+     */
+    readonly resumeNote?: string;
     /** Harness Session of the executing worker, so the panel can offer "open". */
     readonly workerSessionId?: string;
+    /** 改派: the row that took this one over, and the row this one took over. */
+    readonly reassignedTo?: string;
+    readonly reassignedFrom?: string;
+    /** Pull request this row published. */
+    readonly pr?: {
+        readonly number: number;
+        readonly url: string;
+        readonly provider: string;
+    };
+    /** Model the row runs on, when the Host recorded one. */
+    readonly provider?: string;
+    readonly model?: string;
     /** Artifacts the worker produced, offered for download. */
     readonly artifacts?: readonly ArtifactRef[];
     /**
@@ -284,6 +326,109 @@ export interface TaskView {
         readonly ratio: string;
         readonly current?: string;
     };
+    /** Explicit prerequisites: task ids that must finish first. */
+    readonly dependsOn?: readonly string[];
+    /** Ordered phase among siblings; a lower stage finishes first. */
+    readonly stage?: number;
+    /** A queued row held back by these unfinished prerequisites. */
+    readonly waitingFor?: readonly string[];
+    /** A suspended row: why it was put aside. */
+    readonly suspendReason?: string;
+    /** A suspended (or dependency-blocked) row: what it waits for. */
+    readonly waitingOn?: readonly string[];
+    /** The request (root task) this row belongs to. */
+    readonly rootId?: string;
+}
+/** Progress of one request: its root task and the rows under it. */
+export interface GroupProgressView {
+    readonly rootId: string;
+    readonly subject: string;
+    readonly total: number;
+    readonly finished: number;
+    readonly running: number;
+    readonly waiting: number;
+    readonly suspended: number;
+    readonly failed: number;
+    readonly complete: boolean;
+}
+/** One progress notice the router sent to the war room. */
+export interface NoticeView {
+    readonly at: string;
+    readonly text: string;
+}
+/** One entry of a workspace listing (`GET /api/router/files`). */
+export interface FileEntryView {
+    readonly name: string;
+    /** Path relative to the partition root, `/`-separated. */
+    readonly path: string;
+    readonly kind: 'dir' | 'file' | 'link';
+    readonly size?: number;
+    readonly modifiedAt?: string;
+    /** Whether the partition's include/exclude rules put it in scope. */
+    readonly inScope: boolean;
+}
+/** One directory level of one partition. */
+export interface FileListingView {
+    readonly partition: string;
+    readonly root: string;
+    readonly path: string;
+    readonly entries: readonly FileEntryView[];
+    readonly omitted: number;
+    readonly include: readonly string[];
+    readonly exclude: readonly string[];
+}
+/** One standing fact a partition remembers. */
+export interface MemoryNoteView {
+    readonly id: string;
+    readonly at: string;
+    readonly text: string;
+    /** Who wrote it: the partition's manager, a human from the panel, or the router. */
+    readonly by: 'manager' | 'human' | 'router';
+    readonly taskId?: string;
+}
+/** One finished task in a partition's work log. */
+export interface WorkEntryView {
+    readonly at: string;
+    readonly taskId: string;
+    readonly rootId?: string;
+    readonly level: 'manager' | 'worker';
+    readonly subject: string;
+    readonly state: string;
+    readonly summary?: string;
+    readonly touched?: readonly string[];
+    readonly left?: string;
+    readonly error?: string;
+    readonly sessionId?: string;
+    readonly model?: string;
+}
+/** One worker session of a partition. */
+export interface SessionRefView {
+    readonly taskId: string;
+    readonly sessionId: string;
+    readonly state: string;
+    readonly subject: string;
+    readonly updatedAt: string;
+    readonly summary?: string;
+}
+/** What a partition's manager knows: `GET /api/router/memory?partition=`. */
+export interface PartitionMemoryView {
+    readonly partition: string;
+    readonly notes: readonly MemoryNoteView[];
+    /** Newest first, at most 60. */
+    readonly log: readonly WorkEntryView[];
+    readonly logTotal: number;
+    /** Worker sessions, newest first. */
+    readonly sessions: readonly SessionRefView[];
+    readonly manager: {
+        readonly enabled: boolean;
+        /** `strongest | hard | saved | inherit`. */
+        readonly source: string;
+        readonly route?: {
+            readonly provider: string;
+            readonly model: string;
+            readonly reasoningEffort?: string;
+        };
+    };
 }
 /** A produced file the user may download. */
 export interface ArtifactRef {
@@ -332,6 +477,10 @@ export interface BoardSnapshot {
      * the rail says so instead of guessing.
      */
     readonly credentials?: readonly CredentialView[];
+    /** Progress per request, when the Host computes it. */
+    readonly groups?: readonly GroupProgressView[];
+    /** Recent progress notices, newest first. */
+    readonly notices?: readonly NoticeView[];
 }
 /**
  * What the panel may ask the Host to do that is not a board read.
@@ -378,5 +527,103 @@ export interface PublishResult {
         readonly text: string;
         readonly partitionId?: string;
         readonly reason?: string;
+    }[];
+}
+/** One outlet action waiting for (or past) a human decision. */
+export interface ApprovalView {
+    readonly id: string;
+    /** `git` push/PR, `merge` a PR, `ops` server command, `browser` page capture. */
+    readonly kind: 'git' | 'merge' | 'ops' | 'browser';
+    readonly partition: string;
+    readonly taskId?: string;
+    /** What will happen, in the router's words. */
+    readonly action: string;
+    /** What it acts on: the PR URL, the command line, the page. */
+    readonly target: string;
+    /** Why the agent asks, and checks where known. */
+    readonly reason: string;
+    /** Whether the effect can be undone. */
+    readonly reversible: boolean;
+    readonly state: 'pending' | 'approved' | 'rejected' | 'done' | 'failed' | 'expired';
+    readonly createdAt: string;
+    readonly decidedAt?: string;
+    readonly note?: string;
+    /** Output of the run, or why it failed. */
+    readonly result?: string;
+}
+/** `GET /api/router/approvals`. */
+export interface ApprovalsView {
+    readonly pending: readonly ApprovalView[];
+    readonly recent: readonly ApprovalView[];
+}
+/** One audit line. */
+export interface AuditEntryView {
+    readonly at: string;
+    readonly kind: ApprovalView['kind'];
+    readonly partition: string;
+    readonly taskId?: string;
+    readonly action: string;
+    readonly target: string;
+    readonly outcome: 'ran' | 'asked' | 'approved' | 'rejected' | 'refused' | 'failed' | 'expired';
+    readonly by: 'agent' | 'human' | 'router';
+    readonly detail?: string;
+}
+/** One segment of a worker's live output: a command and its result, a message, or the turn end. */
+export interface LiveSegmentView {
+    readonly seq: number;
+    readonly kind: 'command' | 'message' | 'end';
+    readonly title: string;
+    readonly body: string;
+    readonly error: boolean;
+    readonly at: number;
+    readonly running?: boolean;
+}
+/** `GET /api/router/live`. */
+export interface LiveView {
+    readonly taskId: string;
+    readonly state: string;
+    readonly at: number;
+    readonly sessionId?: string;
+    readonly segments: readonly LiveSegmentView[];
+}
+/** A model the runtime offers, for 换模型. */
+export interface ModelChoiceView {
+    readonly provider: string;
+    readonly providerName: string;
+    readonly model: string;
+    readonly name: string;
+    readonly efforts?: readonly string[];
+}
+/** What 改派 asks for. */
+export interface ReassignInput {
+    readonly taskId: string;
+    readonly partition?: string;
+    readonly model?: {
+        readonly provider: string;
+        readonly model: string;
+        readonly reasoningEffort?: string;
+    };
+    /** true: 接着做 (carry progress); false: 从头来. */
+    readonly keepProgress: boolean;
+    readonly note?: string;
+}
+/** Result of 改派. */
+export interface ReassignResult {
+    readonly from: string;
+    readonly to: string;
+    readonly partition: string;
+    readonly text: string;
+}
+/** Actions the batch bar can send. */
+export type BatchAction = 'cancel' | 'cancel_tree' | 'retry' | 'suspend' | 'resume' | 'reassign';
+/** `POST /api/router/batch`. */
+export interface BatchResultView {
+    readonly ok: number;
+    readonly failed: number;
+    readonly results: readonly {
+        readonly id: string;
+        readonly ok: boolean;
+        readonly state?: string;
+        readonly error?: string;
     }[];
 }

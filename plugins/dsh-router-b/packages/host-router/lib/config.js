@@ -12,6 +12,7 @@
  */
 import { isAbsolute, resolve } from 'node:path';
 import { REPORT_INSTRUCTION } from "./report.js";
+import { scmProblem } from "./scm.js";
 /**
  * Defaults for {@link CredentialRefConfig}.
  *
@@ -33,6 +34,49 @@ export const DEFAULT_CREDENTIAL_REFS = [
  * "forgets what it was doing" while still having room left in the window.
  */
 export const DEFAULT_CONTEXT_LIMIT = 262_144;
+/** Name the built-in 快任务 partition is routed by. */
+export const QUICK_PARTITION = 'quick';
+/** Default one-line description of the 快任务 partition. */
+export const QUICK_DESCRIPTION = '快任务：不属于任何工作区的小活，例如改电脑配置、跑 git 命令、装工具、查端口或磁盘';
+/**
+ * Build the 快任务 partition, or undefined when it is off or a declared
+ * partition already uses its name (the declared one wins).
+ * @param raw - `RouterConfig.quick`.
+ * @param declared - the normalised declared partitions.
+ * @param home - default root.
+ */
+export function quickPartition(raw, declared, home) {
+    if (raw === false)
+        return undefined;
+    if (declared.some(partition => partition.name === QUICK_PARTITION))
+        return undefined;
+    const config = raw ?? {};
+    const root = config.root ?? home;
+    if (typeof root !== 'string' || !isAbsolute(root))
+        throw new PartitionConfigError('quick.root must be an absolute path');
+    const slots = config.workers ?? 2;
+    if (!Number.isInteger(slots) || slots < 0)
+        throw new PartitionConfigError('quick.workers must be >= 0 (0 = unlimited)');
+    for (const key of ['git', 'ops', 'browser']) {
+        const mode = config.outlets?.[key];
+        if (mode !== undefined && mode !== 'off' && mode !== 'confirm' && mode !== 'allow') {
+            throw new PartitionConfigError(`quick: outlets.${key} must be off, confirm or allow`);
+        }
+    }
+    return {
+        name: QUICK_PARTITION,
+        root,
+        dir: resolve(root),
+        slots,
+        managerEnabled: false,
+        quick: true,
+        description: config.description ?? QUICK_DESCRIPTION,
+        // Membership by file would claim everything under the home directory;
+        // a quick job is routed by name, never by a file path.
+        include: [],
+        ...config.outlets === undefined ? {} : { outlets: config.outlets },
+    };
+}
 /** Raised for configuration a deployment must fix, not for a task-level mistake. */
 export class PartitionConfigError extends Error {
     constructor(message) {
@@ -162,6 +206,17 @@ export function normalisePartitions(partitions, defaults) {
             && partition.network !== 'offline') {
             throw new PartitionConfigError(`partition "${partition.name}" has network "${String(partition.network)}"; `
                 + 'expected intranet, internet, or offline');
+        }
+        if (partition.git?.scm !== undefined) {
+            const problem = scmProblem(partition.git.scm);
+            if (problem !== undefined)
+                throw new PartitionConfigError(`partition "${partition.name}": ${problem}`);
+        }
+        for (const key of ['git', 'ops', 'browser']) {
+            const mode = partition.outlets?.[key];
+            if (mode !== undefined && mode !== 'off' && mode !== 'confirm' && mode !== 'allow') {
+                throw new PartitionConfigError(`partition "${partition.name}": outlets.${key} must be off, confirm or allow`);
+            }
         }
         result.push({
             ...partition,
@@ -471,6 +526,8 @@ const NETWORK_BRIEF = {
  * @returns the brief text.
  */
 export function partitionBrief(partition, options) {
+    if (partition.quick === true)
+        return quickBrief(partition, options);
     const lines = [
         `You are a worker for the "${partition.name}" partition of this workspace.`,
         `Your working directory is already ${partition.dir}. Treat it as the whole of your scope: do not edit files outside it.`,
@@ -481,6 +538,9 @@ export function partitionBrief(partition, options) {
         '- Exactly one step is in_progress at any time.',
         '- Before your final answer, call `todo_write` once more with every step completed.',
     ];
+    lines.push('', 'Partition rules (hard requirement):', `- Only create, edit or delete files under ${partition.dir}${partition.include === undefined ? '' : ' that match the member globs below'}.`
+        + ' Reading elsewhere is fine; changing elsewhere is not.', '- If the task cannot be finished without a change outside this partition, or without work another task must', '  do first, do not do that work and do not guess. Call `task_suspend` with your task id'
+        + (options.taskId === undefined ? '' : ` ("${options.taskId}")`) + ', a one-line `reason`,', '  and a self-contained `prerequisite` describing exactly what must be done first (add `partition` when it', '  belongs to another partition). Then end your turn. The router continues this same session with the', '  prerequisite\'s result once it is done; you keep your history and todo list.', '- List every path you changed, relative to the partition root, under `touched:` in your report.');
     if (partition.include !== undefined) {
         lines.push(`Member files are selected by: ${partition.include.join(', ')}.`);
     }
@@ -502,13 +562,48 @@ export function partitionBrief(partition, options) {
                 + 'with a human and with other agents, and those operations move work that is not yours.',
             partition.git.rule,
         ].filter((rule) => rule !== undefined && rule.trim() !== '');
+        if (partition.git.scm !== undefined) {
+            gitRules.push(`Code host: ${partition.git.scm.provider} ${partition.git.scm.repo}. When your change is committed, publish it with `
+                + '`git_publish` (it pushes the current branch and opens or updates its pull request); read CI with `pr_status`. '
+                + 'Never merge yourself and never push the default branch: a merge is `pr_merge`, which waits for the human.');
+        }
         if (gitRules.length > 0)
             lines.push('', 'Git rules for this partition:', ...gitRules);
     }
+    lines.push('', 'Server commands: run anything that changes the server (restart or reload a service, edit system files, '
+        + 'delete or move media, change DNS, firewall or users) through `ops_run`, never your own shell, so it is '
+        + 'logged and the dangerous ones wait for the human. Read-only looks (logs, status, disk) may use either.');
     if (options.verify && partition.verify !== undefined && partition.verify.length > 0) {
         lines.push('', 'Acceptance is decided by these commands, run afterwards in your working directory:', ...partition.verify.map(command => `  ${command}`), 'Run them yourself before answering, and report their exact output rather than a summary.');
     }
     lines.push('', 'DSH itself (hard rule): never write a host plugin\'s `lib/` directly (for example', '`dsh-router-b/packages/host-router/lib`) and never stop or restart DSH. DSH loads `lib/` at boot and', 'rewriting it while it runs can unload the plugin. Build host code with', '`/srv/workspace/deepseek-harness/dsh-router-b/scripts/safe-build-host.sh` (it writes `lib.next/`), and say', 'in your report that a restart is needed; the human runs `scripts/safe-restart.sh`. Client bundles', '(`client-ui-*/lib/client.js`) are safe to rebuild.', '', 'Screenshots: when the task involves a web page or a UI, take screenshots as evidence. The command', '`/srv/workspace/bin/screenshot <url> <out.png> [--full] [--wait ms]` launches a headless browser for one', 'capture and exits (the host has little memory: never keep a browser running). Save every image under', `\`${partition.dir}/.dsh-artifacts/${options.taskId ?? '<task-id>'}/\` (create the directory first),`, 'and list each absolute image path in your report.', '', ...REPORT_INSTRUCTION, '', 'Only report what you actually observed (command output, page text, files you checked).');
     return lines.join('\n');
+}
+/**
+ * Brief for a 快任务 worker: one small job outside every workspace, done
+ * quickly and reported in a few lines. No checklist (a two-command job does not
+ * need one), no branch, no project edits.
+ */
+function quickBrief(partition, options) {
+    return [
+        'You are a worker for 快任务 (quick jobs): one small job that belongs to no project workspace, such as a',
+        'machine setting, a git command, installing a tool, or checking a port, a process or the disk.',
+        `Your working directory is ${partition.dir}; cd elsewhere when the job names another place.`,
+        '',
+        'Rules (hard requirement):',
+        '- Do exactly the job asked, with as few steps as it takes, then answer. Do not plan with `todo_write`.',
+        '- Do not edit the source code of a project workspace. If the job turns out to be project work, stop and',
+        '  say so in one line; the router will send it to that workspace.',
+        '- Never switch branches, reset, clean or force-push in a repository you did not create for this job.',
+        '- Anything that changes the machine in a way that is hard to undo (restart or stop a service, delete files,',
+        '  firewall, users, reboot, force-push, package removal) goes through `ops_run`, never your own shell:',
+        '  it is logged and the dangerous ones wait for the human to press 同意. Installing a tool, setting a',
+        '  config value and read-only looks may use the shell.',
+        '- Never print a secret value (token, password, key) in your answer; say where it is set instead.',
+        ...options.taskId === undefined ? [] : [`- Your task id is ${options.taskId}.`],
+        '',
+        'Answer in two to five lines: what you ran and what came out (the exact value, version or error).',
+        'Only report what you actually observed.',
+    ].join('\n');
 }
 //# sourceMappingURL=config.js.map

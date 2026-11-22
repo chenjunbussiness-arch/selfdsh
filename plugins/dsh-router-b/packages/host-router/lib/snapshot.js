@@ -92,6 +92,7 @@ const STATE_PROGRESS = {
     blocked: 1,
     cancelled: 1,
     interrupted: 0.4,
+    suspended: 0.5,
 };
 /** Fold `todo/write` events into the worker's latest list. */
 export function foldTodos(events) {
@@ -245,6 +246,7 @@ async function viewOf(task, deps) {
         }
     }
     const todos = facts?.todos ?? { todos: null, done: 0, total: 0, ratio: '0/0' };
+    const waitingFor = state === 'queued' ? deps.waitingFor?.(task) : undefined;
     // With a todo list, the ratio is a finer signal than the state bar.
     const progress = state === 'running' && todos.total > 0
         ? Math.max(STATE_PROGRESS.running, 0.4 + 0.5 * (todos.done / todos.total))
@@ -268,12 +270,22 @@ async function viewOf(task, deps) {
         ...task.result === undefined ? {} : { result: task.result },
         ...task.verifyOutput === undefined ? {} : { verifyOutput: task.verifyOutput },
         ...task.error === undefined ? {} : { error: task.error },
+        ...task.resumeNote === undefined ? {} : { resumeNote: task.resumeNote },
+        ...(task.dependsOn?.length ?? 0) === 0 ? {} : { dependsOn: task.dependsOn },
+        ...task.stage === undefined ? {} : { stage: task.stage },
+        ...waitingFor === undefined || waitingFor.length === 0 ? {} : { waitingFor },
+        ...task.state !== 'suspended' || task.suspendReason === undefined ? {} : { suspendReason: task.suspendReason },
+        ...task.state !== 'suspended' || (task.waitingOn?.length ?? 0) === 0 ? {} : { waitingOn: task.waitingOn },
+        ...deps.rootOf === undefined ? {} : { rootId: deps.rootOf(task) },
         ...task.tier === undefined ? {} : { tier: task.tier },
         ...task.tierSource === undefined ? {} : { tierSource: task.tierSource },
         ...task.tierReason === undefined ? {} : { tierReason: task.tierReason },
         ...task.provider === undefined ? {} : { provider: task.provider },
         ...task.model === undefined ? {} : { model: task.model },
         ...task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort },
+        ...task.reassignedTo === undefined ? {} : { reassignedTo: task.reassignedTo },
+        ...task.reassignedFrom === undefined ? {} : { reassignedFrom: task.reassignedFrom },
+        ...task.pr === undefined ? {} : { pr: task.pr },
         createdAt: task.createdAt,
         updatedAt: task.updatedAt,
     };
@@ -323,6 +335,8 @@ export async function buildSnapshot(deps, filter = {}) {
         counts,
         partitions,
         tasks: views,
+        ...deps.progress === undefined ? {} : { groups: deps.progress() },
+        ...deps.notices === undefined ? {} : { notices: deps.notices() },
     };
 }
 //# sourceMappingURL=snapshot.js.map

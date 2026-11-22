@@ -17,4 +17,4 @@ export interface WarRoomRedirectProps {
  * @param props - translate and the open action.
  * @returns a short placeholder with a manual button.
  */
-export declare function WarRoomRedirect({ t, open }: WarRoomRedirectProps): import("react/jsx-runtime").JSX.Element;
+export declare function WarRoomRedirect({ t, open }: WarRoomRedirectProps): import("react").JSX.Element;

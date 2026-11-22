@@ -33,6 +33,8 @@ export const BOARD_PATH = `${BRIDGE_BASE}/board`;
 export const PUBLISH_PATH = `${BRIDGE_BASE}/publish`;
 /** `POST` → record a human verification decision. */
 export const VERIFY_PATH = `${BRIDGE_BASE}/verify`;
+/** `POST` → run one `task_control` action (`resume`, `block`) on a task. */
+export const CONTROL_PATH = `${BRIDGE_BASE}/control`;
 /** `POST` → enable or disable one partition. */
 export const PARTITION_PATH = `${BRIDGE_BASE}/partition`;
 /** `GET` → the 作战室 anchor session id (created or resumed on demand). */
@@ -41,6 +43,15 @@ export const ANCHOR_PATH = `${BRIDGE_BASE}/anchor`;
 export const EVENTS_PATH = `${BRIDGE_BASE}/events`;
 /** `GET` → tier settings + model options; `POST` → save tier settings. */
 export const TIERS_PATH = `${BRIDGE_BASE}/tiers`;
+/** `GET ?partition=&path=` → one directory level of a partition (names only, never contents). */
+export const FILES_PATH = `${BRIDGE_BASE}/files`;
+/** `GET|POST|DELETE` one partition's memory (notes and recent work). */
+export const MEMORY_PATH = `${BRIDGE_BASE}/memory`;
+export const APPROVALS_PATH = `${BRIDGE_BASE}/approvals`;
+export const AUDIT_PATH = `${BRIDGE_BASE}/audit`;
+export const LIVE_PATH = `${BRIDGE_BASE}/live`;
+export const REASSIGN_PATH = `${BRIDGE_BASE}/reassign`;
+export const BATCH_PATH = `${BRIDGE_BASE}/batch`;
 /** Request body ceiling: demands and verdicts are small by construction. */
 const MAX_BODY_BYTES = 256 * 1024;
 /** Most demands one publish call may carry. */
@@ -84,6 +95,8 @@ export const STATE_TO_UI = {
     // Stopped by a restart and waiting to be resumed from its own log: still work
     // in progress, not a result.
     interrupted: 'running',
+    // Parked until a prerequisite finishes: next up again, like a blocked row.
+    suspended: 'queued',
 };
 /**
  * The panel state → tab table.
@@ -244,12 +257,22 @@ function taskOf(task) {
         ...task.result === undefined ? {} : { result: task.result },
         ...task.verifyOutput === undefined ? {} : { verifyOutput: task.verifyOutput },
         ...task.error === undefined ? {} : { error: task.error },
+        ...task.resumeNote === undefined ? {} : { resumeNote: task.resumeNote },
+        ...task.dependsOn === undefined ? {} : { dependsOn: task.dependsOn },
+        ...task.stage === undefined ? {} : { stage: task.stage },
+        ...task.waitingFor === undefined ? {} : { waitingFor: task.waitingFor },
+        ...task.suspendReason === undefined ? {} : { suspendReason: task.suspendReason },
+        ...task.waitingOn === undefined ? {} : { waitingOn: task.waitingOn },
+        ...task.rootId === undefined ? {} : { rootId: task.rootId },
         ...task.tier === undefined ? {} : { tier: task.tier },
         ...task.tierSource === undefined ? {} : { tierSource: task.tierSource },
         ...task.tierReason === undefined ? {} : { tierReason: task.tierReason },
         ...task.provider === undefined ? {} : { provider: task.provider },
         ...task.model === undefined ? {} : { model: task.model },
         ...task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort },
+        ...task.reassignedTo === undefined ? {} : { reassignedTo: task.reassignedTo },
+        ...task.reassignedFrom === undefined ? {} : { reassignedFrom: task.reassignedFrom },
+        ...task.pr === undefined ? {} : { pr: task.pr },
     };
 }
 /** Newest first, with the id as a tie-break so the order is stable. */
@@ -279,7 +302,8 @@ export function boardDocument(input) {
         const scopedViews = tasks.filter(task => task.partitionId === partition.name);
         return {
             id: partition.name,
-            name: partition.name,
+            name: partition.quick === true ? '快任务' : partition.name,
+            ...partition.quick === true ? { quick: true } : {},
             repo: partition.dir,
             path: partition.dir,
             enabled: input.isEnabled(partition.name),
@@ -288,7 +312,14 @@ export function boardDocument(input) {
             queuedCount: scopedViews.filter(task => task.state === 'queued').length,
             // No human acceptance step: nothing waits on the user.
             unreviewedCount: 0,
+            suspendedCount: scopedViews.filter(task => task.hostState === 'suspended').length,
             taskCount: scopedViews.length,
+            ...partition.include === undefined ? {} : { include: partition.include },
+            ...partition.exclude === undefined ? {} : { exclude: partition.exclude },
+            ...partition.description === undefined ? {} : { description: partition.description },
+            problems: (input.problems ?? [])
+                .filter(problem => problem.partition === partition.name)
+                .map(problem => ({ level: problem.level, message: problem.message })),
             manager: {
                 id: `mgr:${partition.name}`,
                 // A partition without a manager seat is routed by the router itself;
@@ -325,6 +356,8 @@ export function boardDocument(input) {
         buckets,
         credentials: input.credentials,
         origin: 'host',
+        ...input.snapshot.groups === undefined ? {} : { groups: input.snapshot.groups },
+        ...input.snapshot.notices === undefined ? {} : { notices: input.snapshot.notices },
     };
 }
 /** Answer one exchange with JSON. */
@@ -418,6 +451,7 @@ async function boardRoute(req, res, deps) {
         partitions: deps.partitions,
         isEnabled: deps.isEnabled,
         credentials,
+        ...deps.problems === undefined ? {} : { problems: deps.problems() },
     }));
 }
 /** `POST /api/router/publish` with `{ demands: string[] }`. */
@@ -471,6 +505,38 @@ async function verifyRoute(req, res, deps) {
     const updated = await deps.verify(body.taskId.trim(), verdict, body.note);
     sendJson(res, 200, { ok: true, task: updated });
 }
+/** `POST /api/router/control` with `{ taskId, action, value? }`. */
+async function controlRoute(req, res, deps) {
+    if (req.method !== 'POST') {
+        sendMethodNotAllowed(res, 'POST');
+        return;
+    }
+    if (deps.control === undefined)
+        throw new BridgeError(404, 'not-found', 'task control is not available');
+    const body = objectOf(await readJsonBody(req), 'body');
+    if (typeof body.taskId !== 'string' || body.taskId.trim() === '') {
+        throw new BridgeError(400, 'bad-request', 'taskId must be a non-empty string');
+    }
+    if (typeof body.action !== 'string' || body.action.trim() === '') {
+        throw new BridgeError(400, 'bad-request', 'action must be a non-empty string');
+    }
+    if (body.value !== undefined && typeof body.value !== 'string') {
+        throw new BridgeError(400, 'bad-request', 'value must be a string when present');
+    }
+    if (body.prerequisite !== undefined && typeof body.prerequisite !== 'string') {
+        throw new BridgeError(400, 'bad-request', 'prerequisite must be a string when present');
+    }
+    if (body.waitFor !== undefined && (!Array.isArray(body.waitFor) || body.waitFor.some(id => typeof id !== 'string'))) {
+        throw new BridgeError(400, 'bad-request', 'waitFor must be an array of task ids when present');
+    }
+    const prerequisite = typeof body.prerequisite === 'string' && body.prerequisite.trim() !== '' ? body.prerequisite.trim() : undefined;
+    const waitFor = Array.isArray(body.waitFor) ? body.waitFor.map(id => id.trim()).filter(id => id !== '') : undefined;
+    const updated = await deps.control(body.taskId.trim(), body.action.trim(), body.value, {
+        ...prerequisite === undefined ? {} : { prerequisite },
+        ...waitFor === undefined || waitFor.length === 0 ? {} : { waitFor },
+    });
+    sendJson(res, 200, { ok: true, task: { id: updated.id, state: updated.state }, text: updated.text });
+}
 /** `POST /api/router/partition` with `{ id, enabled }`. */
 async function partitionRoute(req, res, deps) {
     if (req.method !== 'POST') {
@@ -500,6 +566,178 @@ async function tiersRoute(req, res, deps) {
     }
     const body = objectOf(await readJsonBody(req), 'body');
     sendJson(res, 200, await deps.tiers.write(body));
+}
+/** `GET /api/router/files?partition=<name>&path=<relative dir>`. */
+async function filesRoute(req, res, deps) {
+    if (req.method !== 'GET') {
+        sendMethodNotAllowed(res, 'GET');
+        return;
+    }
+    if (deps.files === undefined)
+        throw new BridgeError(404, 'not-found', 'the workspace listing is not available');
+    const url = new URL(req.url ?? '/', 'http://router.invalid');
+    const partition = url.searchParams.get('partition')?.trim() ?? '';
+    if (partition === '')
+        throw new BridgeError(400, 'bad-request', 'partition is required');
+    const path = url.searchParams.get('path') ?? undefined;
+    sendJson(res, 200, await deps.files(partition, path));
+}
+/**
+ * `GET /api/router/memory?partition=<name>` — notes, recent work, sessions.
+ * `POST` `{ partition, text }` adds a note; `DELETE ?partition=&id=` removes one.
+ */
+async function memoryRoute(req, res, deps) {
+    if (deps.memory === undefined)
+        throw new BridgeError(404, 'not-found', 'partition memory is not available');
+    const url = new URL(req.url ?? '/', 'http://router.invalid');
+    if (req.method === 'GET') {
+        const partition = url.searchParams.get('partition')?.trim() ?? '';
+        if (partition === '')
+            throw new BridgeError(400, 'bad-request', 'partition is required');
+        sendJson(res, 200, await deps.memory.read(partition));
+        return;
+    }
+    if (req.method === 'POST') {
+        const body = objectOf(await readJsonBody(req), 'body');
+        if (typeof body['partition'] !== 'string' || body['partition'].trim() === '') {
+            throw new BridgeError(400, 'bad-request', 'partition must be a non-empty string');
+        }
+        if (typeof body['text'] !== 'string' || body['text'].trim() === '') {
+            throw new BridgeError(400, 'bad-request', 'text must be a non-empty string');
+        }
+        sendJson(res, 200, await deps.memory.addNote(body['partition'].trim(), body['text']));
+        return;
+    }
+    if (req.method === 'DELETE') {
+        const partition = url.searchParams.get('partition')?.trim() ?? '';
+        const id = url.searchParams.get('id')?.trim() ?? '';
+        if (partition === '' || id === '')
+            throw new BridgeError(400, 'bad-request', 'partition and id are required');
+        sendJson(res, 200, await deps.memory.removeNote(partition, id));
+        return;
+    }
+    sendMethodNotAllowed(res, 'GET, POST, DELETE');
+}
+/** Run a desk call; an ordinary error is a refused action (409), not a server fault. */
+async function deskCall(run) {
+    try {
+        return await run();
+    }
+    catch (error) {
+        if (error instanceof BridgeError)
+            throw error;
+        throw new BridgeError(409, 'conflict', error instanceof Error ? error.message : String(error));
+    }
+}
+/** `GET /api/router/approvals` lists; `POST {id, decision, note?}` approves or rejects one. */
+async function approvalsRoute(req, res, deps) {
+    const desk = deps.desk;
+    if (desk === undefined)
+        throw new BridgeError(404, 'not-found', 'approvals are not available');
+    if (req.method === 'GET') {
+        sendJson(res, 200, await desk.approvals());
+        return;
+    }
+    if (req.method === 'POST') {
+        const body = objectOf(await readJsonBody(req), 'body');
+        const id = typeof body['id'] === 'string' ? body['id'].trim() : '';
+        if (id === '')
+            throw new BridgeError(400, 'bad-request', 'id must be a non-empty string');
+        if (body['decision'] !== 'approve' && body['decision'] !== 'reject') {
+            throw new BridgeError(400, 'bad-request', 'decision must be "approve" or "reject"');
+        }
+        if (body['note'] !== undefined && typeof body['note'] !== 'string')
+            throw new BridgeError(400, 'bad-request', 'note must be a string');
+        const decision = body['decision'];
+        sendJson(res, 200, await deskCall(() => desk.decide(id, decision, body['note'])));
+        return;
+    }
+    sendMethodNotAllowed(res, 'GET, POST');
+}
+/** `GET /api/router/audit?limit=` — newest audit lines. */
+async function auditRoute(req, res, deps) {
+    if (deps.desk === undefined)
+        throw new BridgeError(404, 'not-found', 'audit is not available');
+    if (req.method !== 'GET') {
+        sendMethodNotAllowed(res, 'GET');
+        return;
+    }
+    const url = new URL(req.url ?? '/', 'http://router.invalid');
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? '100') || 100));
+    sendJson(res, 200, await deps.desk.audit(limit));
+}
+/** `GET /api/router/live?taskId=&after=` — a worker's output since segment `after`. */
+async function liveRoute(req, res, deps) {
+    const desk = deps.desk;
+    if (desk === undefined)
+        throw new BridgeError(404, 'not-found', 'live output is not available');
+    if (req.method !== 'GET') {
+        sendMethodNotAllowed(res, 'GET');
+        return;
+    }
+    const url = new URL(req.url ?? '/', 'http://router.invalid');
+    const taskId = url.searchParams.get('taskId')?.trim() ?? '';
+    if (taskId === '')
+        throw new BridgeError(400, 'bad-request', 'taskId is required');
+    const after = Number(url.searchParams.get('after') ?? '-1');
+    sendJson(res, 200, await deskCall(() => desk.live(taskId, Number.isFinite(after) ? after : -1)));
+}
+/** `POST /api/router/reassign {taskId, partition?, model?, keepProgress?, note?}`. */
+async function reassignRoute(req, res, deps) {
+    const desk = deps.desk;
+    if (desk === undefined)
+        throw new BridgeError(404, 'not-found', 'reassign is not available');
+    if (req.method !== 'POST') {
+        sendMethodNotAllowed(res, 'POST');
+        return;
+    }
+    const body = objectOf(await readJsonBody(req), 'body');
+    const taskId = typeof body['taskId'] === 'string' ? body['taskId'].trim() : '';
+    if (taskId === '')
+        throw new BridgeError(400, 'bad-request', 'taskId must be a non-empty string');
+    if (body['partition'] !== undefined && typeof body['partition'] !== 'string')
+        throw new BridgeError(400, 'bad-request', 'partition must be a string');
+    let model;
+    if (body['model'] !== undefined && body['model'] !== null) {
+        const raw = objectOf(body['model'], 'model');
+        if (typeof raw['provider'] !== 'string' || typeof raw['model'] !== 'string') {
+            throw new BridgeError(400, 'bad-request', 'model must be {provider, model, reasoningEffort?}');
+        }
+        model = {
+            provider: raw['provider'], model: raw['model'],
+            ...typeof raw['reasoningEffort'] === 'string' ? { reasoningEffort: raw['reasoningEffort'] } : {},
+        };
+    }
+    const partition = typeof body['partition'] === 'string' && body['partition'].trim() !== '' ? body['partition'].trim() : undefined;
+    const note = typeof body['note'] === 'string' && body['note'].trim() !== '' ? body['note'].trim() : undefined;
+    sendJson(res, 200, await deskCall(() => desk.reassign({
+        taskId,
+        ...partition === undefined ? {} : { partition },
+        ...model === undefined ? {} : { model },
+        keepProgress: body['keepProgress'] !== false,
+        ...note === undefined ? {} : { note },
+    })));
+}
+/** `POST /api/router/batch {taskIds, action, value?}` — one action over many rows. */
+async function batchRoute(req, res, deps) {
+    const desk = deps.desk;
+    if (desk === undefined)
+        throw new BridgeError(404, 'not-found', 'batch actions are not available');
+    if (req.method !== 'POST') {
+        sendMethodNotAllowed(res, 'POST');
+        return;
+    }
+    const body = objectOf(await readJsonBody(req), 'body');
+    const ids = body['taskIds'];
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 200 || ids.some(id => typeof id !== 'string' || id.trim() === '')) {
+        throw new BridgeError(400, 'bad-request', 'taskIds must be 1..200 task ids');
+    }
+    if (typeof body['action'] !== 'string' || body['action'].trim() === '')
+        throw new BridgeError(400, 'bad-request', 'action is required');
+    if (body['value'] !== undefined && typeof body['value'] !== 'string')
+        throw new BridgeError(400, 'bad-request', 'value must be a string');
+    const action = body['action'].trim();
+    sendJson(res, 200, await deskCall(() => desk.batch([...new Set(ids.map(id => id.trim()))], action, body['value'])));
 }
 /**
  * `GET /api/router/events` — server-sent change notifications.
@@ -602,8 +840,16 @@ export function createRoutes(deps) {
         { kind: 'exact', path: PUBLISH_PATH, handler: guard(deps, PUBLISH_PATH, (req, res) => publishRoute(req, res, deps)) },
         { kind: 'exact', path: ANCHOR_PATH, handler: guard(deps, ANCHOR_PATH, (req, res) => anchorRoute(req, res, deps)) },
         { kind: 'exact', path: VERIFY_PATH, handler: guard(deps, VERIFY_PATH, (req, res) => verifyRoute(req, res, deps)) },
+        { kind: 'exact', path: CONTROL_PATH, handler: guard(deps, CONTROL_PATH, (req, res) => controlRoute(req, res, deps)) },
         { kind: 'exact', path: PARTITION_PATH, handler: guard(deps, PARTITION_PATH, (req, res) => partitionRoute(req, res, deps)) },
         { kind: 'exact', path: TIERS_PATH, handler: guard(deps, TIERS_PATH, (req, res) => tiersRoute(req, res, deps)) },
+        { kind: 'exact', path: FILES_PATH, handler: guard(deps, FILES_PATH, (req, res) => filesRoute(req, res, deps)) },
+        { kind: 'exact', path: APPROVALS_PATH, handler: guard(deps, APPROVALS_PATH, (req, res) => approvalsRoute(req, res, deps)) },
+        { kind: 'exact', path: AUDIT_PATH, handler: guard(deps, AUDIT_PATH, (req, res) => auditRoute(req, res, deps)) },
+        { kind: 'exact', path: LIVE_PATH, handler: guard(deps, LIVE_PATH, (req, res) => liveRoute(req, res, deps)) },
+        { kind: 'exact', path: REASSIGN_PATH, handler: guard(deps, REASSIGN_PATH, (req, res) => reassignRoute(req, res, deps)) },
+        { kind: 'exact', path: BATCH_PATH, handler: guard(deps, BATCH_PATH, (req, res) => batchRoute(req, res, deps)) },
+        { kind: 'exact', path: MEMORY_PATH, handler: guard(deps, MEMORY_PATH, (req, res) => memoryRoute(req, res, deps)) },
         { kind: 'exact', path: EVENTS_PATH, handler: guard(deps, EVENTS_PATH, async (req, res) => { eventsRoute(req, res, deps); }) },
     ];
 }

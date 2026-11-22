@@ -34,6 +34,8 @@ export declare const TAB_KIND = "router-board";
  * Sidebar selects the panel whose key equals the row's `id`.
  */
 export declare const PANEL_ID = "router/routing";
+/** Main-panel key and Sidebar row id of the 工作区 page. */
+export declare const WORKSPACE_ID = "router/workspace";
 /**
  * Services this plugin cannot work without.
  *

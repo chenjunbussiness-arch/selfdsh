@@ -47,8 +47,10 @@ import {
   DEFAULT_CONTEXT_LIMIT,
   DEFAULT_CREDENTIAL_REFS,
   PartitionConfigError,
+  QUICK_PARTITION,
   normalisePartitions,
   partitionBrief,
+  quickPartition,
   resolveRoute,
   resolveRouteSmart,
 } from './config.ts'
@@ -75,13 +77,48 @@ import { createScmClient, envToken } from './scm.ts'
 import type { ScmClient } from './scm.ts'
 import { liveSegments } from './live.ts'
 import type { ModelOption, Tier, TierDecision, TierRoute } from './tier.ts'
-import type { ContentBlock, CredentialsServiceLike, LiveAgent, LlmRuntimeLike, PluginContext, SubagentActivation, ToolRunContext } from './types.ts'
+import type { ContentBlock, CredentialsServiceLike, LiveAgent, LlmRuntimeLike, PluginContext, SubagentActivation, ToolRunContext, WebRouteLike } from './types.ts'
 
 /** Stable plugin name. */
 export const name = 'host-router'
 
 /** The tool registry and the subagent seam are hard dependencies. */
 export const inject = ['tools', 'subagents']
+
+/** The part of the web app's `connection` service the bridge uses to check a login. */
+interface LoginCheck {
+  /** `undefined` for a logged-in browser (or API peer), else 401 / 403. */
+  requestRejection?(request: import('node:http').IncomingMessage): number | undefined
+}
+
+/**
+ * Put the web app's own login in front of one bridge route.
+ *
+ * The host web server matches the longest prefix first, so `/api/router/*`
+ * wins over the app's `/api` route and would skip its login check. Without
+ * this, anything that can reach the port (a worker's shell included) could
+ * read the board and approve its own merge or dangerous command. Fails closed:
+ * with no login service the route answers 503.
+ * @param route - the route as the bridge builds it.
+ * @param connection - reads the `connection` service at request time.
+ * @returns the same route behind the login check.
+ */
+export function requireLogin(route: WebRouteLike, connection: () => LoginCheck | undefined): WebRouteLike {
+  return {
+    kind: route.kind,
+    path: route.path,
+    handler: async (req, res) => {
+      const check = connection()
+      const rejection = typeof check?.requestRejection === 'function' ? check.requestRejection(req) : 503
+      if (rejection !== undefined) {
+        res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(rejection === 401 ? 'unauthorized' : rejection === 403 ? 'forbidden' : 'login service unavailable')
+        return
+      }
+      await route.handler(req, res)
+    },
+  }
+}
 
 /** Default concurrent workers per partition. */
 const DEFAULT_SLOTS = 2
@@ -238,7 +275,7 @@ function anchorInstructions(partitions: readonly Partition[]): string {
     '做完后，你用正常聊天的口吻告诉用户做了什么、怎么做的、结果是什么。',
     '',
     '## 分区',
-    ...partitions.map(partition => `- ${partition.name}: ${partition.dir}`
+    ...partitions.filter(partition => partition.quick !== true).map(partition => `- ${partition.name}: ${partition.dir}`
       + (partition.managerEnabled ? '' : '（无 manager）')
       + (partition.description === undefined ? '' : ` — ${partition.description.replace(/\s+/g, ' ').trim()}`)),
     '',
@@ -255,6 +292,11 @@ function anchorInstructions(partitions: readonly Partition[]): string {
     '   d. 所有转发在同一轮里发完，不要等前面做完。不要传 `parent_task`。',
     '   - 分区列表里标了「无 manager」的分区没有 manager，转给它的需求你要自己按工作项拆开、各发一条。',
     '   - 判断不了分区就省略 `partition`，由路由器决定。',
+    ...partitions.some(partition => partition.quick === true) ? [
+      `   e. **快任务**：不属于上面任何工作区的小活——改电脑配置、跑 git 命令、装工具、查端口/进程/磁盘这类——`,
+      `      发一条 \`route_task\`，\`partition\` 填 \`${QUICK_PARTITION}\`，text 写清要做什么。它由一个快模型 worker 直接做，`,
+      '      不经过 manager。纯问答（不用在机器上执行就能答的）仍然按规则 1 直接回答，不要派。',
+    ] : [],
     '3. 你自己绝不动手干活：不调用 bash、pwsh、write、edit、apply_patch 等修改文件或执行命令的工具，',
     '   也不要用 web_fetch、browser 之类的工具代替执行者去做任务。可以用 `task_board` / `task_progress` 查进度，',
     '   用 `read` / `read_image` 查看执行者产出的文件和截图。',
@@ -274,11 +316,16 @@ function anchorInstructions(partitions: readonly Partition[]): string {
     '   `task_control` 的 `resume` 手动继续。',
     '8. 以「【进度提醒】」开头的消息来自路由器，不是用户的新需求：用一两句话把进度转告用户（哪个任务挂起/继续了、',
     '   整体完成了几个），不要派任务，也不要调用工具。',
+    '9. 子任务结束的通知不一定代表做完：分区 manager 有时一轮结束后会被路由器叫醒接着等它的 worker。收到通知后先用',
+    '   `task_board`（带 task_id）看那个任务的状态：还是 running / dispatched / queued 的，不要告诉用户做完了，',
+    '   最多一句「还在做」，等真正结束的那条通知再汇报；同一个任务已经汇报过的，不要重复汇报。',
   ].join('\n')
 }
 
 /** Directory the anchor Session lives in: the partitions' shared parent, else the first root. */
-function anchorDirOf(partitions: readonly Partition[]): string {
+function anchorDirOf(all: readonly Partition[]): string {
+  // The 快任务 root (home) is not a workspace and would pull the anchor out of them.
+  const partitions = all.filter(partition => partition.quick !== true)
   const parents = [...new Set(partitions.map(partition => dirname(partition.dir)))]
   return parents.length === 1 ? parents[0]! : (partitions[0]?.dir ?? process.cwd())
 }
@@ -330,10 +377,15 @@ interface RouteArgs {
 
 /** Mount the router: partitions, board, tools, and the worker lifecycle. */
 export async function apply(ctx: PluginContext, config: RouterConfig): Promise<void> {
-  const partitions = normalisePartitions(config.partitions, {
+  const declared = normalisePartitions(config.partitions, {
     workers: DEFAULT_SLOTS,
     manager: config.manager !== false,
   })
+  // 快任务: a built-in partition for jobs outside every workspace (see QuickConfig).
+  const quick = quickPartition(config.quick, declared, homedir())
+  const partitions: readonly Partition[] = quick === undefined ? declared : [...declared, quick]
+  /** Names of partitions whose workers do not count against the router-wide cap. */
+  const quickNames = new Set(partitions.filter(partition => partition.quick === true).map(partition => partition.name))
   const home = process.env['DSH_HOME'] ?? join(homedir(), '.dsh')
   const boardDir = config.boardDir === undefined ? join(home, 'router') : resolve(config.boardDir)
   const snapshotPath = join(boardDir, 'snapshot.json')
@@ -911,12 +963,13 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
   const runningCount = (partition: string): number =>
     board.inPartition(partition).filter(task => task.level === 'worker' && holdsSlot(task)).length
 
+  /** Workspace workers only: a 快任务 worker has its own slots and never takes a workspace's. */
   const totalRunning = (): number =>
-    board.list().filter(task => task.level === 'worker' && holdsSlot(task)).length
+    board.list().filter(task => task.level === 'worker' && !quickNames.has(task.partition) && holdsSlot(task)).length
 
   /** Whether the router-side worker caps are reached; `0` means that cap is off. */
   const workersFull = (partition: Partition): boolean =>
-    (maxWorkers > 0 && totalRunning() >= maxWorkers)
+    (maxWorkers > 0 && partition.quick !== true && totalRunning() >= maxWorkers)
     || (partition.slots > 0 && runningCount(partition.name) >= partition.slots)
 
   const readLog = createLogReader(ctx.get('sessionQuery'), ctx.logger)
@@ -1928,7 +1981,10 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
       // level 2 and must start a worker rather than another manager.
       const fromManager = args.parent_task !== undefined
       const level = decision.partition.managerEnabled && !fromManager ? 'manager' : 'worker'
-      const tier = await decideTier(args)
+      // A 快任务 runs on the fast model unless the caller named a tier.
+      const tier = decision.partition.quick === true && !isTier(args.tier)
+        ? { tier: 'easy' as const, source: 'explicit' as const, reason: '快任务：用快模型' }
+        : await decideTier(args)
       const task = await enqueue(args, decision, level, exec.agent, tier)
       await pump(decision.partition.name, exec.agent)
       const after = board.get(task.id) ?? task
@@ -2201,6 +2257,8 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
           return { text: `${updated.id} priority -> ${String(value)}` }
         }
         case 'retry': {
+          // The work moved to another row (改派): running this one again would do it twice.
+          if (task.reassignedTo !== undefined) throw new Error(`${task.id} was reassigned to ${task.reassignedTo}; retry that row instead`)
           if (task.state === 'running' || task.state === 'dispatched') {
             throw new Error(`${task.id} is still in flight; cancel it first`)
           }
@@ -2215,6 +2273,7 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
           return { text: `${after.id} state ${after.state}; worker ${after.worker ?? '-'}` }
         }
         case 'resume': {
+          if (task.reassignedTo !== undefined) throw new Error(`${task.id} was reassigned to ${task.reassignedTo}; resume that row instead`)
           if (task.state === 'running' || task.state === 'dispatched') {
             throw new Error(`${task.id} is still in flight`)
           }
@@ -3291,6 +3350,7 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
       dir: partition.dir,
       slots: partition.slots,
       managerEnabled: partition.managerEnabled,
+      ...partition.quick === true ? { quick: true } : {},
       ...partition.include === undefined ? {} : { include: partition.include },
       ...partition.exclude === undefined ? {} : { exclude: partition.exclude },
       ...partition.description === undefined ? {} : { description: partition.description.replace(/\s+/g, ' ').trim() },
@@ -3298,6 +3358,8 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
     files: async (name, path) => {
       const partition = partitions.find(entry => entry.name === name)
       if (partition === undefined) throw new BridgeError(404, 'not-found', `unknown partition "${name}"`)
+      // Its root is the home directory: the panel does not browse that.
+      if (partition.quick === true) throw new BridgeError(404, 'not-found', '快任务没有工作区文件')
       try {
         return await listPartitionDir(partition, path)
       } catch (error) {
@@ -3382,7 +3444,8 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
         return
       }
       for (const route of createRoutes(bridgeDeps)) {
-        webCtx.effect(() => webServer.register(route), `host-router: ${route.path}`)
+        const guarded = requireLogin(route, () => ctx.get('connection') as LoginCheck | undefined)
+        webCtx.effect(() => webServer.register(guarded), `host-router: ${route.path}`)
       }
       ctx.logger.info(`host-router: HTTP bridge mounted at ${BRIDGE_BASE} (board/publish/anchor/verify/control/partition/tiers/files/events)`)
     })

@@ -20,6 +20,7 @@ import { join, resolve } from 'node:path';
 import { BRIDGE_BASE, createRoutes } from "./bridge.js";
 import { EgressRuntime, installHook } from "./dispatch.js";
 import { buildState, providerHosts, statusText } from "./state.js";
+import { requireLogin } from "./login.js";
 import { EgressStore } from "./store.js";
 /** Stable plugin name. */
 export const name = 'host-egress';
@@ -87,8 +88,12 @@ export function apply(ctx, config = {}) {
             ctx.logger.warn('dsh-egress: webServer exposes no register(); the HTTP bridge is not mounted');
             return;
         }
-        for (const route of routes)
-            webCtx.effect(() => webServer.register(route), `dsh-egress: ${route.path}`);
+        // Login is checked here: a plugin route outranks the connection's own `/api` check.
+        const connection = () => ctx.get?.('connection');
+        for (const route of routes) {
+            const guarded = requireLogin(route, connection);
+            webCtx.effect(() => webServer.register(guarded), `dsh-egress: ${route.path}`);
+        }
         ctx.logger.info(`dsh-egress: HTTP bridge mounted at ${BRIDGE_BASE} (state/exit/binding/probe)`);
     });
 }

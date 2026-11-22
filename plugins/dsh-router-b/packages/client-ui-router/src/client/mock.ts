@@ -74,6 +74,17 @@ const partitions: PartitionView[] = [
       worker('w-s-2', 'worker-2', 'released', { sessionId: 'ses_s2' }),
     ],
   },
+  {
+    // The built-in 快任务 group: jobs outside every workspace, no manager.
+    id: 'quick',
+    name: '快任务',
+    quick: true,
+    workerCount: 2,
+    manager: manager('mgr:quick', 'router', 'online', 2, 0),
+    workers: [
+      worker('w-q-1', 'worker-1', 'released', { sessionId: 'ses_q1' }),
+    ],
+  },
 ]
 
 /**

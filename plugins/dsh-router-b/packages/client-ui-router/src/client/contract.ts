@@ -195,6 +195,11 @@ export interface PartitionView {
   readonly description?: string
   /** Configuration problems the Host found at boot. */
   readonly problems?: readonly PartitionProblemView[]
+  /**
+   * The built-in 快任务 group: small jobs outside every workspace, one worker
+   * each on the fast model, with slots of its own. It has no files to browse.
+   */
+  readonly quick?: boolean
 }
 
 /** One partition configuration problem a person should fix. */

@@ -193,6 +193,74 @@ export interface RouterConfig {
    * `<command> <url> <out.png> [--full] [--wait ms]`. Default `/srv/workspace/bin/screenshot`.
    */
   readonly screenshotCommand?: string
+  /**
+   * 快任务: small jobs outside every workspace (machine settings, a git command,
+   * installing a tool). On by default; `false` turns it off.
+   */
+  readonly quick?: QuickConfig | false
+}
+
+/** Name the built-in 快任务 partition is routed by. */
+export const QUICK_PARTITION = 'quick'
+
+/**
+ * The built-in 快任务 partition.
+ *
+ * Work that belongs to no project still deserves a worker rather than the
+ * chat: "set the git user name", "what is using port 3000", "install jq". The
+ * router hands such a job to one worker on the fast model, with no manager
+ * and no branch, and answers the user at once; the result comes back later.
+ * These workers have their own slots, so a quick job never waits behind a
+ * workspace's long task and never takes a workspace's slot.
+ */
+export interface QuickConfig {
+  /** Directory the worker starts in. Default the user's home directory. */
+  readonly root?: string
+  /** Concurrent quick workers. Default 2; `0` means no cap. */
+  readonly workers?: number
+  /** One line the classifier and the panel show. */
+  readonly description?: string
+  /** Outlet policy, as for any partition (dangerous commands still ask). */
+  readonly outlets?: OutletPolicy
+}
+
+/** Default one-line description of the 快任务 partition. */
+export const QUICK_DESCRIPTION = '快任务：不属于任何工作区的小活，例如改电脑配置、跑 git 命令、装工具、查端口或磁盘'
+
+/**
+ * Build the 快任务 partition, or undefined when it is off or a declared
+ * partition already uses its name (the declared one wins).
+ * @param raw - `RouterConfig.quick`.
+ * @param declared - the normalised declared partitions.
+ * @param home - default root.
+ */
+export function quickPartition(raw: QuickConfig | false | undefined, declared: readonly Partition[], home: string): Partition | undefined {
+  if (raw === false) return undefined
+  if (declared.some(partition => partition.name === QUICK_PARTITION)) return undefined
+  const config = raw ?? {}
+  const root = config.root ?? home
+  if (typeof root !== 'string' || !isAbsolute(root)) throw new PartitionConfigError('quick.root must be an absolute path')
+  const slots = config.workers ?? 2
+  if (!Number.isInteger(slots) || slots < 0) throw new PartitionConfigError('quick.workers must be >= 0 (0 = unlimited)')
+  for (const key of ['git', 'ops', 'browser'] as const) {
+    const mode = config.outlets?.[key]
+    if (mode !== undefined && mode !== 'off' && mode !== 'confirm' && mode !== 'allow') {
+      throw new PartitionConfigError(`quick: outlets.${key} must be off, confirm or allow`)
+    }
+  }
+  return {
+    name: QUICK_PARTITION,
+    root,
+    dir: resolve(root),
+    slots,
+    managerEnabled: false,
+    quick: true,
+    description: config.description ?? QUICK_DESCRIPTION,
+    // Membership by file would claim everything under the home directory;
+    // a quick job is routed by name, never by a file path.
+    include: [],
+    ...config.outlets === undefined ? {} : { outlets: config.outlets },
+  }
 }
 
 /** Why a task landed where it did; recorded so a human can audit routing. */
@@ -206,6 +274,8 @@ export interface Partition extends PartitionConfig {
   readonly slots: number
   /** Effective manager flag. */
   readonly managerEnabled: boolean
+  /** The built-in 快任务 partition (see {@link QuickConfig}). */
+  readonly quick?: boolean
 }
 
 /** Raised for configuration a deployment must fix, not for a task-level mistake. */
@@ -728,6 +798,7 @@ const NETWORK_BRIEF: Readonly<Record<PartitionNetwork, string>> = {
  * @returns the brief text.
  */
 export function partitionBrief(partition: Partition, options: { readonly verify: boolean; readonly taskId?: string }): string {
+  if (partition.quick === true) return quickBrief(partition, options)
   const lines = [
     `You are a worker for the "${partition.name}" partition of this workspace.`,
     `Your working directory is already ${partition.dir}. Treat it as the whole of your scope: do not edit files outside it.`,
@@ -815,4 +886,32 @@ export function partitionBrief(partition: Partition, options: { readonly verify:
     'Only report what you actually observed (command output, page text, files you checked).',
   )
   return lines.join('\n')
+}
+
+/**
+ * Brief for a 快任务 worker: one small job outside every workspace, done
+ * quickly and reported in a few lines. No checklist (a two-command job does not
+ * need one), no branch, no project edits.
+ */
+function quickBrief(partition: Partition, options: { readonly taskId?: string }): string {
+  return [
+    'You are a worker for 快任务 (quick jobs): one small job that belongs to no project workspace, such as a',
+    'machine setting, a git command, installing a tool, or checking a port, a process or the disk.',
+    `Your working directory is ${partition.dir}; cd elsewhere when the job names another place.`,
+    '',
+    'Rules (hard requirement):',
+    '- Do exactly the job asked, with as few steps as it takes, then answer. Do not plan with `todo_write`.',
+    '- Do not edit the source code of a project workspace. If the job turns out to be project work, stop and',
+    '  say so in one line; the router will send it to that workspace.',
+    '- Never switch branches, reset, clean or force-push in a repository you did not create for this job.',
+    '- Anything that changes the machine in a way that is hard to undo (restart or stop a service, delete files,',
+    '  firewall, users, reboot, force-push, package removal) goes through `ops_run`, never your own shell:',
+    '  it is logged and the dangerous ones wait for the human to press 同意. Installing a tool, setting a',
+    '  config value and read-only looks may use the shell.',
+    '- Never print a secret value (token, password, key) in your answer; say where it is set instead.',
+    ...options.taskId === undefined ? [] : [`- Your task id is ${options.taskId}.`],
+    '',
+    'Answer in two to five lines: what you ran and what came out (the exact value, version or error).',
+    'Only report what you actually observed.',
+  ].join('\n')
 }

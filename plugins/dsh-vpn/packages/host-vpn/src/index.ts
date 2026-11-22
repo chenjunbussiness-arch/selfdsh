@@ -18,6 +18,7 @@ import { join, resolve } from 'node:path'
 import { BRIDGE_BASE, createRoutes } from './bridge.ts'
 import { VpnManager } from './manager.ts'
 import type { ManagerOptions, StatusDocument } from './manager.ts'
+import { requireLogin, type LoginCheck } from './login.ts'
 import { ProfileStore } from './store.ts'
 import type { PluginContext } from './types.ts'
 
@@ -114,7 +115,12 @@ export async function apply(ctx: PluginContext, config: VpnConfig = {}): Promise
         ctx.logger.warn('host-vpn: webServer exposes no register(); the HTTP bridge is not mounted')
         return
       }
-      for (const route of createRoutes(deps)) webCtx.effect(() => webServer.register(route), `host-vpn: ${route.path}`)
+      // Login is checked here: a plugin route outranks the connection's own `/api` check.
+      const connection = (): LoginCheck | undefined => (ctx as { get?(name: string): unknown }).get?.('connection') as LoginCheck | undefined
+      for (const route of createRoutes(deps)) {
+        const guarded = requireLogin(route, connection)
+        webCtx.effect(() => webServer.register(guarded), `host-vpn: ${route.path}`)
+      }
       ctx.logger.info(`host-vpn: HTTP bridge mounted at ${BRIDGE_BASE} (status/profiles/profile/connect/disconnect/logs)`)
     })
   } else {

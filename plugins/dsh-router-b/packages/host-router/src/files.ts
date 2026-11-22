@@ -185,7 +185,8 @@ export async function partitionProblems(partitions: readonly Partition[]): Promi
     } catch {
       problems.push({ partition: partition.name, level: 'error', message: `根目录 ${partition.dir} 不存在` })
     }
-    if (partition.include !== undefined && partition.include.length === 0) {
+    // 快任务 holds no files on purpose (its root is the home directory).
+    if (partition.quick !== true && partition.include !== undefined && partition.include.length === 0) {
       problems.push({ partition: partition.name, level: 'warning', message: 'include 为空：这个分区不包含任何文件' })
     }
     if ((partition.exclude ?? []).some(pattern => pattern === '**' || pattern === '**/*')) {
@@ -194,7 +195,8 @@ export async function partitionProblems(partitions: readonly Partition[]): Promi
   }
   for (const outer of partitions) {
     for (const inner of partitions) {
-      if (outer === inner) continue
+      // The 快任务 root usually contains the workspaces; that is not a layout problem.
+      if (outer === inner || outer.quick === true || inner.quick === true) continue
       const rel = relativeUnder(outer.dir, inner.dir)
       if (rel === undefined) continue
       if (rel === '') {

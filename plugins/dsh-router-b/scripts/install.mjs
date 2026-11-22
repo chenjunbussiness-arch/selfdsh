@@ -29,7 +29,7 @@
  * @module dsh-router-b/scripts/install
  */
 
-import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -151,6 +151,8 @@ if (semanticChange) {
 // --- 3. node_modules links --------------------------------------------------
 
 const modules = join(profile, 'node_modules')
+// A fresh profile (first `dsh web` run, or a new machine) has no node_modules yet.
+if (!dryRun) mkdirSync(modules, { recursive: true })
 for (const [name, spec] of Object.entries(wanted)) {
   const target = spec.slice('link:'.length)
   const linkPath = join(modules, name)
@@ -204,8 +206,12 @@ if (disableBrand) {
       '  disabled: true',
       '',
     ].join('\n')
+    // A profile that `dsh` just created holds an empty flow list (`[]`) under its
+    // comment header. Appending a block-style row after it is not valid YAML and
+    // the app then refuses to start, so the empty list is dropped first.
+    const base = patch.replace(/^\[\]\s*$/m, '')
     act('cordis.patch.yml: disable ui-brand-official', () => {
-      replaceFile(patchPath, `${patch}${patch === '' || patch.endsWith('\n') ? '' : '\n'}${block}`)
+      replaceFile(patchPath, `${base}${base === '' || base.endsWith('\n') ? '' : '\n'}${block}`)
     })
   }
 }
@@ -218,8 +224,8 @@ if (disableBrand) {
 // reported loudly instead of silently.
 const rootsPatch = join(BUNDLE, 'cordis.patch.yml')
 const missingRoots = existsSync(rootsPatch)
-  ? [...readFileSync(rootsPatch, 'utf8').matchAll(/^\s*root:\s*(\S+)\s*$/gm)]
-      .map(match => match[1])
+  ? [...readFileSync(rootsPatch, 'utf8').matchAll(/^\s*root:\s*("[^"]*"|'[^']*'|\S+)\s*$/gm)]
+      .map(match => match[1].replace(/^(['"])(.*)\1$/, '$2'))
       .filter(root => !existsSync(root))
   : []
 

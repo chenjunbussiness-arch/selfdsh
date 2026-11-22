@@ -21,7 +21,7 @@
  * Swapping the source is one line in `index.ts`; nothing in the view knows which
  * one it is reading.
  */
-import type { BoardSnapshot, PublishResult, TaskState } from './contract.ts';
+import type { ApprovalsView, ApprovalView, AuditEntryView, BatchAction, BatchResultView, LiveView, ModelChoiceView, ReassignInput, ReassignResult, BoardSnapshot, FileListingView, MemoryNoteView, PartitionMemoryView, PublishResult, TaskState } from './contract.ts';
 import { createMockSource } from './mock.ts';
 /** The one seam between the view and the router. */
 export interface BoardSource {
@@ -46,11 +46,54 @@ export interface BoardSource {
      */
     verify(taskId: string, verdict: Extract<TaskState, 'verified' | 'rejected'>, note?: string): Promise<void>;
     /**
+     * Run one `task_control` action on a task. Optional: a source without it
+     * renders the control as "not wired" instead of pretending.
+     * @param taskId - the task.
+     * @param action - the `task_control` action; only `resume` is used today.
+     * @param value - the action's optional `value` argument.
+     * @param extra - `suspend` only: the prerequisite to create, or ids to wait for.
+     */
+    control?(taskId: string, action: ControlAction, value?: string, extra?: ControlExtra): Promise<void>;
+    /**
+     * List one directory level of one partition. Optional: a source without it
+     * renders the workspace page as "not available".
+     */
+    listFiles?(partition: string, path: string): Promise<FileListingView>;
+    /** A partition's memory (notes, recent work, sessions); optional like `listFiles`. */
+    readMemory?(partition: string): Promise<PartitionMemoryView>;
+    /** Add one note to a partition's memory. */
+    addMemoryNote?(partition: string, text: string): Promise<MemoryNoteView>;
+    /** Remove one note from a partition's memory. */
+    removeMemoryNote?(partition: string, id: string): Promise<void>;
+    /** Outlet actions waiting for a human, and the latest decided ones. */
+    readApprovals?(): Promise<ApprovalsView>;
+    /** Approve (run once) or reject one approval. */
+    decideApproval?(id: string, decision: 'approve' | 'reject', note?: string): Promise<ApprovalView>;
+    /** Newest audit lines. */
+    readAudit?(limit?: number): Promise<readonly AuditEntryView[]>;
+    /** A worker's output since segment `after`. */
+    readLive?(taskId: string, after?: number): Promise<LiveView>;
+    /** Models the runtime offers (for 换模型). */
+    listModels?(): Promise<readonly ModelChoiceView[]>;
+    /** 改派 / 换模型. */
+    reassign?(input: ReassignInput): Promise<ReassignResult>;
+    /** One action over many rows. */
+    batch?(taskIds: readonly string[], action: BatchAction, value?: string): Promise<BatchResultView>;
+    /**
      * Observe Host-side changes.
      * @param listener - called whenever the board may have changed.
      * @returns unsubscribe.
      */
     subscribe(listener: () => void): () => void;
+}
+/** `task_control` actions the panel may send. */
+export type ControlAction = 'resume' | 'suspend' | 'retry' | 'cancel' | 'cancel_tree';
+/** Extra arguments of a `suspend`. */
+export interface ControlExtra {
+    /** A prerequisite task to create and wait for. */
+    readonly prerequisite?: string;
+    /** Existing task ids to wait for. */
+    readonly waitFor?: readonly string[];
 }
 /** The Remote surface the Host half is expected to expose (`ctx.remote.router`). */
 export interface RouterRemoteLike {
@@ -130,6 +173,22 @@ export interface HttpSourceOptions {
     readonly fetchImpl?: typeof fetch;
 }
 /**
+ * Call one bridge endpoint and decode its JSON answer.
+ * @param doFetch - the `fetch` implementation to use.
+ * @param url - request URL, relative to the page origin.
+ * @param init - method, headers, body.
+ * @returns the decoded body (undefined for an empty body).
+ * @throws {Error} when the request fails or the bridge answers with a non-2xx status.
+ */
+/** Upper bound for one bridge request before it counts as failed. */
+export declare const REQUEST_TIMEOUT_MS = 10000;
+/**
+ * Upper bound for the board read. The host rebuilds the whole board on each
+ * read and, on a large board, that takes well over 10s; a tighter bound turned
+ * a slow-but-healthy read into a permanent error banner.
+ */
+export declare const BOARD_TIMEOUT_MS = 90000;
+/**
  * Build the source that talks to the Host's HTTP bridge.
  * @param options - bridge prefix, sample fallback, and a test `fetch`.
  * @returns a live BoardSource.
@@ -150,8 +209,9 @@ export declare function createHttpActions(options?: {
     setPartitionEnabled(partitionId: string, enabled: boolean): Promise<void>;
 };
 /**
- * Pick the source for this client: the Host's HTTP bridge, which itself falls
- * back to labelled sample data until the Host answers.
+ * Pick the source for this client: the Host's HTTP bridge. A failed read is an
+ * error the panel shows with a retry button; it never turns into sample tasks
+ * that could pass for real ones.
  *
  * The factory parameter stays for a Host that publishes a Remote: when it is
  * supplied the caller's source wins, so nothing about the Remote path is lost.

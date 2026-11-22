@@ -155,6 +155,8 @@ export interface UiManagerView {
 export interface UiPartitionView {
   readonly id: string
   readonly name: string
+  /** The built-in 快任务 group: jobs outside every workspace, on the fast model, with its own slots. */
+  readonly quick?: boolean
   /** Absolute partition root. `repo` is the client contract's name for the same value. */
   readonly repo: string
   /** Same absolute root, under the name the rail's subtitle reads. */
@@ -382,6 +384,8 @@ export interface PartitionSource {
   readonly dir: string
   readonly slots: number
   readonly managerEnabled: boolean
+  /** The built-in 快任务 partition. */
+  readonly quick?: boolean
   readonly include?: readonly string[]
   readonly exclude?: readonly string[]
   readonly description?: string
@@ -624,7 +628,8 @@ export function boardDocument(input: {
     const scopedViews = tasks.filter(task => task.partitionId === partition.name)
     return {
       id: partition.name,
-      name: partition.name,
+      name: partition.quick === true ? '快任务' : partition.name,
+      ...partition.quick === true ? { quick: true } : {},
       repo: partition.dir,
       path: partition.dir,
       enabled: input.isEnabled(partition.name),

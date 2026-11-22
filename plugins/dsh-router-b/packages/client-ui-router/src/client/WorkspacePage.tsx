@@ -185,9 +185,11 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
 
   useEffect(() => {
     if (partitionId === undefined || !controller.canListFiles) return
+    // 快任务 has no files of its own (its root is the home directory).
+    if (partitions.find(partition => partition.id === partitionId)?.quick === true) return
     if (dirs.has(dirKey(partitionId, ''))) return
     void loadDir(partitionId, '')
-  }, [partitionId, dirs, loadDir, controller])
+  }, [partitionId, partitions, dirs, loadDir, controller])
 
   /** The selected partition's memory, keyed by partition so a switch never shows stale notes. */
   const [memory, setMemory] = useState<{ readonly partition: string; readonly view?: PartitionMemoryView; readonly error?: string } | null>(null)
@@ -324,7 +326,7 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
         title={partition.path ?? partition.repo ?? partition.name}>
         <span className="dshws-pmain">
           <span className="dshws-pn">{partition.name}{partition.enabled === false ? ` · ${t('ws.disabled')}` : ''}</span>
-          <span className="dshws-pp">{partition.path ?? partition.repo ?? ''}</span>
+          <span className="dshws-pp">{partition.quick === true ? t('ws.quickHint') : partition.path ?? partition.repo ?? ''}</span>
         </span>
         {worst !== undefined && <span className="dshws-badge" data-tone={worst} title={problems.map(problem => problem.message).join('\n')}>!</span>}
         {running > 0 && <span className="dshws-badge" data-tone="running">{running}</span>}
@@ -535,9 +537,11 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
                     <div className="dshws-parts">{partitions.map(partitionRow)}</div>
                     <span className="dshws-cap">{current.name}</span>
                     <div className="dshws-tree" role="tree" aria-label={current.name}>
-                      {controller.canListFiles
-                        ? dirBody(current.id, '', 0)
-                        : <div className="dshws-note">{t('ws.notWired')}</div>}
+                      {current.quick === true
+                        ? <div className="dshws-note">{t('ws.quickNoFiles')}</div>
+                        : controller.canListFiles
+                          ? dirBody(current.id, '', 0)
+                          : <div className="dshws-note">{t('ws.notWired')}</div>}
                     </div>
                   </div>
                   <div className="dshws-right">
@@ -550,7 +554,9 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
                         <dd>
                           {include === undefined || (include.length === 1 && include[0] === '**')
                             ? t('ws.all')
-                            : <span className="dshws-globs">{include.map(glob => <span key={glob} className="dshws-glob">{glob}</span>)}</span>}
+                            : include.length === 0
+                              ? t('ws.none')
+                              : <span className="dshws-globs">{include.map(glob => <span key={glob} className="dshws-glob">{glob}</span>)}</span>}
                         </dd>
                         <dt>{t('ws.exclude')}</dt>
                         <dd>
@@ -577,11 +583,21 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
                     </section>
                     <section className="dshws-sec">
                       <h3>{t('ws.rules')}</h3>
-                      <ol className="dshws-rules">
-                        <li>{t('ws.rule1')}</li>
-                        <li>{t('ws.rule2')}</li>
-                        <li>{t('ws.rule3')}</li>
-                      </ol>
+                      {current.quick === true
+                        ? (
+                            <ol className="dshws-rules">
+                              <li>{t('ws.quickRule1')}</li>
+                              <li>{t('ws.quickRule2')}</li>
+                              <li>{t('ws.quickRule3')}</li>
+                            </ol>
+                          )
+                        : (
+                            <ol className="dshws-rules">
+                              <li>{t('ws.rule1')}</li>
+                              <li>{t('ws.rule2')}</li>
+                              <li>{t('ws.rule3')}</li>
+                            </ol>
+                          )}
                     </section>
                     <section className="dshws-sec">
                       <div className="dshws-sech">

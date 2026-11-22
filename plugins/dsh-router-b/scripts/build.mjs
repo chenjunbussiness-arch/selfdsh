@@ -15,8 +15,8 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -105,7 +105,35 @@ run('client declarations', process.execPath, [tsc, '-p', 'tsconfig.build.json'],
 run('client bundle', process.execPath, ['scripts/build-client.mjs'], CLIENT)
 
 // 3. Host half: plain tsc project build, which also type-checks the sources.
-run('host bundle', process.execPath, [host.bin, '-b'], HOST)
+//    tsconfig.json names the Node types by an absolute path on the machine it
+//    was written on; elsewhere that path is missing and tsc fails with TS2688.
+//    Then look for @types/node nearby (or take DSH_TYPE_ROOTS) and pass it in.
+const configured = (() => {
+  try { return JSON.parse(readFileSync(join(HOST, 'tsconfig.json'), 'utf8')).compilerOptions?.typeRoots ?? [] } catch { return [] }
+})()
+const hasNodeTypes = dir => existsSync(join(dir, 'node', 'package.json'))
+let typeArgs = []
+if (!configured.some(dir => hasNodeTypes(resolve(HOST, dir)))) {
+  const typeRoots = [
+    process.env.DSH_TYPE_ROOTS ?? '',
+    join(HOST, 'node_modules', '@types'),
+    join(ROOT, 'node_modules', '@types'),
+    join(CLIENT, 'node_modules', '@types'),
+    join(dirname(ROOT), 'deepseek-harness-latest', 'node_modules', '@types'),
+    join(dirname(dirname(dirname(host.bin))), '@types'),
+  ].find(dir => dir !== '' && hasNodeTypes(dir))
+  if (typeRoots === undefined) {
+    console.error([
+      'host bundle: no @types/node found for the host half.',
+      'Install it next to the plugin (npm i -D @types/node in packages/host-router),',
+      'or set DSH_TYPE_ROOTS to a directory that contains node/ (an @types folder).',
+    ].join('\n'))
+    process.exit(1)
+  }
+  console.log(`host types: ${typeRoots}`)
+  typeArgs = ['-p', 'tsconfig.json', '--typeRoots', typeRoots]
+}
+run('host bundle', process.execPath, [host.bin, ...typeArgs.length === 0 ? ['-b'] : typeArgs], HOST)
 
 // 4. The host project's own tests: they import the compiled output, so a broken
 //    build cannot pass them.

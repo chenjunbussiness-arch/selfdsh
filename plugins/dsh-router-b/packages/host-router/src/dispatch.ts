@@ -90,7 +90,9 @@ export async function startWorker(
     provider: spec.provider,
     label: spec.label,
     cwd: spec.cwd,
-    prompt: [{ type: 'text', text: spec.prompt }],
+    // The host appends its own closing sentence to the prompt with no separator;
+    // without the blank line it fuses onto the request's last line.
+    prompt: [{ type: 'text', text: spec.prompt.endsWith('\n\n') ? spec.prompt : `${spec.prompt.trimEnd()}\n\n` }],
     parent: spec.parent,
     signal: spec.signal,
     delivery: spec.delivery ?? 'parent',

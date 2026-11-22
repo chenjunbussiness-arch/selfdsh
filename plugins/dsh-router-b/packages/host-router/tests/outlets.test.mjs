@@ -14,10 +14,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { apply } from '../lib/index.js'
+import { apply, requireLogin } from '../lib/index.js'
 import { TaskBoard } from '../lib/board.js'
 import { classifyCommand, hostAllowed, OutletStore } from '../lib/outlets.js'
 import { createScmClient, scmProblem } from '../lib/scm.js'
+import { quickPartition } from '../lib/config.js'
 import { liveSegments } from '../lib/live.js'
 
 const posix = process.platform !== 'win32'
@@ -220,6 +221,8 @@ function harness() {
       return () => {}
     },
     get(name) {
+      // Logged in unless the request says otherwise (see the login test).
+      if (name === 'connection') return { requestRejection: req => (req.headers?.['x-test-login'] === 'no' ? 401 : undefined) }
       if (name === 'agents') return { get: id => agents.get(id), async create() { throw new Error('no create in test') } }
       if (name === 'sessionQuery') return { async readSession(id) { return { session: { id }, events: logs.get(id) ?? [] } }, async listSessions() { return [] } }
       if (name === 'subagents') {
@@ -319,7 +322,7 @@ function fakeGitHub() {
 }
 
 /** A checkout on branch `feature` with a bare `origin`, plus a router over it. */
-async function boot({ outlets, manager = false, extraPartitions = [] } = {}) {
+async function boot({ outlets, manager = false, extraPartitions = [], quick, maxWorkers } = {}) {
   const dir = scratch()
   const remote = join(dir, 'remote.git')
   const root = join(dir, 'site')
@@ -348,6 +351,8 @@ async function boot({ outlets, manager = false, extraPartitions = [] } = {}) {
     boardDir: join(dir, 'board'), manager, resumeDelayMs: 60_000, progressNoticeDelayMs: 10,
     screenshotCommand: shot,
     scmFetch: host.fetch,
+    ...quick === undefined ? {} : { quick: quick === false ? false : { root: join(dir, 'quick-home'), ...quick } },
+    ...maxWorkers === undefined ? {} : { maxWorkers },
     partitions: [
       { name: 'site', root, workers: 0, git: { scm: { provider: 'github', repo: 'o/r' } }, ...outlets === undefined ? {} : { outlets } },
       ...extraPartitions.map(name => ({ name, root: join(dir, name), workers: 0 })),
@@ -576,6 +581,9 @@ test('reassign with keep-progress carries the work so far, rewires dependents an
 
   // A row can only be reassigned once.
   assert.equal((await http(h, 'reassign', { method: 'POST', body: { taskId: one, partition: 'media' } })).status, 409)
+  // Nor run again in place: the work moved, and a retry would do it twice.
+  await assert.rejects(call('task_control', { task_id: one, action: 'retry' }), /reassigned to/)
+  await assert.rejects(call('task_control', { task_id: one, action: 'resume' }), /reassigned to/)
 })
 
 test('reassign from scratch onto another model records the override; a same-place retry is refused', { skip: !posix }, async () => {
@@ -645,4 +653,61 @@ test('live returns a running worker\'s output in segments, paged by seq', { skip
   assert.deepEqual(next.json.segments.map(segment => segment.seq), [3], 'only the still-running command')
   assert.equal((await http(h, 'live', { url: '/api/router/live?taskId=T-nope' })).status, 404)
   assert.equal((await http(h, 'live', { url: '/api/router/live' })).status, 400)
+})
+
+test('the HTTP bridge answers only a logged-in browser', async () => {
+  // A plugin route outranks the connection's own /api check, so the bridge checks login itself.
+  const route = { kind: 'exact', path: '/api/router/x', handler: async (_req, res) => { res.writeHead(200); res.end('ok') } }
+  const call = async (connection, headers = {}) => {
+    let status
+    const res = { writeHead(code) { status = code; return res }, end() { return res } }
+    await requireLogin(route, () => connection).handler({ headers }, res)
+    return status
+  }
+  assert.equal(await call({ requestRejection: () => undefined }), 200)
+  assert.equal(await call({ requestRejection: () => 401 }), 401)
+  assert.equal(await call({ requestRejection: () => 403 }), 403)
+  // No connection service at all: refuse rather than serve.
+  assert.equal(await call(undefined), 503)
+})
+
+// --- 快任务 ------------------------------------------------------------------
+
+test('快任务: a job outside the workspaces runs on the fast tier, needs no manager and has its own slots', { skip: !posix }, async () => {
+  // maxWorkers 1 is taken by the workspace job; the quick job still starts.
+  const { h, call, board, dir } = await boot({ manager: true, quick: {}, maxWorkers: 1 })
+  const site = (await call('route_task', { text: 'big feature', partition: 'site' })).task
+  const mgr = fakeAgent('child-1')
+  h.agents.set('child-1', mgr)
+  await call('route_task', { text: 'part one', partition: 'site', parent_task: site }, mgr)
+  const quick = (await call('route_task', { text: 'set git user.name to Jun', partition: 'quick' })).task
+  const row = (await board()).get(quick)
+  assert.equal(row.level, 'worker', 'no manager for a quick job')
+  assert.equal(row.state, 'dispatched', 'the router-wide cap does not hold it back')
+  assert.equal(row.tier, 'easy')
+  assert.equal(row.tierSource, 'explicit')
+  assert.equal(row.cwd, join(dir, 'quick-home'))
+  const spec = h.starts.at(-1)
+  const prompt = spec.prompt.map(part => part.text).join('')
+  assert.match(prompt, /快任务/)
+  assert.match(prompt, /ops_run/)
+  assert.doesNotMatch(prompt, /todo_write\` with a plan/, 'no checklist for a two-command job')
+
+  const doc = (await http(h, 'board')).json
+  const group = doc.partitions.find(partition => partition.id === 'quick')
+  assert.equal(group.name, '快任务')
+  assert.equal(group.quick, true)
+  // The panel does not browse the home directory.
+  assert.equal((await http(h, 'files', { url: '/api/router/files?partition=quick' })).status, 404)
+})
+
+test('快任务 can be turned off, and a declared partition named quick wins', { skip: !posix }, async () => {
+  const off = await boot({ quick: false })
+  await assert.rejects(off.call('route_task', { text: 'x', partition: 'quick' }), /quick/)
+  const doc = (await http(off.h, 'board')).json
+  assert.ok(!doc.partitions.some(partition => partition.id === 'quick'))
+  const declared = [{ name: 'quick', root: '/srv/mine', dir: '/srv/mine', slots: 1, managerEnabled: true }]
+  assert.equal(quickPartition(undefined, declared, '/home/u'), undefined)
+  assert.equal(quickPartition(undefined, [], '/home/u').dir, '/home/u')
+  assert.throws(() => quickPartition({ root: 'relative' }, [], '/home/u'), /absolute/)
 })

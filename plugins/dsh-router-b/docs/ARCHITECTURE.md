@@ -70,6 +70,8 @@ routing（route_task）──► manager（每个工作区一个，默认最强�
 | `POST /api/router/batch` `{taskIds(1..200), action, value?}` | 批量：`cancel` / `cancel_tree` / `retry` / `suspend` / `resume` / `reassign` |
 | `GET /api/router/tiers` | 现在也返回可选模型列表（换模型下拉用） |
 
+**所有 `/api/router/*` 都要求登录**（2026-11-22 实测后补）。DSH 自己的登录检查挂在 `/api` 这个前缀上，而插件注册的 `/api/router/...` 前缀更长，web server 会优先匹配插件路由，于是登录检查根本不会执行：不登录也能读看板、点「同意」。现在每条桥路由外面包了一层 `requireLogin`（`index.ts`），调用 DSH `connection` 服务的 `requestRejection(req)`：没登录 401，没有登录服务 503。egress、vpn、token-stats 三个插件的桥同样处理（各自的 `src/login.ts` / `bridge.js`）。
+
 ---
 
 ## 三、出口层怎么把关（`outlets.ts`）
@@ -182,7 +184,7 @@ routing（route_task）──► manager（每个工作区一个，默认最强�
 
 | 位置 | 内容 |
 |---|---|
-| `host-router/tests/outlets.test.mjs`（19 项） | 命令分级、域名白名单、GitHub/Gitea 适配器与令牌清洗、确认队列过期、实时输出切段；用临时 git 仓库 + 假 GitHub 跑通 推送→开 PR→更新、合并确认（头提交变化作废）、拒绝、各策略模式、截图、改派（接着做 / 从头来 / 换模型）、批量、实时输出分页 |
+| `host-router/tests/outlets.test.mjs`（22 项） | 命令分级、域名白名单、GitHub/Gitea 适配器与令牌清洗、确认队列过期、实时输出切段；用临时 git 仓库 + 假 GitHub 跑通 推送→开 PR→更新、合并确认（头提交变化作废）、拒绝、各策略模式、截图、改派（接着做 / 从头来 / 换模型）、批量、实时输出分页；改派过的行不能再重试/继续；桥路由要求登录；快任务走快模型、不占工作区名额、可关闭 |
 | `client-ui-router/tests/desk.test.mjs`（9 项） | 失败原因归类、输出合并、主题解析与两套色板、中英文案齐全、审批/输出/改派/批量走真实控制器、首屏渲染（主题、批量入口、PR 与改派链接、行内按钮） |
 | 无头浏览器实点（预览页） | 白天与黑夜各一遍：确认卡、两步同意、输出面板（出错段计数）、改派对话框开关、批量全选→确认→结果、主题切换并记住；页面零报错 |
 
@@ -196,3 +198,41 @@ routing（route_task）──► manager（每个工作区一个，默认最强�
 - 每个需求一个独立 worktree 还没做（第三期），同一分区的并行任务共用一个工作分支。
 - `git push` 用机器上已有的 git 凭据；令牌只用于 PR 的 API。
 - 截图需要服务器上有无头浏览器命令（默认 `/srv/workspace/bin/screenshot`，可配置）。
+- 截图命令仓库里不带：`browser_capture` 调的是外部脚本（`<命令> <url> <out.png> [--full]`），新机器要自己放一个，或在配置里用 `screenshotCommand` 指过去。
+- `host-router/tests/router.test.mjs`、`bridge.test.mjs` 等老测试写死了 Windows 路径（`E:/work/...`），在 Linux 上本来就有一批跑不过；本期没有新增失败（逐项对比过）。
+
+---
+
+## 九、快任务
+
+不属于任何工作区的小活（改电脑配置、跑 git 命令、装工具、查端口/进程/磁盘）不必走「路由 → manager → worker」整条链，也不该占工作区的名额。
+
+- **内置分区 `quick`**（面板显示「快任务」）：默认开启，根目录默认是家目录。配置在路由插件的 `quick` 键：`quick: false` 关掉；`quick: { root, workers, description, outlets }` 改根目录、并发（默认 2）、描述、出口策略。用户自己声明了叫 `quick` 的分区时，以用户的为准。
+- **路由规则**：作战室规则 2e 告诉路由：工作区外的小活发一条 `route_task`，`partition: quick`；纯问答仍按规则 1 直接回答。路由发出去立刻回「已派出」，结果回来再转告。
+- **怎么跑**：没有 manager，直接一个 worker；强制用「初级」档（快模型），除非调用方显式指定档位。worker 的说明书是精简版（`config.ts` 的 `quickBrief`）：不写 todo、不建分支、不改工作区项目代码、危险命令一律走 `ops_run`（会生成确认卡）、答复两到五行。
+- **名额**：快任务有自己的 `workers` 名额，不计入全局 `maxWorkers`，所以工作区里长任务排满时，快任务照样马上开始。
+- **面板**：看板和工作区页单独一组「快任务」；它没有自己的文件（根目录是家目录，面板不浏览），启动自检也不报「include 为空」「嵌套」。
+
+---
+
+## 十、真机实测记录（DSH 0.2.2-rc.5，2026-11-22）
+
+在一台干净的 Linux 上从 npm 装 `@deepseek-ai/dsh@0.2.2-rc.5`，用安装脚本装上本仓库全部插件，接一个本地「假模型」（OpenAI 兼容接口，按脚本扮演路由 / manager / worker），跑真实的 DSH 进程和真实的 subagent。
+
+**跑通的**：路由 → manager → worker 整条链；worker 在分区目录里真的执行命令并把结果交回；危险命令变成确认卡、点同意只执行一次、再点返回「已处理」；无头截图存到 `.dsh-artifacts/`；实时输出分段；改派（接着做）；批量；档位；快任务（约 0.2 秒回「已派出」，worker 用快模型在家目录执行）；面板白天 / 黑夜两套主题。截图在项目文件 `router-preview/real-dsh-0.2.2-rc5/`。
+
+**发现并已修**：
+
+1. DSH 0.2.2-rc.5 要求 **Node ≥ 24.9**（文档原来写 ≥ 22）。
+2. `host-router/lib/` 停在最早的提交，第一、二期的宿主功能实际上没被加载；已重新编译入库。
+3. 安装脚本在全新 profile 上崩溃（`node_modules` 目录不存在）；五个插件的 `install.mjs` 都已先建目录。
+4. 全新 profile 的 `cordis.patch.yml` 内容是 `[]`，`--disable-brand` 在后面追加列表项会让 YAML 失效、DSH 起不来；已处理。缺根目录提示也漏掉了带引号的路径；已修。
+5. **插件 HTTP 接口不登录就能调用**（见第二节末尾）；四个插件都已加登录检查，实测未登录一律 401。
+6. DSH 会在派给 worker 的说明后面直接接一句收尾语，没有换行，命令和那句话粘在一起被执行；已在说明末尾补空行。
+7. 改派过的任务还能被「重试 / 继续」，同一件事会做两遍；现在会拒绝并提示去操作新的那一行。
+8. manager 中途结束一轮又被叫醒时，DSH 会给作战室发「子任务已结束」通知，路由容易误报完成；作战室规则 9 要求先查 `task_board` 再汇报。
+
+**环境注意（不是插件的问题）**：DSH 给 agent 的 shell 去掉名字里带 `KEY` / `TOKEN` / `SECRET` / `PASSWORD` 的环境变量。如果启动 DSH 的进程设置了 `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_n`，`KEY_n` 会被去掉而 `COUNT` 留着，worker 里所有 git 命令都会报 `missing config key GIT_CONFIG_KEY_0`。启动 DSH 前别设这组变量（改用 `git config --global`）。
+
+**没有 API key 测不了的**：真实模型的判断质量（路由分区、manager 拆任务、档位分类器）；对真实 GitHub / Gitea 推分支、开 PR、合并（需要令牌）；Egress / VPN 的真实出口和隧道。
+

@@ -11,7 +11,7 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { BRIDGE_BASE, createRoutes } from './bridge.js'
+import { BRIDGE_BASE, createRoutes, requireLogin } from './bridge.js'
 import { UsageStore } from './scanner.js'
 
 /** Stable plugin name. */
@@ -57,8 +57,11 @@ export function apply(ctx, config = {}) {
         ctx.logger.warn('host-token-stats: webServer exposes no register(); the HTTP bridge is not mounted')
         return
       }
+      // Login is checked here: a plugin route outranks the connection's own `/api` check.
+      const connection = () => (typeof ctx.get === 'function' ? ctx.get('connection') : undefined)
       for (const route of createRoutes({ store, logger: ctx.logger })) {
-        webCtx.effect(() => webServer.register(route), `host-token-stats: ${route.path}`)
+        const guarded = requireLogin(route, connection)
+        webCtx.effect(() => webServer.register(guarded), `host-token-stats: ${route.path}`)
       }
       ctx.logger.info(`host-token-stats: read-only usage bridge mounted at ${BRIDGE_BASE}/summary (sessions: ${root})`)
     })
