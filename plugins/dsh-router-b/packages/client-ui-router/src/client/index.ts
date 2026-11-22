@@ -33,8 +33,6 @@ import { BrandMark, BrandName } from './Brand.tsx'
 import { RoutingIcon } from './RoutingIcon.tsx'
 import { CompactBoard } from './CompactBoard.tsx'
 import { WarRoomRedirect } from './WarRoomRedirect.tsx'
-import { WorkspacePage } from './WorkspacePage.tsx'
-import { WorkspaceIcon } from './WorkspaceIcon.tsx'
 import { ModelTiers, installModelTierStyles } from './ModelTiers.tsx'
 import { DICTIONARIES, NS } from './locales.ts'
 import { installStyles } from './styles.ts'
@@ -54,9 +52,6 @@ export const TAB_KIND = 'router-board'
  * Sidebar selects the panel whose key equals the row's `id`.
  */
 export const PANEL_ID = 'router/routing'
-
-/** Main-panel key and Sidebar row id of the 工作区 page. */
-export const WORKSPACE_ID = 'router/workspace'
 
 /**
  * Services this plugin cannot work without.
@@ -312,31 +307,8 @@ function applyInner(ctx: ClientContext): void {
     label: () => t('warroom.open'),
   }, RoutingIcon))
 
-  // --- workspace ---------------------------------------------------------------
-
-  // 工作区: each partition's files on the left, its rules and open tasks on the
-  // right. Reads `/api/router/files` one directory at a time.
-  ctx.slots.inject('main', () => ctx.slots.register({
-    name: 'main',
-    key: WORKSPACE_ID,
-    locale: NS,
-    inject: () => {
-      const face = panelFace()
-      return {
-        controller: face.controller,
-        t: face.t,
-        ...(face.onOpenSession === undefined ? {} : { onOpenSession: face.onOpenSession }),
-      }
-    },
-  }, WorkspacePage))
-
-  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-    name: 'sidebar.panellist',
-    id: WORKSPACE_ID,
-    order: -39,
-    locale: NS,
-    label: () => t('ws.open'),
-  }, WorkspaceIcon))
+  // 工作区 is no longer its own Sidebar row: it is the task board's 工作区 tab
+  // (CompactBoard renders WorkspacePage embedded), next to the tasks it explains.
 
   // 「模型档位」: its own footer-action entry (id `model-tiers`), above token stats (-100).
   installModelTierStyles()

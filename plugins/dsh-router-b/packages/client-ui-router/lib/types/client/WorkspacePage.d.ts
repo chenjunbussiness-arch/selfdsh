@@ -1,5 +1,6 @@
 /**
  * 工作区: what files each partition holds, and the rules a worker works by.
+ * Shown as the task board's 工作区 tab (`embedded`): one scrolling column.
  *
  * Left: the partitions, then the selected partition's file tree. The tree reads
  * one directory level per request (`GET /api/router/files?partition=&path=`), so
@@ -22,10 +23,15 @@ export interface WorkspacePageProps {
     readonly controller: RouterBoardController;
     readonly t: (key: string, values?: Record<string, string | number>) => string;
     readonly onOpenSession?: (sessionId: string) => void;
+    /**
+     * Rendered inside the task board's 工作区 tab: no page header (the board has
+     * its own), one scrolling column, and the board keeps the read loop running.
+     */
+    readonly embedded?: boolean;
 }
 /**
  * Render the 工作区 page.
  * @param props - controller, translate and the Session opener.
  * @returns the page.
  */
-export declare function WorkspacePage({ controller, t, onOpenSession }: WorkspacePageProps): import("react").JSX.Element;
+export declare function WorkspacePage({ controller, t, onOpenSession, embedded }: WorkspacePageProps): import("react").JSX.Element;

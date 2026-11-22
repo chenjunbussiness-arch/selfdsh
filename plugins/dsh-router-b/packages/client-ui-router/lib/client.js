@@ -24,7 +24,6 @@ __export(index_exports, {
   PANEL_ID: () => PANEL_ID,
   TAB_ID: () => TAB_ID,
   TAB_KIND: () => TAB_KIND,
-  WORKSPACE_ID: () => WORKSPACE_ID,
   apply: () => apply,
   inject: () => inject
 });
@@ -419,7 +418,7 @@ function RoutingIcon({ size = 18, active = false }) {
 }
 
 // src/client/CompactBoard.tsx
-var import_react5 = require("react");
+var import_react6 = require("react");
 
 // src/client/format.ts
 function relativeTime(iso, now = Date.now()) {
@@ -3018,21 +3017,567 @@ function ThemeButton({ pref, setPref, t, className }) {
   );
 }
 
-// src/client/CompactBoard.tsx
+// src/client/WorkspacePage.tsx
+var import_react5 = require("react");
 var import_jsx_runtime7 = require("react/jsx-runtime");
+var dirKey = (partition, path) => `${partition}\0${path}`;
+var STYLE = `${BOARD_TOKENS_CSS}
+.dshws{display:flex;flex-direction:column;height:100%;min-height:0;background:var(--c-bg);color:var(--c-text);font-size:13px;line-height:1.47;letter-spacing:-.003em;text-align:left;transition:background-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+.dshws *{box-sizing:border-box}
+:where(.dshws button){font:inherit}
+.dshws button:focus-visible{outline:2px solid var(--st-running-dot);outline-offset:1px}
+.dshws-head{display:flex;align-items:center;gap:var(--sp-3);flex:none;padding:var(--sp-4) var(--sp-4) var(--sp-3);border-bottom:1px solid var(--c-line-soft)}
+.dshws-ht{flex:1 1 auto;min-width:0}
+.dshws-title{margin:0;font-size:21px;font-weight:600;line-height:26px;letter-spacing:-.022em}
+.dshws-sub{margin:2px 0 0;font-size:12px;color:var(--c-text3)}
+.dshws-btn{flex:none;height:var(--h-ctl);padding:0 14px;border:0;border-radius:var(--r-pill);background:var(--c-pill);color:var(--c-text);font-size:12px;font-weight:500;cursor:pointer;transition:background-color var(--dur) var(--ease)}
+.dshws-btn:hover{background:var(--c-hover)}
+.dshws-theme{flex:none;display:flex;align-items:center;justify-content:center;width:var(--h-ctl);height:var(--h-ctl);padding:0;border:0;border-radius:50%;background:transparent;color:var(--c-text2);cursor:pointer}
+.dshws-theme:hover{background:var(--c-hover);color:var(--c-text)}
+.dshws-theme svg{width:16px;height:16px}
+.dshws-btn:hover{background:var(--c-hover)}
+.dshws-btn:active{background:var(--c-press)}
+.dshws-body{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(240px,340px) minmax(0,1fr)}
+.dshws-left{min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--c-line-soft)}
+.dshws-right{min-height:0;overflow:auto;padding:var(--sp-4)}
+.dshws-cap{display:block;padding:var(--sp-3) var(--sp-4) var(--sp-1);font-size:11px;font-weight:600;letter-spacing:.02em;color:var(--c-text2)}
+.dshws-parts{flex:none;display:flex;flex-direction:column;gap:2px;padding:0 var(--sp-2) var(--sp-2);max-height:40%;overflow:auto;border-bottom:1px solid var(--c-line-soft)}
+.dshws-part{display:flex;align-items:center;gap:var(--sp-2);width:100%;min-height:36px;padding:var(--sp-1) var(--sp-2);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text);text-align:left;cursor:pointer}
+.dshws-part:hover{background:var(--c-hover)}
+.dshws-part[data-on]{background:var(--c-pill)}
+.dshws-part[data-off] .dshws-pn{color:var(--c-text3)}
+.dshws-pmain{flex:1 1 auto;min-width:0;display:flex;flex-direction:column}
+.dshws-pn{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshws-pp{font-family:var(--f-mono);font-size:11px;color:var(--c-text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshws-badge{flex:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--st-cancelled-bg);color:var(--c-text2);font-size:11px;line-height:18px;text-align:center;font-variant-numeric:tabular-nums}
+.dshws-badge[data-tone="running"]{background:var(--st-running-bg);color:var(--st-running-text)}
+.dshws-badge[data-tone="warn"]{background:var(--st-blocked-bg);color:var(--st-blocked-text)}
+.dshws-badge[data-tone="error"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
+.dshws-tree{flex:1 1 auto;min-height:0;overflow:auto;padding:var(--sp-1) var(--sp-2) var(--sp-4);font-size:12px}
+.dshws-node{display:flex;align-items:center;gap:6px;width:100%;height:26px;padding:0 var(--sp-2);border:0;border-radius:4px;background:transparent;color:var(--c-text);text-align:left;white-space:nowrap;cursor:default}
+button.dshws-node{cursor:pointer}
+button.dshws-node:hover{background:var(--c-hover)}
+.dshws-node[data-out]{color:var(--c-text3)}
+.dshws-node[data-out] .dshws-nn{text-decoration:line-through;text-decoration-color:var(--c-line)}
+.dshws-caret{flex:none;width:12px;height:12px;color:var(--c-text3);transition:transform .12s ease}
+.dshws-caret[data-open]{transform:rotate(90deg)}
+.dshws-ico{flex:none;width:14px;height:14px;color:var(--c-text3)}
+.dshws-node[data-kind="dir"] .dshws-ico{color:var(--st-blocked-dot)}
+.dshws-nn{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.dshws-ns{flex:none;color:var(--c-text3);font-variant-numeric:tabular-nums;font-size:11px}
+.dshws-note{padding:var(--sp-1) var(--sp-2);color:var(--c-text3);font-size:12px}
+.dshws-note[data-tone="error"]{color:var(--st-failed-text)}
+.dshws-sec{margin:0 0 var(--sp-4)}
+.dshws-sec h3{margin:0 0 var(--sp-2);font-size:12px;font-weight:600;color:var(--c-text2)}
+.dshws-sech{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);margin-bottom:var(--sp-2)}
+.dshws-sech h3{margin:0}
+.dshws-btn[data-tone="stop"]:hover{color:var(--st-failed-text)}
+.dshws-btn[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
+.dshws-h4{margin:var(--sp-3) 0 var(--sp-1);font-size:11px;font-weight:600;color:var(--c-text3)}
+.dshws-notes{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
+.dshws-mnote{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:0 var(--sp-2);padding:var(--sp-1) var(--sp-2);border-radius:var(--r-ctl);background:var(--c-line-soft);font-size:12px}
+.dshws-mtext{grid-column:1;overflow-wrap:anywhere}
+.dshws-mmeta{grid-column:1;font-size:11px;color:var(--c-text3)}
+.dshws-x{grid-column:2;grid-row:1/3;width:20px;height:20px;padding:0;border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text3);cursor:pointer}
+.dshws-x:hover{background:var(--c-hover);color:var(--st-failed-text)}
+.dshws-addnote{display:flex;gap:var(--sp-2);margin-top:var(--sp-2)}
+.dshws-addnote input{flex:1 1 auto;min-width:0;height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px}
+.dshws-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--sp-1) var(--sp-3);margin:0;font-size:12px}
+.dshws-kv dt{color:var(--c-text3)}
+.dshws-kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.dshws-globs{display:flex;flex-wrap:wrap;gap:var(--sp-1)}
+.dshws-glob{padding:0 6px;border-radius:4px;background:var(--c-line-soft);font-family:var(--f-mono);font-size:11px;line-height:18px}
+.dshws-probs{display:flex;flex-direction:column;gap:var(--sp-1);margin:0;padding:0;list-style:none}
+.dshws-prob{padding:var(--sp-1) var(--sp-2);border-radius:var(--r-ctl);background:var(--st-blocked-bg);color:var(--st-blocked-text);font-size:12px}
+.dshws-prob[data-level="error"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
+.dshws-ok{color:var(--st-done-text);font-size:12px}
+.dshws-rules{margin:0;padding-left:18px;font-size:12px;color:var(--c-text2)}
+.dshws-rules li+li{margin-top:2px}
+.dshws-tasks{display:flex;flex-direction:column;margin:0;padding:0;list-style:none}
+.dshws-task{display:flex;flex-direction:column;gap:2px;padding:var(--sp-2) var(--sp-2);border-radius:var(--r-ctl)}
+.dshws-task+.dshws-task{border-top:1px solid var(--c-line-soft)}
+.dshws-task[data-link]{cursor:pointer}
+.dshws-task[data-link]:hover{background:var(--c-hover)}
+.dshws-tt{display:flex;align-items:baseline;gap:var(--sp-2);min-width:0}
+.dshws-tn{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.dshws-ts{flex:none;font-size:11px;color:var(--c-text2)}
+.dshws-ts[data-tone="running"]{color:var(--st-running-text)}
+.dshws-ts[data-tone="blocked"],.dshws-ts[data-tone="suspended"]{color:var(--st-blocked-text)}
+.dshws-tm{font-size:11px;color:var(--c-text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshws-empty{padding:48px var(--sp-4);color:var(--c-text3);text-align:center}
+@container (max-width:640px){.dshws-body{grid-template-columns:1fr}.dshws-left{border-right:0;border-bottom:1px solid var(--c-line-soft);max-height:55%}}
+.dshws-wrap{container-type:inline-size;height:100%}
+.dshws[data-embed]{height:auto;flex:1 1 auto;min-height:0;overflow:auto;background:transparent}
+.dshws[data-embed] .dshws-body{display:block}
+.dshws[data-embed] .dshws-left{border-right:0;border-bottom:1px solid var(--c-line-soft)}
+.dshws[data-embed] .dshws-parts{max-height:none}
+.dshws[data-embed] .dshws-tree{max-height:320px}
+.dshws[data-embed] .dshws-right{overflow:visible;padding:var(--sp-3) var(--sp-3) var(--sp-5)}
+.dshws-wrap[data-embed]{height:auto;flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+`;
+var CARET = "M4.5 3l3 3-3 3";
+var ICON_DIR = "M1.75 3.5h3.5l1.25 1.5h5.75v6.5h-10.5z";
+var ICON_FILE = "M3 1.75h5l3 3v7.5H3zM8 1.75V5h3";
+var ICON_LINK = "M5 7h4M4 9.5a2.5 2.5 0 0 1 0-5M10 4.5a2.5 2.5 0 0 1 0 5";
+function Glyph({ d, className, open }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    "svg",
+    {
+      className,
+      "data-open": open === true ? "" : void 0,
+      viewBox: "0 0 14 14",
+      width: "14",
+      height: "14",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: "1.3",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      "aria-hidden": "true",
+      focusable: "false",
+      children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("path", { d })
+    }
+  );
+}
+var OPEN_ORDER = ["running", "blocked", "suspended", "queued"];
+function WorkspacePage({ controller, t, onOpenSession, embedded = false }) {
+  const state = (0, import_react5.useSyncExternalStore)(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  const board = state.board;
+  const theme = useBoardTheme();
+  const partitions2 = board?.partitions ?? [];
+  const [selected, setSelected] = (0, import_react5.useState)(null);
+  const [dirs, setDirs] = (0, import_react5.useState)(() => /* @__PURE__ */ new Map());
+  const [expanded, setExpanded] = (0, import_react5.useState)(() => /* @__PURE__ */ new Set());
+  const now = Date.now();
+  (0, import_react5.useEffect)(() => {
+    if (embedded) return;
+    const detach = controller.start();
+    void controller.load();
+    return () => {
+      detach();
+    };
+  }, [controller, embedded]);
+  const current = partitions2.find((partition) => partition.id === selected) ?? partitions2[0];
+  const partitionId = current?.id;
+  const loadDir = (0, import_react5.useCallback)(async (partition, path) => {
+    const key = dirKey(partition, path);
+    setDirs((previous) => new Map(previous).set(key, { status: "loading" }));
+    try {
+      const listing = await controller.listFiles(partition, path);
+      setDirs((previous) => new Map(previous).set(key, { status: "ok", listing }));
+    } catch (error) {
+      const message2 = error instanceof Error ? error.message : String(error);
+      setDirs((previous) => new Map(previous).set(key, { status: "error", message: message2 }));
+    }
+  }, [controller]);
+  (0, import_react5.useEffect)(() => {
+    if (partitionId === void 0 || !controller.canListFiles) return;
+    if (partitions2.find((partition) => partition.id === partitionId)?.quick === true) return;
+    if (dirs.has(dirKey(partitionId, ""))) return;
+    void loadDir(partitionId, "");
+  }, [partitionId, partitions2, dirs, loadDir, controller]);
+  const [memory, setMemory] = (0, import_react5.useState)(null);
+  const [noteText, setNoteText] = (0, import_react5.useState)("");
+  const [noteBusy, setNoteBusy] = (0, import_react5.useState)(false);
+  const [stopArmed, setStopArmed] = (0, import_react5.useState)(false);
+  const [stopping, setStopping] = (0, import_react5.useState)(false);
+  const [message, setMessage] = (0, import_react5.useState)(null);
+  const loadMemory = (0, import_react5.useCallback)(async (partition) => {
+    if (!controller.canReadMemory) return;
+    try {
+      const view = await controller.readMemory(partition);
+      setMemory({ partition, view });
+    } catch (error) {
+      setMemory({ partition, error: error instanceof Error ? error.message : String(error) });
+    }
+  }, [controller]);
+  (0, import_react5.useEffect)(() => {
+    if (partitionId === void 0) return;
+    setNoteText("");
+    setStopArmed(false);
+    void loadMemory(partitionId);
+  }, [partitionId, loadMemory]);
+  (0, import_react5.useEffect)(() => {
+    if (!stopArmed) return;
+    const timer = setTimeout(() => {
+      setStopArmed(false);
+    }, 4e3);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [stopArmed]);
+  (0, import_react5.useEffect)(() => {
+    if (message === null) return;
+    const timer = setTimeout(() => {
+      setMessage(null);
+    }, 4e3);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [message]);
+  const toggleDir = (partition, path) => {
+    const key = dirKey(partition, path);
+    const opening = !expanded.has(key);
+    setExpanded((previous) => {
+      const next = new Set(previous);
+      if (opening) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+    if (opening && !dirs.has(key)) void loadDir(partition, path);
+  };
+  const refresh = () => {
+    void controller.load();
+    if (partitionId !== void 0) void loadMemory(partitionId);
+    if (partitionId === void 0 || !controller.canListFiles) return;
+    const open = [...expanded].filter((key) => key.startsWith(`${partitionId}\0`)).map((key) => key.slice(partitionId.length + 1));
+    for (const path of ["", ...open]) void loadDir(partitionId, path);
+  };
+  const live = (0, import_react5.useMemo)(() => new Set(partitions2.map((partition) => partition.id)), [partitions2]);
+  const titleOf = (0, import_react5.useMemo)(() => new Map((board?.tasks ?? []).map((task) => [task.id, task.title])), [board]);
+  const tasks = (0, import_react5.useMemo)(() => {
+    if (partitionId === void 0) return [];
+    return (board?.tasks ?? []).filter((task) => task.partitionId === partitionId).map((task) => ({ task, group: groupOf(task, live) })).filter((row) => OPEN_ORDER.includes(row.group)).sort((left, right) => OPEN_ORDER.indexOf(left.group) - OPEN_ORDER.indexOf(right.group));
+  }, [board, partitionId, live]);
+  const runningBy = (0, import_react5.useMemo)(() => {
+    const counts = /* @__PURE__ */ new Map();
+    for (const task of board?.tasks ?? []) {
+      if (groupOf(task, live) === "running") counts.set(task.partitionId, (counts.get(task.partitionId) ?? 0) + 1);
+    }
+    return counts;
+  }, [board, live]);
+  const names = (ids) => ids.map((id) => titleOf.get(id) ?? id).join("\u3001");
+  const entryRow = (partition, entry, depth) => {
+    const pad = { paddingLeft: `${String(8 + depth * 14)}px` };
+    const out = entry.inScope ? void 0 : "";
+    const title = [
+      entry.path,
+      entry.inScope ? void 0 : t("ws.outOfScope"),
+      entry.modifiedAt === void 0 ? void 0 : relativeTime(entry.modifiedAt, now)
+    ].filter((line) => line !== void 0 && line !== "").join("\n");
+    if (entry.kind === "dir") {
+      const key = dirKey(partition, entry.path);
+      const open = expanded.has(key);
+      return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { role: "treeitem", "aria-expanded": open, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+          "button",
+          {
+            type: "button",
+            className: "dshws-node",
+            "data-kind": "dir",
+            "data-out": out,
+            style: pad,
+            title,
+            onClick: () => {
+              toggleDir(partition, entry.path);
+            },
+            children: [
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Glyph, { className: "dshws-caret", d: CARET, open }),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Glyph, { className: "dshws-ico", d: ICON_DIR }),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-nn", children: entry.name })
+            ]
+          }
+        ),
+        open && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { role: "group", children: dirBody(partition, entry.path, depth + 1) })
+      ] }, entry.path);
+    }
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { role: "treeitem", className: "dshws-node", "data-kind": entry.kind, "data-out": out, style: pad, title, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-caret" }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Glyph, { className: "dshws-ico", d: entry.kind === "link" ? ICON_LINK : ICON_FILE }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-nn", children: entry.name }),
+      entry.size !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ns", children: bytes(entry.size) })
+    ] }, entry.path);
+  };
+  const dirBody = (partition, path, depth) => {
+    const read = dirs.get(dirKey(partition, path));
+    const pad = { paddingLeft: `${String(8 + depth * 14)}px` };
+    if (read === void 0 || read.status === "loading") return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", style: pad, children: t("ws.loading") });
+    if (read.status === "error") return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", "data-tone": "error", style: pad, children: t("ws.error", { message: read.message }) });
+    if (read.listing.entries.length === 0) return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", style: pad, children: t("ws.empty") });
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(import_jsx_runtime7.Fragment, { children: [
+      read.listing.entries.map((entry) => entryRow(partition, entry, depth)),
+      read.listing.omitted > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", style: pad, children: t("ws.omitted", { n: read.listing.omitted }) })
+    ] });
+  };
+  const partitionRow = (partition) => {
+    const problems2 = partition.problems ?? [];
+    const worst = problems2.some((problem) => problem.level === "error") ? "error" : problems2.length > 0 ? "warn" : void 0;
+    const running = runningBy.get(partition.id) ?? 0;
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+      "button",
+      {
+        type: "button",
+        className: "dshws-part",
+        "data-on": partition.id === partitionId ? "" : void 0,
+        "data-off": partition.enabled === false ? "" : void 0,
+        onClick: () => {
+          setSelected(partition.id);
+        },
+        title: partition.path ?? partition.repo ?? partition.name,
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshws-pmain", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshws-pn", children: [
+              partition.name,
+              partition.enabled === false ? ` \xB7 ${t("ws.disabled")}` : ""
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-pp", children: partition.quick === true ? t("ws.quickHint") : partition.path ?? partition.repo ?? "" })
+          ] }),
+          worst !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-badge", "data-tone": worst, title: problems2.map((problem) => problem.message).join("\n"), children: "!" }),
+          running > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-badge", "data-tone": "running", children: running })
+        ]
+      },
+      partition.id
+    );
+  };
+  const taskRow = ({ task, group }) => {
+    const key = statusKeyOf(task, live);
+    const tone = key.replace("status.", "");
+    const lines = [];
+    if (task.waitingFor !== void 0 && task.waitingFor.length > 0) lines.push(t("order.waiting", { ids: names(task.waitingFor) }));
+    if (group === "suspended") {
+      lines.push(task.suspendReason === void 0 || task.suspendReason === "" ? t("susp.noReason") : t("susp.reason", { reason: task.suspendReason }));
+      if (task.waitingOn !== void 0 && task.waitingOn.length > 0) lines.push(t("susp.waitingOn", { ids: names(task.waitingOn) }));
+    }
+    if (group === "blocked") lines.push(task.resumeNote === void 0 || task.resumeNote === "" ? t("hold.noReason") : t("hold.reason", { reason: task.resumeNote }));
+    if (task.stage !== void 0) lines.push(t("order.stage", { n: task.stage }));
+    const open = task.workerSessionId !== void 0 && onOpenSession !== void 0 ? () => {
+      onOpenSession(task.workerSessionId);
+    } : void 0;
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("li", { className: "dshws-task", "data-link": open === void 0 ? void 0 : "", onClick: open, title: task.id, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshws-tt", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tn", children: task.title }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ts", "data-tone": tone, children: t(key) })
+      ] }),
+      lines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tm", title: line, children: line }, line))
+    ] }, task.id);
+  };
+  const stopAll = async () => {
+    if (!stopArmed) {
+      setStopArmed(true);
+      return;
+    }
+    setStopArmed(false);
+    const openIds = new Set(tasks.map((row) => row.task.id));
+    const tops = tasks.map((row) => row.task).filter((task) => task.parentId === void 0 || !openIds.has(task.parentId));
+    setStopping(true);
+    const failures = [];
+    for (const task of tops) {
+      const failure = await controller.control(task.id, "cancel_tree");
+      if (failure !== void 0) failures.push(`${task.title}: ${failure}`);
+    }
+    setStopping(false);
+    setMessage(failures.length === 0 ? { tone: "ok", text: t("ws.stopAllDone", { n: tops.length }) } : { tone: "bad", text: t("ws.stopAllFailed", { message: failures.join("\uFF1B") }) });
+    if (partitionId !== void 0) void loadMemory(partitionId);
+  };
+  const addNote = async () => {
+    const text = noteText.trim();
+    if (partitionId === void 0 || text === "" || noteBusy) return;
+    setNoteBusy(true);
+    try {
+      await controller.addMemoryNote(partitionId, text);
+      setNoteText("");
+      await loadMemory(partitionId);
+    } catch (error) {
+      setMessage({ tone: "bad", text: t("ws.mem.failed", { message: error instanceof Error ? error.message : String(error) }) });
+    } finally {
+      setNoteBusy(false);
+    }
+  };
+  const forgetNote = async (id) => {
+    if (partitionId === void 0) return;
+    try {
+      await controller.removeMemoryNote(partitionId, id);
+      await loadMemory(partitionId);
+    } catch (error) {
+      setMessage({ tone: "bad", text: t("ws.mem.failed", { message: error instanceof Error ? error.message : String(error) }) });
+    }
+  };
+  const MANAGER_SOURCE2 = {
+    strongest: t("ws.mem.src.strongest"),
+    hard: t("ws.mem.src.hard"),
+    saved: t("ws.mem.src.saved"),
+    inherit: t("ws.mem.src.inherit")
+  };
+  const memorySection = () => {
+    if (!controller.canReadMemory) return null;
+    const read = memory !== null && memory.partition === partitionId ? memory : void 0;
+    const view = read?.view;
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", "data-router-memory": true, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.mem.title") }),
+      read === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.loading") }) : read.error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", "data-tone": "error", children: t("ws.error", { message: read.error }) }) : view !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(import_jsx_runtime7.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("dl", { className: "dshws-kv", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dt", { children: t("ws.mem.manager") }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dd", { children: !view.manager.enabled ? t("ws.mem.noManager") : view.manager.route === void 0 ? MANAGER_SOURCE2[view.manager.source] ?? view.manager.source : `${view.manager.route.model}${view.manager.route.reasoningEffort === void 0 ? "" : ` \xB7 ${view.manager.route.reasoningEffort}`}\uFF08${MANAGER_SOURCE2[view.manager.source] ?? view.manager.source}\uFF09` })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.notes", { n: view.notes.length }) }),
+        view.notes.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.mem.noNotes") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-notes", children: view.notes.map((note) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("li", { className: "dshws-mnote", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-mtext", children: note.text }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshws-mmeta", children: [
+            t(`ws.mem.by.${note.by}`),
+            " \xB7 ",
+            relativeTime(note.at, now)
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+            "button",
+            {
+              type: "button",
+              className: "dshws-x",
+              title: t("ws.mem.forget"),
+              "aria-label": t("ws.mem.forget"),
+              onClick: () => {
+                void forgetNote(note.id);
+              },
+              children: "\xD7"
+            }
+          )
+        ] }, note.id)) }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("form", { className: "dshws-addnote", onSubmit: (event) => {
+          event.preventDefault();
+          void addNote();
+        }, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+            "input",
+            {
+              value: noteText,
+              maxLength: 600,
+              placeholder: t("ws.mem.placeholder"),
+              onChange: (event) => {
+                setNoteText(event.target.value);
+              }
+            }
+          ),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "submit", className: "dshws-btn", disabled: noteBusy || noteText.trim() === "", children: t("ws.mem.add") })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.work", { n: view.logTotal }) }),
+        view.log.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.mem.noWork") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-tasks", children: view.log.slice(0, 12).map((entry) => {
+          const open = entry.sessionId !== void 0 && onOpenSession !== void 0 ? () => {
+            onOpenSession(entry.sessionId);
+          } : void 0;
+          return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+            "li",
+            {
+              className: "dshws-task",
+              "data-link": open === void 0 ? void 0 : "",
+              onClick: open,
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-tt", children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tn", children: entry.subject }),
+                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ts", "data-tone": entry.state === "failed" || entry.state === "cancelled" ? "blocked" : void 0, children: t(`ws.mem.state.${entry.state}`) })
+                ] }),
+                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tm", children: [relativeTime(entry.at, now), entry.level === "manager" ? "manager" : entry.model, entry.summary ?? entry.error].filter((part) => part !== void 0 && part !== "").join(" \xB7 ") })
+              ]
+            },
+            `${entry.taskId}-${entry.at}`
+          );
+        }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.sessions", { n: view.sessions.length }) }),
+        view.sessions.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.mem.noSessions") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-tasks", children: view.sessions.slice(0, 12).map((ref) => {
+          const open = onOpenSession !== void 0 ? () => {
+            onOpenSession(ref.sessionId);
+          } : void 0;
+          return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("li", { className: "dshws-task", "data-link": open === void 0 ? void 0 : "", onClick: open, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-tt", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tn", children: ref.subject }),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ts", children: t(`ws.mem.state.${ref.state}`) })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-tm", children: [ref.taskId, relativeTime(ref.updatedAt, now), ref.summary].filter((part) => part !== void 0 && part !== "").join(" \xB7 ") })
+          ] }, ref.sessionId);
+        }) })
+      ] })
+    ] });
+  };
+  const rootListing = partitionId === void 0 ? void 0 : dirs.get(dirKey(partitionId, ""));
+  const include = current?.include ?? (rootListing?.status === "ok" ? rootListing.listing.include : void 0);
+  const exclude = current?.exclude ?? (rootListing?.status === "ok" ? rootListing.listing.exclude : void 0);
+  const problems = current?.problems ?? [];
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-wrap", "data-embed": embedded ? "" : void 0, children: /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc dshws", "data-router-workspace": true, "data-theme": theme.mode, "data-embed": embedded ? "" : void 0, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("style", { children: STYLE }),
+    !embedded && /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("header", { className: "dshws-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-ht", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h2", { className: "dshws-title", children: t("ws.title") }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("p", { className: "dshws-sub", children: t("ws.subtitle") })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(ThemeButton, { className: "dshws-theme", pref: theme.pref, setPref: theme.setPref, t }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "button", className: "dshws-btn", onClick: refresh, children: t("ws.refresh") })
+    ] }),
+    board === null ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-empty", children: t("board.loading") }) : current === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-empty", children: t("ws.noPartition") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-body", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-left", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-cap", children: t("ws.partitions") }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-parts", children: partitions2.map(partitionRow) }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-cap", children: current.name }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-tree", role: "tree", "aria-label": current.name, children: current.quick === true ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.quickNoFiles") }) : controller.canListFiles ? dirBody(current.id, "", 0) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", children: t("ws.notWired") }) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-right", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: current.name }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("dl", { className: "dshws-kv", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dt", { children: t("ws.root") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dd", { children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("code", { children: current.path ?? current.repo ?? "" }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dt", { children: t("ws.include") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dd", { children: include === void 0 || include.length === 1 && include[0] === "**" ? t("ws.all") : include.length === 0 ? t("ws.none") : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-globs", children: include.map((glob) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-glob", children: glob }, glob)) }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dt", { children: t("ws.exclude") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("dd", { children: exclude === void 0 || exclude.length === 0 ? t("ws.none") : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-globs", children: exclude.map((glob) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-glob", children: glob }, glob)) }) })
+          ] }),
+          current.description !== void 0 && current.description !== "" && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("p", { className: "dshws-sub", children: current.description })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.problems") }),
+          problems.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-ok", children: t("ws.noProblems") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-probs", children: problems.map((problem) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { className: "dshws-prob", "data-level": problem.level, children: problem.message }, problem.message)) })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.rules") }),
+          current.quick === true ? /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("ol", { className: "dshws-rules", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { children: t("ws.quickRule1") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { children: t("ws.quickRule2") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { children: t("ws.quickRule3") })
+          ] }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("ol", { className: "dshws-rules", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { children: t("ws.rule1") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { children: t("ws.rule2") }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("li", { children: t("ws.rule3") })
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshws-sec", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshws-sech", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h3", { children: t("ws.tasks") }),
+            tasks.length > 0 && controller.canControl && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+              "button",
+              {
+                type: "button",
+                className: "dshws-btn",
+                "data-tone": "stop",
+                "data-armed": stopArmed ? "" : void 0,
+                disabled: stopping,
+                title: t("ws.stopAllHint"),
+                onClick: () => {
+                  void stopAll();
+                },
+                children: stopping ? t("ws.stopping") : stopArmed ? t("ws.stopAllConfirm", { n: tasks.length }) : t("ws.stopAll")
+              }
+            )
+          ] }),
+          message !== null && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshws-note", "data-tone": message.tone === "bad" ? "error" : void 0, role: "status", children: message.text }),
+          tasks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshws-sub", children: t("ws.noTasks") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshws-tasks", children: tasks.map(taskRow) })
+        ] }),
+        memorySection()
+      ] })
+    ] })
+  ] }) });
+}
+
+// src/client/CompactBoard.tsx
+var import_jsx_runtime8 = require("react/jsx-runtime");
 var PAGE = 12;
 var POLL_MS = 3e3;
 var TABS = [
   { id: "active", key: "seg.active" },
-  { id: "next", key: "seg.next" },
-  { id: "scheduled", key: "seg.scheduled" },
-  { id: "resolved", key: "seg.resolved" }
+  { id: "resolved", key: "seg.resolved" },
+  { id: "workspace", key: "seg.workspace" }
 ];
 var TAB_GROUPS = {
-  active: ["running", "blocked", "suspended"],
-  next: ["queued"],
-  scheduled: ["stale"],
-  resolved: ["done", "failed", "cancelled"]
+  active: ["running", "blocked", "suspended", "queued"],
+  resolved: ["done", "failed", "cancelled", "stale"],
+  // Not a status view: the partitions' files, rules and memory.
+  workspace: []
 };
 var GROUP_KEY = {
   running: "grp.running",
@@ -3173,13 +3718,13 @@ var TONE_COLOR = {
   cancelled: "cancelled"
 };
 function Status({ tone, label }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshrc-st", "data-tone": tone, "data-color": TONE_COLOR[tone] ?? "cancelled", title: label, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-dot", "aria-hidden": "true" }),
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-st-text", children: label })
+  return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("span", { className: "dshrc-st", "data-tone": tone, "data-color": TONE_COLOR[tone] ?? "cancelled", title: label, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-dot", "aria-hidden": "true" }),
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-st-text", children: label })
   ] });
 }
 function Icon({ d, className, open }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
     "svg",
     {
       className,
@@ -3194,7 +3739,7 @@ function Icon({ d, className, open }) {
       strokeLinejoin: "round",
       "aria-hidden": "true",
       focusable: "false",
-      children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("path", { d })
+      children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("path", { d })
     }
   );
 }
@@ -3202,12 +3747,12 @@ function shortId(id) {
   const tail = id.slice(id.lastIndexOf("-") + 1);
   return tail.length >= 3 && tail.length < id.length ? `#${tail}` : id;
 }
-var CARET = "M6 4l4 4-4 4";
+var CARET2 = "M6 4l4 4-4 4";
 var ICON_REFRESH = "M13 8a5 5 0 1 1-1.5-3.6M13 3v3h-3";
 var ICON_PLUS = "M8 3v10M3 8h10";
 var ICON_CLOSE = "M4 4l8 8M12 4l-8 8";
 var ICON_BATCH = "M3 4.5h2M3 8h2M3 11.5h2M7.5 4.5H13M7.5 8H13M7.5 11.5H13";
-var STYLE = `${BOARD_TOKENS_CSS}
+var STYLE2 = `${BOARD_TOKENS_CSS}
 .dshrc{container-type:inline-size;display:flex;flex-direction:column;height:100%;min-height:0;background:var(--c-bg);color:var(--c-text);font-size:13px;line-height:1.47;letter-spacing:-.003em;text-align:left;transition:background-color var(--dur) var(--ease),color var(--dur) var(--ease)}
 .dshrc *{box-sizing:border-box}
 /* Zero-specificity reset so .dshrc-gh/-chip/-fold/-tab keep their own font size, weight and numerals. */
@@ -3233,6 +3778,7 @@ var STYLE = `${BOARD_TOKENS_CSS}
 .dshrc-ico[data-busy] svg{animation:dshrc-spin .8s linear infinite}
 @keyframes dshrc-spin{to{transform:rotate(360deg)}}
 .dshrc-row[data-link]:focus-visible{outline:2px solid var(--c-focus);outline-offset:-2px}
+.dshrc-ws{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
 .dshrc-list{flex:1 1 auto;min-height:0;overflow:auto;padding:0 var(--sp-1) 24px;scrollbar-width:thin}
 .dshrc-group{margin-top:var(--sp-4)}
 .dshrc-group+.dshrc-group{padding-top:var(--sp-3);margin-top:var(--sp-1);border-top:1px solid var(--c-line-soft)}
@@ -3369,26 +3915,26 @@ ${DESK_CSS}
 }
 `;
 function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, sessions }) {
-  const state = (0, import_react5.useSyncExternalStore)(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  const state = (0, import_react6.useSyncExternalStore)(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const board = state.board;
   const sessionFace = sessions ?? NO_SESSIONS;
-  const sessionList = (0, import_react5.useSyncExternalStore)(sessionFace.list.subscribe, sessionFace.list.getSnapshot, sessionFace.list.getSnapshot);
-  const [tab, setTab] = (0, import_react5.useState)("active");
-  const [query, setQuery] = (0, import_react5.useState)("");
-  const [collapsed, setCollapsed] = (0, import_react5.useState)(readCollapsedFamilies);
-  const [open, setOpen] = (0, import_react5.useState)(() => /* @__PURE__ */ new Set());
-  const [folded, setFolded] = (0, import_react5.useState)(() => new Set(FOLDED_GROUPS));
-  const [now, setNow] = (0, import_react5.useState)(() => Date.now());
-  const [resuming, setResuming] = (0, import_react5.useState)(() => /* @__PURE__ */ new Set());
-  const [resumeError, setResumeError] = (0, import_react5.useState)(() => /* @__PURE__ */ new Map());
-  const [notice, setNotice] = (0, import_react5.useState)(null);
-  const [busy, setBusy] = (0, import_react5.useState)(() => /* @__PURE__ */ new Set());
-  const [suspending, setSuspending] = (0, import_react5.useState)(null);
-  const [formReason, setFormReason] = (0, import_react5.useState)("");
-  const [formPrereq, setFormPrereq] = (0, import_react5.useState)("");
-  const [formError, setFormError] = (0, import_react5.useState)("");
-  const [arming, setArming] = (0, import_react5.useState)(null);
-  (0, import_react5.useEffect)(() => {
+  const sessionList = (0, import_react6.useSyncExternalStore)(sessionFace.list.subscribe, sessionFace.list.getSnapshot, sessionFace.list.getSnapshot);
+  const [tab, setTab] = (0, import_react6.useState)("active");
+  const [query, setQuery] = (0, import_react6.useState)("");
+  const [collapsed, setCollapsed] = (0, import_react6.useState)(readCollapsedFamilies);
+  const [open, setOpen] = (0, import_react6.useState)(() => /* @__PURE__ */ new Set());
+  const [folded, setFolded] = (0, import_react6.useState)(() => new Set(FOLDED_GROUPS));
+  const [now, setNow] = (0, import_react6.useState)(() => Date.now());
+  const [resuming, setResuming] = (0, import_react6.useState)(() => /* @__PURE__ */ new Set());
+  const [resumeError, setResumeError] = (0, import_react6.useState)(() => /* @__PURE__ */ new Map());
+  const [notice, setNotice] = (0, import_react6.useState)(null);
+  const [busy, setBusy] = (0, import_react6.useState)(() => /* @__PURE__ */ new Set());
+  const [suspending, setSuspending] = (0, import_react6.useState)(null);
+  const [formReason, setFormReason] = (0, import_react6.useState)("");
+  const [formPrereq, setFormPrereq] = (0, import_react6.useState)("");
+  const [formError, setFormError] = (0, import_react6.useState)("");
+  const [arming, setArming] = (0, import_react6.useState)(null);
+  (0, import_react6.useEffect)(() => {
     if (arming === null) return;
     const timer = setTimeout(() => {
       setArming(null);
@@ -3397,13 +3943,13 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       clearTimeout(timer);
     };
   }, [arming]);
-  const [refreshing, setRefreshing] = (0, import_react5.useState)(false);
+  const [refreshing, setRefreshing] = (0, import_react6.useState)(false);
   const theme = useBoardTheme();
-  const [liveOf, setLiveOf] = (0, import_react5.useState)(null);
-  const [moving, setMoving] = (0, import_react5.useState)(null);
-  const [batchOn, setBatchOn] = (0, import_react5.useState)(false);
-  const [filter, setFilter] = (0, import_react5.useState)(NO_FILTER);
-  const [picked, setPicked] = (0, import_react5.useState)(() => /* @__PURE__ */ new Set());
+  const [liveOf, setLiveOf] = (0, import_react6.useState)(null);
+  const [moving, setMoving] = (0, import_react6.useState)(null);
+  const [batchOn, setBatchOn] = (0, import_react6.useState)(false);
+  const [filter, setFilter] = (0, import_react6.useState)(NO_FILTER);
+  const [picked, setPicked] = (0, import_react6.useState)(() => /* @__PURE__ */ new Set());
   const refresh = () => {
     if (refreshing) return;
     setRefreshing(true);
@@ -3411,7 +3957,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       setRefreshing(false);
     });
   };
-  (0, import_react5.useEffect)(() => {
+  (0, import_react6.useEffect)(() => {
     if (notice === null) return;
     const timer = setTimeout(() => {
       setNotice(null);
@@ -3420,7 +3966,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       clearTimeout(timer);
     };
   }, [notice]);
-  (0, import_react5.useEffect)(() => {
+  (0, import_react6.useEffect)(() => {
     writeCollapsedFamilies(collapsed);
   }, [collapsed]);
   const resume = async (task) => {
@@ -3490,14 +4036,14 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       return next;
     });
   };
-  (0, import_react5.useEffect)(() => {
+  (0, import_react6.useEffect)(() => {
     const detach = controller.start();
     void controller.load();
     return () => {
       detach();
     };
   }, [controller]);
-  const model = (0, import_react5.useMemo)(() => {
+  const model = (0, import_react6.useMemo)(() => {
     const tasks = board?.tasks ?? [];
     const partitions2 = board?.partitions ?? [];
     const live = new Set(partitions2.map((partition) => partition.id));
@@ -3531,7 +4077,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     const anyLive = needle === "" ? anyShown : buildFamilies(tasks, live).some((family) => isLive(family.group));
     return { live, nameOf, workerName, titleOf, groupFams, counts, anyLive, groupN, causes, partitions: partitions2 };
   }, [board, query, batchOn, filter]);
-  (0, import_react5.useEffect)(() => {
+  (0, import_react6.useEffect)(() => {
     if (!model.anyLive) return;
     const hidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
     const tick = () => {
@@ -3546,14 +4092,14 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       document.removeEventListener("visibilitychange", tick);
     };
   }, [model.anyLive, controller]);
-  const tabCounts = (0, import_react5.useMemo)(() => {
+  const tabCounts = (0, import_react6.useMemo)(() => {
     const counts = /* @__PURE__ */ new Map();
     for (const item of TABS) counts.set(item.id, TAB_GROUPS[item.id].reduce((sum, group) => sum + (model.counts.get(group) ?? 0), 0));
     return counts;
   }, [model]);
   const waiting = model.counts.get("blocked") ?? 0;
-  const [landed, setLanded] = (0, import_react5.useState)(false);
-  (0, import_react5.useEffect)(() => {
+  const [landed, setLanded] = (0, import_react6.useState)(false);
+  (0, import_react6.useEffect)(() => {
     if (board === null || landed) return;
     setLanded(true);
     if ((tabCounts.get(tab) ?? 0) > 0) return;
@@ -3646,7 +4192,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const pick = (task) => {
     if (!batchOn) return null;
     const on = picked.has(task.id);
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
       "input",
       {
         type: "checkbox",
@@ -3665,8 +4211,8 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       }
     );
   };
-  const badges = (task) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(import_jsx_runtime7.Fragment, { children: [
-    task.pr !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+  const badges = (task) => /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(import_jsx_runtime8.Fragment, { children: [
+    task.pr !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
       "a",
       {
         className: "dshrc-pr",
@@ -3680,7 +4226,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
         children: t("row.pr", { n: task.pr.number })
       }
     ),
-    task.reassignedTo !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    task.reassignedTo !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
       "button",
       {
         type: "button",
@@ -3693,7 +4239,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
         children: t("row.movedTo")
       }
     ),
-    task.reassignedFrom !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    task.reassignedFrom !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
       "button",
       {
         type: "button",
@@ -3707,7 +4253,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       }
     )
   ] });
-  const livePanel = (task) => /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+  const livePanel = (task) => /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
     LivePanel,
     {
       controller,
@@ -3727,8 +4273,8 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const childRow = (task, group) => {
     const click = openOf(task);
     const status = statusOf(task);
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-child", "data-child": task.id, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-child", "data-child": task.id, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
         "div",
         {
           className: "dshrc-row dshrc-sub",
@@ -3738,13 +4284,13 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           title: tooltipOf(task, group, orderLines(task)),
           children: [
             pick(task),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-rt", children: task.title }),
-            task.stage !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-tag", "data-tone": "stage", children: t("order.stage", { n: task.stage }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-rt", children: task.title }),
+            task.stage !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-tag", "data-tone": "stage", children: t("order.stage", { n: task.stage }) }),
             badges(task),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-rm", children: metaOf(task, group) }),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-id", children: shortId(task.id) }),
+            /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-rm", children: metaOf(task, group) }),
+            /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-id", children: shortId(task.id) }),
             rowActs(task, group),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Status, { tone: status.tone, label: t(status.key) })
+            /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(Status, { tone: status.tone, label: t(status.key) })
           ]
         }
       ),
@@ -3786,7 +4332,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     if (!open2 && !canRetry && !canLive && !canMove) return null;
     const anyBusy = [...busy].some((key) => key.startsWith(`${task.id}:`));
     const armed = (action) => arming === `${task.id}:${action}`;
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
       "span",
       {
         className: "dshrc-acts-row",
@@ -3795,7 +4341,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           event.stopPropagation();
         },
         children: [
-          canSuspend && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+          canSuspend && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
             "button",
             {
               type: "button",
@@ -3809,7 +4355,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
               children: t("act.suspend")
             }
           ),
-          open2 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+          open2 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
             "button",
             {
               type: "button",
@@ -3824,7 +4370,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
               children: armed("cancel") ? t("act.confirmStop") : t("act.cancel")
             }
           ),
-          canStopTree && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+          canStopTree && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
             "button",
             {
               type: "button",
@@ -3839,7 +4385,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
               children: armed("cancel_tree") ? t("act.confirmStop") : t("act.cancel_tree")
             }
           ),
-          canRetry && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+          canRetry && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
             "button",
             {
               type: "button",
@@ -3852,7 +4398,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
               children: t("act.retry")
             }
           ),
-          canMove && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+          canMove && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
             "button",
             {
               type: "button",
@@ -3865,7 +4411,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
               children: t("ra.reassign")
             }
           ),
-          canLive && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+          canLive && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
             "button",
             {
               type: "button",
@@ -3883,7 +4429,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
       }
     );
   };
-  const suspendForm = (task) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+  const suspendForm = (task) => /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
     "form",
     {
       className: "dshrc-sform",
@@ -3896,9 +4442,9 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
         void submitSuspend(task);
       },
       children: [
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("label", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("label", { children: [
           t("susp.form.reason"),
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+          /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
             "input",
             {
               value: formReason,
@@ -3911,19 +4457,19 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
             }
           )
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("label", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("label", { children: [
           t("susp.form.prereq"),
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("input", { value: formPrereq, onChange: (event) => {
+          /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("input", { value: formPrereq, onChange: (event) => {
             setFormPrereq(event.target.value);
           } }),
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-sform-hint", children: t("susp.form.prereqHint") })
+          /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-sform-hint", children: t("susp.form.prereqHint") })
         ] }),
-        formError !== "" && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-sform-err", role: "alert", children: formError }),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-sform-btns", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "button", className: "dshrc-hold-btn", onClick: () => {
+        formError !== "" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-sform-err", role: "alert", children: formError }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-sform-btns", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { type: "button", className: "dshrc-hold-btn", onClick: () => {
             setSuspending(null);
           }, children: t("susp.form.cancel") }),
-          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "submit", className: "dshrc-err-btn", disabled: busy.has(`${task.id}:suspend`), children: t("susp.form.submit") })
+          /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { type: "submit", className: "dshrc-err-btn", disabled: busy.has(`${task.id}:suspend`), children: t("susp.form.submit") })
         ] })
       ]
     }
@@ -3931,7 +4477,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const waitLine = (task) => {
     const ids = task.waitingFor ?? [];
     if (ids.length === 0) return null;
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshrc-wait", "data-wait": task.id, children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-wait-text", title: ids.join("\n"), children: t("order.waiting", { ids: namesOf(ids) }) }) });
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshrc-wait", "data-wait": task.id, children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-wait-text", title: ids.join("\n"), children: t("order.waiting", { ids: namesOf(ids) }) }) });
   };
   const suspendLine = (task) => {
     const why = task.suspendReason ?? task.resumeNote ?? "";
@@ -3940,9 +4486,9 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     const text = ids.length === 0 ? head : `${head} \xB7 ${t("susp.waitingOn", { ids: namesOf(ids) })}`;
     const going = resuming.has(task.id);
     const wired = controller.canControl;
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-hold", "data-suspended": task.id, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-hold-why", title: text, children: text }),
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-hold", "data-suspended": task.id, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-hold-why", title: text, children: text }),
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
         "button",
         {
           type: "button",
@@ -3971,8 +4517,8 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     if (family.attempt > 1) extra.push(t("task.attempt", { count: family.attempt }));
     if (family.reason !== void 0) extra.push(family.reason);
     extra.push(...orderLines(family.root));
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-family", "data-family": family.key, "data-group": group, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-family", "data-family": family.key, "data-group": group, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
         "div",
         {
           className: "dshrc-row",
@@ -3982,16 +4528,16 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           title: tooltipOf(family.root, group, extra),
           children: [
             pick(family.root),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshrc-main", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-rt", children: family.root.title }),
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshrc-meta", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-rm", children: metaOf(family.rep, group) }),
-                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-id", children: shortId(family.root.id) })
+            /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("span", { className: "dshrc-main", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-rt", children: family.root.title }),
+              /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("span", { className: "dshrc-meta", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-rm", children: metaOf(family.rep, group) }),
+                /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-id", children: shortId(family.root.id) })
               ] })
             ] }),
             badges(family.root),
-            family.attempt > 1 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-tag", "data-tone": "attempt", children: t("compact.retry", { n: family.attempt }) }),
-            hidden.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+            family.attempt > 1 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-tag", "data-tone": "attempt", children: t("compact.retry", { n: family.attempt }) }),
+            hidden.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
               "button",
               {
                 type: "button",
@@ -4004,13 +4550,13 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
                   toggleCollapsed(foldKey);
                 },
                 children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Icon, { className: "dshrc-caret", d: CARET, open: expanded }),
-                  /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-chip-text", children: t("compact.workers", { n: hidden.length }) })
+                  /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(Icon, { className: "dshrc-caret", d: CARET2, open: expanded }),
+                  /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-chip-text", children: t("compact.workers", { n: hidden.length }) })
                 ]
               }
             ),
             rowActs(family.root, groupOfTask(family.root, model.live)),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Status, { tone: status.tone, label: t(status.key) })
+            /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(Status, { tone: status.tone, label: t(status.key) })
           ]
         }
       ),
@@ -4027,10 +4573,10 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     const busy2 = resuming.has(task.id);
     const failure = resumeError.get(task.id);
     const wired = controller.canControl;
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-hold", "data-hold": task.id, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-hold-why", title: why === "" ? void 0 : why, children: why === "" ? t("hold.noReason") : t("hold.reason", { reason: why }) }),
-      failure !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-hold-err", title: failure, children: t("hold.resumeFailedShort") }),
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-hold", "data-hold": task.id, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-hold-why", title: why === "" ? void 0 : why, children: why === "" ? t("hold.noReason") : t("hold.reason", { reason: why }) }),
+      failure !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-hold-err", title: failure, children: t("hold.resumeFailedShort") }),
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
         "button",
         {
           type: "button",
@@ -4055,12 +4601,12 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     if (group.suspended > 0) rest.push(t("progress.suspended", { n: group.suspended }));
     if (group.failed > 0) rest.push(t("progress.failed", { n: group.failed }));
     const line = t("progress.line", { done: group.finished, total: group.total });
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-prog-item", "data-progress-root": group.rootId, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-prog-top", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-prog-name", title: group.subject, children: group.subject }),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-prog-num", children: line })
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-prog-item", "data-progress-root": group.rootId, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-prog-top", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-prog-name", title: group.subject, children: group.subject }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-prog-num", children: line })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
         "div",
         {
           className: "dshrc-bar",
@@ -4070,34 +4616,34 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           "aria-valuenow": group.finished,
           "aria-label": `${group.subject} ${line}`,
           children: [
-            group.finished > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { "data-k": "done", style: { width: part(group.finished) } }),
-            group.running > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { "data-k": "run", style: { width: part(group.running) } }),
-            group.suspended > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { "data-k": "susp", style: { width: part(group.suspended) } }),
-            group.failed > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { "data-k": "fail", style: { width: part(group.failed) } })
+            group.finished > 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { "data-k": "done", style: { width: part(group.finished) } }),
+            group.running > 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { "data-k": "run", style: { width: part(group.running) } }),
+            group.suspended > 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { "data-k": "susp", style: { width: part(group.suspended) } }),
+            group.failed > 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { "data-k": "fail", style: { width: part(group.failed) } })
           ]
         }
       ),
-      rest.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-prog-sub", children: rest.join(" \xB7 ") })
+      rest.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-prog-sub", children: rest.join(" \xB7 ") })
     ] }, group.rootId);
   };
   const progressBlock = (list) => {
     const underway = list.filter((group) => !group.complete && group.total > 1).slice(0, 4);
     if (underway.length === 0) return null;
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshrc-prog", "data-progress": true, "aria-label": t("progress.title"), children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-prog-h", children: t("progress.title") }),
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("section", { className: "dshrc-prog", "data-progress": true, "aria-label": t("progress.title"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-prog-h", children: t("progress.title") }),
       underway.map(progressItem)
     ] });
   };
   const noticeBlock = (list) => {
     if (list.length === 0) return null;
     const shown = list.slice(0, 5);
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshrc-nt", "data-notices": true, "aria-label": t("notices.title"), children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-nt-h", children: t("notices.title") }),
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("ul", { className: "dshrc-nt-list", children: shown.map((item, index) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("li", { className: "dshrc-nt-item", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-nt-time", title: item.at, children: clockTime(item.at) }),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-nt-text", children: item.text })
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("section", { className: "dshrc-nt", "data-notices": true, "aria-label": t("notices.title"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-nt-h", children: t("notices.title") }),
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("ul", { className: "dshrc-nt-list", children: shown.map((item, index) => /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("li", { className: "dshrc-nt-item", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-nt-time", title: item.at, children: clockTime(item.at) }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-nt-text", children: item.text })
       ] }, `${item.at}-${String(index)}`)) }),
-      list.length > shown.length && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-prog-sub", children: t("notices.more", { n: list.length - shown.length }) })
+      list.length > shown.length && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-prog-sub", children: t("notices.more", { n: list.length - shown.length }) })
     ] });
   };
   const groupBlock = (group) => {
@@ -4110,8 +4656,8 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
     const tasks = list.reduce((sum, family) => sum + family.members.length, 0);
     const visible = closed ? 0 : shown.length;
     const hint = closed ? t("compact.foldedHint", { n: list.length }) : visible < list.length ? t("compact.shown", { n: visible, m: list.length }) : "";
-    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("section", { className: "dshrc-group", "data-section": group, "data-folded": closed ? "" : void 0, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+    return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("section", { className: "dshrc-group", "data-section": group, "data-folded": closed ? "" : void 0, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
         "button",
         {
           type: "button",
@@ -4122,15 +4668,15 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           },
           title: t("compact.familyTotal", { n: tasks }),
           children: [
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Icon, { className: "dshrc-gcaret", d: CARET, open: !closed }),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-gn", children: t(GROUP_KEY[group]) }),
-            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-gc", children: list.length }),
-            hint !== "" && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-gshown", "data-shown": visible, "data-total": list.length, children: hint })
+            /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(Icon, { className: "dshrc-gcaret", d: CARET2, open: !closed }),
+            /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-gn", children: t(GROUP_KEY[group]) }),
+            /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-gc", children: list.length }),
+            hint !== "" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-gshown", "data-shown": visible, "data-total": list.length, children: hint })
           ]
         }
       ),
       !closed && shown.map(familyRow),
-      !closed && list.length > PAGE && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "button", className: "dshrc-fold", "aria-expanded": more, onClick: () => {
+      !closed && list.length > PAGE && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { type: "button", className: "dshrc-fold", "aria-expanded": more, onClick: () => {
         toggle(foldKey);
       }, children: more ? t("compact.less") : t("compact.more", { n: list.length - PAGE }) })
     ] }, group);
@@ -4145,12 +4691,12 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
   const shownCount = groups.reduce((sum, group) => sum + (model.counts.get(group) ?? 0), 0);
   const failed = state.status === "error";
   const lastOk = board === null ? "" : clockTime(board.fetchedAt);
-  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc", "data-router-compact": true, "data-tab": tab, "data-theme": theme.mode, "data-batch-on": batchOn ? "" : void 0, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("style", { children: STYLE }),
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("header", { className: "dshrc-head", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h2", { className: "dshrc-title", children: t("board.title") }),
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-acts", children: [
-        controller.canBatch && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+  return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc", "data-router-compact": true, "data-tab": tab, "data-theme": theme.mode, "data-batch-on": batchOn ? "" : void 0, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("style", { children: STYLE2 }),
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("header", { className: "dshrc-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("h2", { className: "dshrc-title", children: t("board.title") }),
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-acts", children: [
+        controller.canBatch && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
           "button",
           {
             type: "button",
@@ -4161,11 +4707,11 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
             onClick: () => {
               exitOrEnterBatch();
             },
-            children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Icon, { d: ICON_BATCH })
+            children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(Icon, { d: ICON_BATCH })
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(ThemeButton, { className: "dshrc-ico", pref: theme.pref, setPref: theme.setPref, t }),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(ThemeButton, { className: "dshrc-ico", pref: theme.pref, setPref: theme.setPref, t }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
           "button",
           {
             type: "button",
@@ -4174,10 +4720,10 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
             "data-busy": refreshing ? "" : void 0,
             title: t(refreshing ? "board.refreshing" : "board.refresh"),
             "aria-label": t(refreshing ? "board.refreshing" : "board.refresh"),
-            children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Icon, { d: ICON_REFRESH })
+            children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(Icon, { d: ICON_REFRESH })
           }
         ),
-        onOpenWarRoom !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+        onOpenWarRoom !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
           "button",
           {
             type: "button",
@@ -4185,10 +4731,10 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
             onClick: onOpenWarRoom,
             title: t("board.newTask"),
             "aria-label": t("board.newTask"),
-            children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Icon, { d: ICON_PLUS })
+            children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(Icon, { d: ICON_PLUS })
           }
         ),
-        onClose !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+        onClose !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
           "button",
           {
             type: "button",
@@ -4196,13 +4742,13 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
             onClick: onClose,
             title: t("board.close"),
             "aria-label": t("board.close"),
-            children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Icon, { d: ICON_CLOSE })
+            children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(Icon, { d: ICON_CLOSE })
           }
         )
       ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-tabs", role: "tablist", "aria-label": t("panel.title"), children: [
-      TABS.map((item) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-tabs", role: "tablist", "aria-label": t("panel.title"), children: [
+      TABS.map((item) => /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
         "button",
         {
           type: "button",
@@ -4215,13 +4761,13 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           },
           children: [
             t(item.key),
-            (tabCounts.get(item.id) ?? 0) > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-tab-n", children: tabCounts.get(item.id) }),
-            item.id === "active" && waiting > 0 && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-tab-flag", title: t("seg.waiting", { n: waiting }), "aria-label": t("seg.waiting", { n: waiting }) })
+            (tabCounts.get(item.id) ?? 0) > 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-tab-n", children: tabCounts.get(item.id) }),
+            item.id === "active" && waiting > 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-tab-flag", title: t("seg.waiting", { n: waiting }), "aria-label": t("seg.waiting", { n: waiting }) })
           ]
         },
         item.id
       )),
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+      tab !== "workspace" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
         "input",
         {
           className: "dshrc-find",
@@ -4238,17 +4784,25 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
         }
       )
     ] }),
-    failed && /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-err", role: "alert", "data-router-error": true, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshrc-err-text", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-err-msg", children: t("board.error", { message: state.error ?? "" }) }),
-        lastOk !== "" && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshrc-err-stale", children: t("board.lastOk", { time: lastOk }) })
+    failed && /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-err", role: "alert", "data-router-error": true, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("span", { className: "dshrc-err-text", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-err-msg", children: t("board.error", { message: state.error ?? "" }) }),
+        lastOk !== "" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshrc-err-stale", children: t("board.lastOk", { time: lastOk }) })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("button", { type: "button", className: "dshrc-err-btn", onClick: refresh, disabled: refreshing, children: t("board.retry") })
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { type: "button", className: "dshrc-err-btn", onClick: refresh, disabled: refreshing, children: t("board.retry") })
     ] }),
-    board !== null && board.origin === "mock" && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshrc-sample", "data-router-sample": true, title: t("board.mock.hint"), children: t("board.mock") }),
-    notice !== null && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshrc-notice", role: "status", "data-tone": notice.tone, children: notice.text }),
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshrc-list", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    board !== null && board.origin === "mock" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshrc-sample", "data-router-sample": true, title: t("board.mock.hint"), children: t("board.mock") }),
+    notice !== null && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshrc-notice", role: "status", "data-tone": notice.tone, children: notice.text }),
+    tab === "workspace" ? /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshrc-ws", children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
+      WorkspacePage,
+      {
+        controller,
+        t,
+        embedded: true,
+        ...onOpenSession === void 0 ? {} : { onOpenSession }
+      }
+    ) }) : /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshrc-list", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
         ApprovalsSection,
         {
           controller,
@@ -4258,7 +4812,7 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           refreshKey: board?.fetchedAt ?? ""
         }
       ),
-      batchOn && board !== null && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+      batchOn && board !== null && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
         BatchBar,
         {
           controller,
@@ -4283,13 +4837,13 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
           }
         }
       ),
-      board === null ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshrc-empty", children: failed ? t("board.emptyOnError") : t("board.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(import_jsx_runtime7.Fragment, { children: [
+      board === null ? /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshrc-empty", children: failed ? t("board.emptyOnError") : t("board.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(import_jsx_runtime8.Fragment, { children: [
         tab === "active" && progressBlock(board.groups ?? []),
-        shownCount === 0 ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshrc-empty", children: t("compact.empty") }) : groups.map(groupBlock),
+        shownCount === 0 ? /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshrc-empty", children: t("compact.empty") }) : groups.map(groupBlock),
         tab === "active" && noticeBlock(board.notices ?? [])
       ] })
     ] }),
-    movingTask !== void 0 && moving !== null && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+    movingTask !== void 0 && moving !== null && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
       ReassignDialog,
       {
         controller,
@@ -4311,584 +4865,21 @@ function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onClose, se
 }
 
 // src/client/WarRoomRedirect.tsx
-var import_react6 = require("react");
-var import_jsx_runtime8 = require("react/jsx-runtime");
-function WarRoomRedirect({ t, open }) {
-  (0, import_react6.useEffect)(() => {
-    open();
-  }, [open]);
-  return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, height: "100%" }, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { style: { opacity: 0.7 }, children: t("warroom.opening") }),
-    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { type: "button", className: "dshr-btn", style: { height: 32, padding: "0 16px" }, onClick: open, children: t("warroom.open") })
-  ] });
-}
-
-// src/client/WorkspacePage.tsx
 var import_react7 = require("react");
 var import_jsx_runtime9 = require("react/jsx-runtime");
-var dirKey = (partition, path) => `${partition}\0${path}`;
-var STYLE2 = `${BOARD_TOKENS_CSS}
-.dshws{display:flex;flex-direction:column;height:100%;min-height:0;background:var(--c-bg);color:var(--c-text);font-size:13px;line-height:1.47;letter-spacing:-.003em;text-align:left;transition:background-color var(--dur) var(--ease),color var(--dur) var(--ease)}
-.dshws *{box-sizing:border-box}
-:where(.dshws button){font:inherit}
-.dshws button:focus-visible{outline:2px solid var(--st-running-dot);outline-offset:1px}
-.dshws-head{display:flex;align-items:center;gap:var(--sp-3);flex:none;padding:var(--sp-4) var(--sp-4) var(--sp-3);border-bottom:1px solid var(--c-line-soft)}
-.dshws-ht{flex:1 1 auto;min-width:0}
-.dshws-title{margin:0;font-size:21px;font-weight:600;line-height:26px;letter-spacing:-.022em}
-.dshws-sub{margin:2px 0 0;font-size:12px;color:var(--c-text3)}
-.dshws-btn{flex:none;height:var(--h-ctl);padding:0 14px;border:0;border-radius:var(--r-pill);background:var(--c-pill);color:var(--c-text);font-size:12px;font-weight:500;cursor:pointer;transition:background-color var(--dur) var(--ease)}
-.dshws-btn:hover{background:var(--c-hover)}
-.dshws-theme{flex:none;display:flex;align-items:center;justify-content:center;width:var(--h-ctl);height:var(--h-ctl);padding:0;border:0;border-radius:50%;background:transparent;color:var(--c-text2);cursor:pointer}
-.dshws-theme:hover{background:var(--c-hover);color:var(--c-text)}
-.dshws-theme svg{width:16px;height:16px}
-.dshws-btn:hover{background:var(--c-hover)}
-.dshws-btn:active{background:var(--c-press)}
-.dshws-body{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(240px,340px) minmax(0,1fr)}
-.dshws-left{min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--c-line-soft)}
-.dshws-right{min-height:0;overflow:auto;padding:var(--sp-4)}
-.dshws-cap{display:block;padding:var(--sp-3) var(--sp-4) var(--sp-1);font-size:11px;font-weight:600;letter-spacing:.02em;color:var(--c-text2)}
-.dshws-parts{flex:none;display:flex;flex-direction:column;gap:2px;padding:0 var(--sp-2) var(--sp-2);max-height:40%;overflow:auto;border-bottom:1px solid var(--c-line-soft)}
-.dshws-part{display:flex;align-items:center;gap:var(--sp-2);width:100%;min-height:36px;padding:var(--sp-1) var(--sp-2);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text);text-align:left;cursor:pointer}
-.dshws-part:hover{background:var(--c-hover)}
-.dshws-part[data-on]{background:var(--c-pill)}
-.dshws-part[data-off] .dshws-pn{color:var(--c-text3)}
-.dshws-pmain{flex:1 1 auto;min-width:0;display:flex;flex-direction:column}
-.dshws-pn{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dshws-pp{font-family:var(--f-mono);font-size:11px;color:var(--c-text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dshws-badge{flex:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--st-cancelled-bg);color:var(--c-text2);font-size:11px;line-height:18px;text-align:center;font-variant-numeric:tabular-nums}
-.dshws-badge[data-tone="running"]{background:var(--st-running-bg);color:var(--st-running-text)}
-.dshws-badge[data-tone="warn"]{background:var(--st-blocked-bg);color:var(--st-blocked-text)}
-.dshws-badge[data-tone="error"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
-.dshws-tree{flex:1 1 auto;min-height:0;overflow:auto;padding:var(--sp-1) var(--sp-2) var(--sp-4);font-size:12px}
-.dshws-node{display:flex;align-items:center;gap:6px;width:100%;height:26px;padding:0 var(--sp-2);border:0;border-radius:4px;background:transparent;color:var(--c-text);text-align:left;white-space:nowrap;cursor:default}
-button.dshws-node{cursor:pointer}
-button.dshws-node:hover{background:var(--c-hover)}
-.dshws-node[data-out]{color:var(--c-text3)}
-.dshws-node[data-out] .dshws-nn{text-decoration:line-through;text-decoration-color:var(--c-line)}
-.dshws-caret{flex:none;width:12px;height:12px;color:var(--c-text3);transition:transform .12s ease}
-.dshws-caret[data-open]{transform:rotate(90deg)}
-.dshws-ico{flex:none;width:14px;height:14px;color:var(--c-text3)}
-.dshws-node[data-kind="dir"] .dshws-ico{color:var(--st-blocked-dot)}
-.dshws-nn{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
-.dshws-ns{flex:none;color:var(--c-text3);font-variant-numeric:tabular-nums;font-size:11px}
-.dshws-note{padding:var(--sp-1) var(--sp-2);color:var(--c-text3);font-size:12px}
-.dshws-note[data-tone="error"]{color:var(--st-failed-text)}
-.dshws-sec{margin:0 0 var(--sp-4)}
-.dshws-sec h3{margin:0 0 var(--sp-2);font-size:12px;font-weight:600;color:var(--c-text2)}
-.dshws-sech{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);margin-bottom:var(--sp-2)}
-.dshws-sech h3{margin:0}
-.dshws-btn[data-tone="stop"]:hover{color:var(--st-failed-text)}
-.dshws-btn[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
-.dshws-h4{margin:var(--sp-3) 0 var(--sp-1);font-size:11px;font-weight:600;color:var(--c-text3)}
-.dshws-notes{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
-.dshws-mnote{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:0 var(--sp-2);padding:var(--sp-1) var(--sp-2);border-radius:var(--r-ctl);background:var(--c-line-soft);font-size:12px}
-.dshws-mtext{grid-column:1;overflow-wrap:anywhere}
-.dshws-mmeta{grid-column:1;font-size:11px;color:var(--c-text3)}
-.dshws-x{grid-column:2;grid-row:1/3;width:20px;height:20px;padding:0;border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text3);cursor:pointer}
-.dshws-x:hover{background:var(--c-hover);color:var(--st-failed-text)}
-.dshws-addnote{display:flex;gap:var(--sp-2);margin-top:var(--sp-2)}
-.dshws-addnote input{flex:1 1 auto;min-width:0;height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px}
-.dshws-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--sp-1) var(--sp-3);margin:0;font-size:12px}
-.dshws-kv dt{color:var(--c-text3)}
-.dshws-kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
-.dshws-globs{display:flex;flex-wrap:wrap;gap:var(--sp-1)}
-.dshws-glob{padding:0 6px;border-radius:4px;background:var(--c-line-soft);font-family:var(--f-mono);font-size:11px;line-height:18px}
-.dshws-probs{display:flex;flex-direction:column;gap:var(--sp-1);margin:0;padding:0;list-style:none}
-.dshws-prob{padding:var(--sp-1) var(--sp-2);border-radius:var(--r-ctl);background:var(--st-blocked-bg);color:var(--st-blocked-text);font-size:12px}
-.dshws-prob[data-level="error"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
-.dshws-ok{color:var(--st-done-text);font-size:12px}
-.dshws-rules{margin:0;padding-left:18px;font-size:12px;color:var(--c-text2)}
-.dshws-rules li+li{margin-top:2px}
-.dshws-tasks{display:flex;flex-direction:column;margin:0;padding:0;list-style:none}
-.dshws-task{display:flex;flex-direction:column;gap:2px;padding:var(--sp-2) var(--sp-2);border-radius:var(--r-ctl)}
-.dshws-task+.dshws-task{border-top:1px solid var(--c-line-soft)}
-.dshws-task[data-link]{cursor:pointer}
-.dshws-task[data-link]:hover{background:var(--c-hover)}
-.dshws-tt{display:flex;align-items:baseline;gap:var(--sp-2);min-width:0}
-.dshws-tn{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
-.dshws-ts{flex:none;font-size:11px;color:var(--c-text2)}
-.dshws-ts[data-tone="running"]{color:var(--st-running-text)}
-.dshws-ts[data-tone="blocked"],.dshws-ts[data-tone="suspended"]{color:var(--st-blocked-text)}
-.dshws-tm{font-size:11px;color:var(--c-text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dshws-empty{padding:48px var(--sp-4);color:var(--c-text3);text-align:center}
-@container (max-width:640px){.dshws-body{grid-template-columns:1fr}.dshws-left{border-right:0;border-bottom:1px solid var(--c-line-soft);max-height:55%}}
-.dshws-wrap{container-type:inline-size;height:100%}
-`;
-var CARET2 = "M4.5 3l3 3-3 3";
-var ICON_DIR = "M1.75 3.5h3.5l1.25 1.5h5.75v6.5h-10.5z";
-var ICON_FILE = "M3 1.75h5l3 3v7.5H3zM8 1.75V5h3";
-var ICON_LINK = "M5 7h4M4 9.5a2.5 2.5 0 0 1 0-5M10 4.5a2.5 2.5 0 0 1 0 5";
-function Glyph({ d, className, open }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
-    "svg",
-    {
-      className,
-      "data-open": open === true ? "" : void 0,
-      viewBox: "0 0 14 14",
-      width: "14",
-      height: "14",
-      fill: "none",
-      stroke: "currentColor",
-      strokeWidth: "1.3",
-      strokeLinecap: "round",
-      strokeLinejoin: "round",
-      "aria-hidden": "true",
-      focusable: "false",
-      children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("path", { d })
-    }
-  );
-}
-var OPEN_ORDER = ["running", "blocked", "suspended", "queued"];
-function WorkspacePage({ controller, t, onOpenSession }) {
-  const state = (0, import_react7.useSyncExternalStore)(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
-  const board = state.board;
-  const theme = useBoardTheme();
-  const partitions2 = board?.partitions ?? [];
-  const [selected, setSelected] = (0, import_react7.useState)(null);
-  const [dirs, setDirs] = (0, import_react7.useState)(() => /* @__PURE__ */ new Map());
-  const [expanded, setExpanded] = (0, import_react7.useState)(() => /* @__PURE__ */ new Set());
-  const now = Date.now();
+function WarRoomRedirect({ t, open }) {
   (0, import_react7.useEffect)(() => {
-    const detach = controller.start();
-    void controller.load();
-    return () => {
-      detach();
-    };
-  }, [controller]);
-  const current = partitions2.find((partition) => partition.id === selected) ?? partitions2[0];
-  const partitionId = current?.id;
-  const loadDir = (0, import_react7.useCallback)(async (partition, path) => {
-    const key = dirKey(partition, path);
-    setDirs((previous) => new Map(previous).set(key, { status: "loading" }));
-    try {
-      const listing = await controller.listFiles(partition, path);
-      setDirs((previous) => new Map(previous).set(key, { status: "ok", listing }));
-    } catch (error) {
-      const message2 = error instanceof Error ? error.message : String(error);
-      setDirs((previous) => new Map(previous).set(key, { status: "error", message: message2 }));
-    }
-  }, [controller]);
-  (0, import_react7.useEffect)(() => {
-    if (partitionId === void 0 || !controller.canListFiles) return;
-    if (partitions2.find((partition) => partition.id === partitionId)?.quick === true) return;
-    if (dirs.has(dirKey(partitionId, ""))) return;
-    void loadDir(partitionId, "");
-  }, [partitionId, partitions2, dirs, loadDir, controller]);
-  const [memory, setMemory] = (0, import_react7.useState)(null);
-  const [noteText, setNoteText] = (0, import_react7.useState)("");
-  const [noteBusy, setNoteBusy] = (0, import_react7.useState)(false);
-  const [stopArmed, setStopArmed] = (0, import_react7.useState)(false);
-  const [stopping, setStopping] = (0, import_react7.useState)(false);
-  const [message, setMessage] = (0, import_react7.useState)(null);
-  const loadMemory = (0, import_react7.useCallback)(async (partition) => {
-    if (!controller.canReadMemory) return;
-    try {
-      const view = await controller.readMemory(partition);
-      setMemory({ partition, view });
-    } catch (error) {
-      setMemory({ partition, error: error instanceof Error ? error.message : String(error) });
-    }
-  }, [controller]);
-  (0, import_react7.useEffect)(() => {
-    if (partitionId === void 0) return;
-    setNoteText("");
-    setStopArmed(false);
-    void loadMemory(partitionId);
-  }, [partitionId, loadMemory]);
-  (0, import_react7.useEffect)(() => {
-    if (!stopArmed) return;
-    const timer = setTimeout(() => {
-      setStopArmed(false);
-    }, 4e3);
-    return () => {
-      clearTimeout(timer);
-    };
-  }, [stopArmed]);
-  (0, import_react7.useEffect)(() => {
-    if (message === null) return;
-    const timer = setTimeout(() => {
-      setMessage(null);
-    }, 4e3);
-    return () => {
-      clearTimeout(timer);
-    };
-  }, [message]);
-  const toggleDir = (partition, path) => {
-    const key = dirKey(partition, path);
-    const opening = !expanded.has(key);
-    setExpanded((previous) => {
-      const next = new Set(previous);
-      if (opening) next.add(key);
-      else next.delete(key);
-      return next;
-    });
-    if (opening && !dirs.has(key)) void loadDir(partition, path);
-  };
-  const refresh = () => {
-    void controller.load();
-    if (partitionId !== void 0) void loadMemory(partitionId);
-    if (partitionId === void 0 || !controller.canListFiles) return;
-    const open = [...expanded].filter((key) => key.startsWith(`${partitionId}\0`)).map((key) => key.slice(partitionId.length + 1));
-    for (const path of ["", ...open]) void loadDir(partitionId, path);
-  };
-  const live = (0, import_react7.useMemo)(() => new Set(partitions2.map((partition) => partition.id)), [partitions2]);
-  const titleOf = (0, import_react7.useMemo)(() => new Map((board?.tasks ?? []).map((task) => [task.id, task.title])), [board]);
-  const tasks = (0, import_react7.useMemo)(() => {
-    if (partitionId === void 0) return [];
-    return (board?.tasks ?? []).filter((task) => task.partitionId === partitionId).map((task) => ({ task, group: groupOf(task, live) })).filter((row) => OPEN_ORDER.includes(row.group)).sort((left, right) => OPEN_ORDER.indexOf(left.group) - OPEN_ORDER.indexOf(right.group));
-  }, [board, partitionId, live]);
-  const runningBy = (0, import_react7.useMemo)(() => {
-    const counts = /* @__PURE__ */ new Map();
-    for (const task of board?.tasks ?? []) {
-      if (groupOf(task, live) === "running") counts.set(task.partitionId, (counts.get(task.partitionId) ?? 0) + 1);
-    }
-    return counts;
-  }, [board, live]);
-  const names = (ids) => ids.map((id) => titleOf.get(id) ?? id).join("\u3001");
-  const entryRow = (partition, entry, depth) => {
-    const pad = { paddingLeft: `${String(8 + depth * 14)}px` };
-    const out = entry.inScope ? void 0 : "";
-    const title = [
-      entry.path,
-      entry.inScope ? void 0 : t("ws.outOfScope"),
-      entry.modifiedAt === void 0 ? void 0 : relativeTime(entry.modifiedAt, now)
-    ].filter((line) => line !== void 0 && line !== "").join("\n");
-    if (entry.kind === "dir") {
-      const key = dirKey(partition, entry.path);
-      const open = expanded.has(key);
-      return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { role: "treeitem", "aria-expanded": open, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
-          "button",
-          {
-            type: "button",
-            className: "dshws-node",
-            "data-kind": "dir",
-            "data-out": out,
-            style: pad,
-            title,
-            onClick: () => {
-              toggleDir(partition, entry.path);
-            },
-            children: [
-              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Glyph, { className: "dshws-caret", d: CARET2, open }),
-              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Glyph, { className: "dshws-ico", d: ICON_DIR }),
-              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-nn", children: entry.name })
-            ]
-          }
-        ),
-        open && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { role: "group", children: dirBody(partition, entry.path, depth + 1) })
-      ] }, entry.path);
-    }
-    return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { role: "treeitem", className: "dshws-node", "data-kind": entry.kind, "data-out": out, style: pad, title, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-caret" }),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(Glyph, { className: "dshws-ico", d: entry.kind === "link" ? ICON_LINK : ICON_FILE }),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-nn", children: entry.name }),
-      entry.size !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-ns", children: bytes(entry.size) })
-    ] }, entry.path);
-  };
-  const dirBody = (partition, path, depth) => {
-    const read = dirs.get(dirKey(partition, path));
-    const pad = { paddingLeft: `${String(8 + depth * 14)}px` };
-    if (read === void 0 || read.status === "loading") return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", style: pad, children: t("ws.loading") });
-    if (read.status === "error") return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", "data-tone": "error", style: pad, children: t("ws.error", { message: read.message }) });
-    if (read.listing.entries.length === 0) return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", style: pad, children: t("ws.empty") });
-    return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(import_jsx_runtime9.Fragment, { children: [
-      read.listing.entries.map((entry) => entryRow(partition, entry, depth)),
-      read.listing.omitted > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", style: pad, children: t("ws.omitted", { n: read.listing.omitted }) })
-    ] });
-  };
-  const partitionRow = (partition) => {
-    const problems2 = partition.problems ?? [];
-    const worst = problems2.some((problem) => problem.level === "error") ? "error" : problems2.length > 0 ? "warn" : void 0;
-    const running = runningBy.get(partition.id) ?? 0;
-    return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
-      "button",
-      {
-        type: "button",
-        className: "dshws-part",
-        "data-on": partition.id === partitionId ? "" : void 0,
-        "data-off": partition.enabled === false ? "" : void 0,
-        onClick: () => {
-          setSelected(partition.id);
-        },
-        title: partition.path ?? partition.repo ?? partition.name,
-        children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dshws-pmain", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dshws-pn", children: [
-              partition.name,
-              partition.enabled === false ? ` \xB7 ${t("ws.disabled")}` : ""
-            ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-pp", children: partition.quick === true ? t("ws.quickHint") : partition.path ?? partition.repo ?? "" })
-          ] }),
-          worst !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-badge", "data-tone": worst, title: problems2.map((problem) => problem.message).join("\n"), children: "!" }),
-          running > 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-badge", "data-tone": "running", children: running })
-        ]
-      },
-      partition.id
-    );
-  };
-  const taskRow = ({ task, group }) => {
-    const key = statusKeyOf(task, live);
-    const tone = key.replace("status.", "");
-    const lines = [];
-    if (task.waitingFor !== void 0 && task.waitingFor.length > 0) lines.push(t("order.waiting", { ids: names(task.waitingFor) }));
-    if (group === "suspended") {
-      lines.push(task.suspendReason === void 0 || task.suspendReason === "" ? t("susp.noReason") : t("susp.reason", { reason: task.suspendReason }));
-      if (task.waitingOn !== void 0 && task.waitingOn.length > 0) lines.push(t("susp.waitingOn", { ids: names(task.waitingOn) }));
-    }
-    if (group === "blocked") lines.push(task.resumeNote === void 0 || task.resumeNote === "" ? t("hold.noReason") : t("hold.reason", { reason: task.resumeNote }));
-    if (task.stage !== void 0) lines.push(t("order.stage", { n: task.stage }));
-    const open = task.workerSessionId !== void 0 && onOpenSession !== void 0 ? () => {
-      onOpenSession(task.workerSessionId);
-    } : void 0;
-    return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("li", { className: "dshws-task", "data-link": open === void 0 ? void 0 : "", onClick: open, title: task.id, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dshws-tt", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-tn", children: task.title }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-ts", "data-tone": tone, children: t(key) })
-      ] }),
-      lines.map((line) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-tm", title: line, children: line }, line))
-    ] }, task.id);
-  };
-  const stopAll = async () => {
-    if (!stopArmed) {
-      setStopArmed(true);
-      return;
-    }
-    setStopArmed(false);
-    const openIds = new Set(tasks.map((row) => row.task.id));
-    const tops = tasks.map((row) => row.task).filter((task) => task.parentId === void 0 || !openIds.has(task.parentId));
-    setStopping(true);
-    const failures = [];
-    for (const task of tops) {
-      const failure = await controller.control(task.id, "cancel_tree");
-      if (failure !== void 0) failures.push(`${task.title}: ${failure}`);
-    }
-    setStopping(false);
-    setMessage(failures.length === 0 ? { tone: "ok", text: t("ws.stopAllDone", { n: tops.length }) } : { tone: "bad", text: t("ws.stopAllFailed", { message: failures.join("\uFF1B") }) });
-    if (partitionId !== void 0) void loadMemory(partitionId);
-  };
-  const addNote = async () => {
-    const text = noteText.trim();
-    if (partitionId === void 0 || text === "" || noteBusy) return;
-    setNoteBusy(true);
-    try {
-      await controller.addMemoryNote(partitionId, text);
-      setNoteText("");
-      await loadMemory(partitionId);
-    } catch (error) {
-      setMessage({ tone: "bad", text: t("ws.mem.failed", { message: error instanceof Error ? error.message : String(error) }) });
-    } finally {
-      setNoteBusy(false);
-    }
-  };
-  const forgetNote = async (id) => {
-    if (partitionId === void 0) return;
-    try {
-      await controller.removeMemoryNote(partitionId, id);
-      await loadMemory(partitionId);
-    } catch (error) {
-      setMessage({ tone: "bad", text: t("ws.mem.failed", { message: error instanceof Error ? error.message : String(error) }) });
-    }
-  };
-  const MANAGER_SOURCE2 = {
-    strongest: t("ws.mem.src.strongest"),
-    hard: t("ws.mem.src.hard"),
-    saved: t("ws.mem.src.saved"),
-    inherit: t("ws.mem.src.inherit")
-  };
-  const memorySection = () => {
-    if (!controller.canReadMemory) return null;
-    const read = memory !== null && memory.partition === partitionId ? memory : void 0;
-    const view = read?.view;
-    return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("section", { className: "dshws-sec", "data-router-memory": true, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h3", { children: t("ws.mem.title") }),
-      read === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", children: t("ws.loading") }) : read.error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", "data-tone": "error", children: t("ws.error", { message: read.error }) }) : view !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(import_jsx_runtime9.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("dl", { className: "dshws-kv", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dt", { children: t("ws.mem.manager") }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dd", { children: !view.manager.enabled ? t("ws.mem.noManager") : view.manager.route === void 0 ? MANAGER_SOURCE2[view.manager.source] ?? view.manager.source : `${view.manager.route.model}${view.manager.route.reasoningEffort === void 0 ? "" : ` \xB7 ${view.manager.route.reasoningEffort}`}\uFF08${MANAGER_SOURCE2[view.manager.source] ?? view.manager.source}\uFF09` })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.notes", { n: view.notes.length }) }),
-        view.notes.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", children: t("ws.mem.noNotes") }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("ul", { className: "dshws-notes", children: view.notes.map((note) => /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("li", { className: "dshws-mnote", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-mtext", children: note.text }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("span", { className: "dshws-mmeta", children: [
-            t(`ws.mem.by.${note.by}`),
-            " \xB7 ",
-            relativeTime(note.at, now)
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
-            "button",
-            {
-              type: "button",
-              className: "dshws-x",
-              title: t("ws.mem.forget"),
-              "aria-label": t("ws.mem.forget"),
-              onClick: () => {
-                void forgetNote(note.id);
-              },
-              children: "\xD7"
-            }
-          )
-        ] }, note.id)) }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("form", { className: "dshws-addnote", onSubmit: (event) => {
-          event.preventDefault();
-          void addNote();
-        }, children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
-            "input",
-            {
-              value: noteText,
-              maxLength: 600,
-              placeholder: t("ws.mem.placeholder"),
-              onChange: (event) => {
-                setNoteText(event.target.value);
-              }
-            }
-          ),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("button", { type: "submit", className: "dshws-btn", disabled: noteBusy || noteText.trim() === "", children: t("ws.mem.add") })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.work", { n: view.logTotal }) }),
-        view.log.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", children: t("ws.mem.noWork") }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("ul", { className: "dshws-tasks", children: view.log.slice(0, 12).map((entry) => {
-          const open = entry.sessionId !== void 0 && onOpenSession !== void 0 ? () => {
-            onOpenSession(entry.sessionId);
-          } : void 0;
-          return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
-            "li",
-            {
-              className: "dshws-task",
-              "data-link": open === void 0 ? void 0 : "",
-              onClick: open,
-              children: [
-                /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dshws-tt", children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-tn", children: entry.subject }),
-                  /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-ts", "data-tone": entry.state === "failed" || entry.state === "cancelled" ? "blocked" : void 0, children: t(`ws.mem.state.${entry.state}`) })
-                ] }),
-                /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-tm", children: [relativeTime(entry.at, now), entry.level === "manager" ? "manager" : entry.model, entry.summary ?? entry.error].filter((part) => part !== void 0 && part !== "").join(" \xB7 ") })
-              ]
-            },
-            `${entry.taskId}-${entry.at}`
-          );
-        }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h4", { className: "dshws-h4", children: t("ws.mem.sessions", { n: view.sessions.length }) }),
-        view.sessions.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", children: t("ws.mem.noSessions") }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("ul", { className: "dshws-tasks", children: view.sessions.slice(0, 12).map((ref) => {
-          const open = onOpenSession !== void 0 ? () => {
-            onOpenSession(ref.sessionId);
-          } : void 0;
-          return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("li", { className: "dshws-task", "data-link": open === void 0 ? void 0 : "", onClick: open, children: [
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dshws-tt", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-tn", children: ref.subject }),
-              /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-ts", children: t(`ws.mem.state.${ref.state}`) })
-            ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-tm", children: [ref.taskId, relativeTime(ref.updatedAt, now), ref.summary].filter((part) => part !== void 0 && part !== "").join(" \xB7 ") })
-          ] }, ref.sessionId);
-        }) })
-      ] })
-    ] });
-  };
-  const rootListing = partitionId === void 0 ? void 0 : dirs.get(dirKey(partitionId, ""));
-  const include = current?.include ?? (rootListing?.status === "ok" ? rootListing.listing.include : void 0);
-  const exclude = current?.exclude ?? (rootListing?.status === "ok" ? rootListing.listing.exclude : void 0);
-  const problems = current?.problems ?? [];
-  return /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-wrap", children: /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dshrc dshws", "data-router-workspace": true, "data-theme": theme.mode, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("style", { children: STYLE2 }),
-    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("header", { className: "dshws-head", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dshws-ht", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h2", { className: "dshws-title", children: t("ws.title") }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("p", { className: "dshws-sub", children: t("ws.subtitle") })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(ThemeButton, { className: "dshws-theme", pref: theme.pref, setPref: theme.setPref, t }),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("button", { type: "button", className: "dshws-btn", onClick: refresh, children: t("ws.refresh") })
-    ] }),
-    board === null ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-empty", children: t("board.loading") }) : current === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-empty", children: t("ws.noPartition") }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dshws-body", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dshws-left", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-cap", children: t("ws.partitions") }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-parts", children: partitions2.map(partitionRow) }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-cap", children: current.name }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-tree", role: "tree", "aria-label": current.name, children: current.quick === true ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", children: t("ws.quickNoFiles") }) : controller.canListFiles ? dirBody(current.id, "", 0) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", children: t("ws.notWired") }) })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dshws-right", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("section", { className: "dshws-sec", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h3", { children: current.name }),
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("dl", { className: "dshws-kv", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dt", { children: t("ws.root") }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dd", { children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("code", { children: current.path ?? current.repo ?? "" }) }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dt", { children: t("ws.include") }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dd", { children: include === void 0 || include.length === 1 && include[0] === "**" ? t("ws.all") : include.length === 0 ? t("ws.none") : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-globs", children: include.map((glob) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-glob", children: glob }, glob)) }) }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dt", { children: t("ws.exclude") }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("dd", { children: exclude === void 0 || exclude.length === 0 ? t("ws.none") : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-globs", children: exclude.map((glob) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-glob", children: glob }, glob)) }) })
-          ] }),
-          current.description !== void 0 && current.description !== "" && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("p", { className: "dshws-sub", children: current.description })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("section", { className: "dshws-sec", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h3", { children: t("ws.problems") }),
-          problems.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-ok", children: t("ws.noProblems") }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("ul", { className: "dshws-probs", children: problems.map((problem) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { className: "dshws-prob", "data-level": problem.level, children: problem.message }, problem.message)) })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("section", { className: "dshws-sec", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h3", { children: t("ws.rules") }),
-          current.quick === true ? /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("ol", { className: "dshws-rules", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.quickRule1") }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.quickRule2") }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.quickRule3") })
-          ] }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("ol", { className: "dshws-rules", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.rule1") }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.rule2") }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("li", { children: t("ws.rule3") })
-          ] })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("section", { className: "dshws-sec", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "dshws-sech", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h3", { children: t("ws.tasks") }),
-            tasks.length > 0 && controller.canControl && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
-              "button",
-              {
-                type: "button",
-                className: "dshws-btn",
-                "data-tone": "stop",
-                "data-armed": stopArmed ? "" : void 0,
-                disabled: stopping,
-                title: t("ws.stopAllHint"),
-                onClick: () => {
-                  void stopAll();
-                },
-                children: stopping ? t("ws.stopping") : stopArmed ? t("ws.stopAllConfirm", { n: tasks.length }) : t("ws.stopAll")
-              }
-            )
-          ] }),
-          message !== null && /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { className: "dshws-note", "data-tone": message.tone === "bad" ? "error" : void 0, role: "status", children: message.text }),
-          tasks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "dshws-sub", children: t("ws.noTasks") }) : /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("ul", { className: "dshws-tasks", children: tasks.map(taskRow) })
-        ] }),
-        memorySection()
-      ] })
-    ] })
-  ] }) });
-}
-
-// src/client/WorkspaceIcon.tsx
-var import_jsx_runtime10 = require("react/jsx-runtime");
-function WorkspaceIcon({ size = 18, active = false }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(
-    "svg",
-    {
-      width: size,
-      height: size,
-      viewBox: "0 0 18 18",
-      fill: "none",
-      "aria-hidden": "true",
-      stroke: "currentColor",
-      strokeWidth: "1.5",
-      strokeLinecap: "round",
-      strokeLinejoin: "round",
-      style: { opacity: active ? 1 : 0.72 },
-      children: [
-        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("path", { d: "M2 4.5h5l1.5 1.8H16v8.2H2z" }),
-        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("path", { d: "M5.5 9.5h3M5.5 12h5", opacity: "0.72" })
-      ]
-    }
-  );
+    open();
+  }, [open]);
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, height: "100%" }, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("div", { style: { opacity: 0.7 }, children: t("warroom.opening") }),
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("button", { type: "button", className: "dshr-btn", style: { height: 32, padding: "0 16px" }, onClick: open, children: t("warroom.open") })
+  ] });
 }
 
 // src/client/ModelTiers.tsx
 var import_react8 = require("react");
-var import_jsx_runtime11 = require("react/jsx-runtime");
+var import_jsx_runtime10 = require("react/jsx-runtime");
 var TIERS = ["easy", "medium", "hard"];
 var LABEL = { easy: "\u521D\u7EA7", medium: "\u4E2D\u7EA7", hard: "\u9AD8\u7EA7" };
 var HINT = {
@@ -5152,8 +5143,8 @@ function ModelTiers({ wide = true }) {
   if (!wide) return null;
   const auto = doc?.auto ?? true;
   const offAttr = doc !== null && !auto ? { "data-off": "" } : {};
-  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "dmt-root", "data-model-tiers": "", ref: rootRef, ...offAttr, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "dmt-root", "data-model-tiers": "", ref: rootRef, ...offAttr, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(
       "button",
       {
         type: "button",
@@ -5164,28 +5155,28 @@ function ModelTiers({ wide = true }) {
           setOpen((previous) => !previous);
         },
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "dmt-head", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-title", children: "\u6A21\u578B\u6863\u4F4D" }),
-            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-badge", ...auto ? { "data-on": "" } : {}, children: doc === null ? "\u2026" : auto ? "\u81EA\u52A8\u9009\u62E9" : "\u5DF2\u5173\u95ED" }),
-            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-caret", "aria-hidden": true, children: open ? "\u25BE" : "\u25B4" })
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { className: "dmt-head", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-title", children: "\u6A21\u578B\u6863\u4F4D" }),
+            /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-badge", ...auto ? { "data-on": "" } : {}, children: doc === null ? "\u2026" : auto ? "\u81EA\u52A8\u9009\u62E9" : "\u5DF2\u5173\u95ED" }),
+            /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-caret", "aria-hidden": true, children: open ? "\u25BE" : "\u25B4" })
           ] }),
-          doc === null ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-note", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u52A0\u8F7D\u4E2D\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "dmt-lines", children: [
+          doc === null ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-note", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u52A0\u8F7D\u4E2D\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { className: "dmt-lines", children: [
             TIERS.map((tier) => {
               const route = doc.effective[tier];
               const effort = route?.reasoningEffort;
-              return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "dmt-line", title: route == null ? "" : `${optionOf(route)?.providerName ?? route.provider} \xB7 ${route.model}`, children: [
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-line-label", children: LABEL[tier] }),
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "dmt-line-model", children: [
+              return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { className: "dmt-line", title: route == null ? "" : `${optionOf(route)?.providerName ?? route.provider} \xB7 ${route.model}`, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-line-label", children: LABEL[tier] }),
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { className: "dmt-line-model", children: [
                   labelOf(route),
                   effort === void 0 ? "" : ` \xB7 ${EFFORT_LABEL[effort] ?? effort}`
                 ] })
               ] }, tier);
             }),
-            /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "dmt-line", title: "\u6BCF\u4E2A\u5206\u533A\u7684 manager \u7528\u7684\u6A21\u578B", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-dot", "data-tier": "manager" }),
-              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-line-label", children: "Manager" }),
-              /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "dmt-line-model", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { className: "dmt-line", title: "\u6BCF\u4E2A\u5206\u533A\u7684 manager \u7528\u7684\u6A21\u578B", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-dot", "data-tier": "manager" }),
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-line-label", children: "Manager" }),
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { className: "dmt-line-model", children: [
                 doc.managerEffective?.route === void 0 ? labelOf(doc.defaultModel) : labelOf(doc.managerEffective.route),
                 doc.managerEffective?.route?.reasoningEffort === void 0 ? "" : ` \xB7 ${EFFORT_LABEL[doc.managerEffective.route.reasoningEffort] ?? doc.managerEffective.route.reasoningEffort}`
               ] })
@@ -5194,7 +5185,7 @@ function ModelTiers({ wide = true }) {
         ]
       }
     ),
-    placement === null ? null : /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+    placement === null ? null : /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(
       "div",
       {
         ref: popRef,
@@ -5204,19 +5195,19 @@ function ModelTiers({ wide = true }) {
         ...offAttr,
         style: { left: placement.left, bottom: placement.bottom, width: placement.width, maxHeight: placement.maxHeight },
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "dmt-pop-head", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-pop-title", children: "\u6A21\u578B\u6863\u4F4D" }),
-            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { type: "button", className: "dmt-close", "aria-label": "\u5173\u95ED", onClick: () => {
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "dmt-pop-head", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-pop-title", children: "\u6A21\u578B\u6863\u4F4D" }),
+            /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { type: "button", className: "dmt-close", "aria-label": "\u5173\u95ED", onClick: () => {
               setOpen(false);
             }, children: "\xD7" })
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "dmt-pop-body", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "dmt-switch-row", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "dmt-switch-text", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-switch-title", children: "\u81EA\u52A8\u6309\u96BE\u5EA6\u9009\u62E9" }),
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-switch-hint", children: auto ? "\u6D3E\u4EFB\u52A1\u65F6\u5148\u5224\u65AD\u96BE\u5EA6\uFF0C\u518D\u7528\u5BF9\u5E94\u6863\u4F4D\u7684\u6A21\u578B" : `\u5DF2\u5173\u95ED\uFF1A\u6240\u6709\u4EFB\u52A1\u4F7F\u7528\u9ED8\u8BA4\u6A21\u578B ${labelOf(doc?.defaultModel)}` })
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "dmt-pop-body", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "dmt-switch-row", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { className: "dmt-switch-text", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-switch-title", children: "\u81EA\u52A8\u6309\u96BE\u5EA6\u9009\u62E9" }),
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-switch-hint", children: auto ? "\u6D3E\u4EFB\u52A1\u65F6\u5148\u5224\u65AD\u96BE\u5EA6\uFF0C\u518D\u7528\u5BF9\u5E94\u6863\u4F4D\u7684\u6A21\u578B" : `\u5DF2\u5173\u95ED\uFF1A\u6240\u6709\u4EFB\u52A1\u4F7F\u7528\u9ED8\u8BA4\u6A21\u578B ${labelOf(doc?.defaultModel)}` })
               ] }),
-              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
                 "button",
                 {
                   type: "button",
@@ -5232,17 +5223,17 @@ function ModelTiers({ wide = true }) {
                 }
               )
             ] }),
-            doc === null ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "dmt-note", children: "\u52A0\u8F7D\u4E2D\u2026" }) : TIERS.map((tier) => {
+            doc === null ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "dmt-note", children: "\u52A0\u8F7D\u4E2D\u2026" }) : TIERS.map((tier) => {
               const route = doc.effective[tier];
               const option = optionOf(route);
               const efforts = option?.efforts ?? [];
               const saved = doc.saved[tier] !== void 0;
-              return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "dmt-tier", "data-tier-block": tier, children: [
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "dmt-tier-head", children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
-                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-tier-name", children: LABEL[tier] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-tier-hint", title: HINT[tier], children: HINT[tier] }),
-                  saved ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+              return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "dmt-tier", "data-tier-block": tier, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "dmt-tier-head", children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-dot", "data-tier": tier }),
+                  /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-tier-name", children: LABEL[tier] }),
+                  /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-tier-hint", title: HINT[tier], children: HINT[tier] }),
+                  saved ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
                     "button",
                     {
                       type: "button",
@@ -5253,10 +5244,10 @@ function ModelTiers({ wide = true }) {
                       },
                       children: "\u6062\u590D\u9ED8\u8BA4"
                     }
-                  ) : /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-tag", children: "\u9ED8\u8BA4" })
+                  ) : /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-tag", children: "\u9ED8\u8BA4" })
                 ] }),
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "dmt-fields", ...efforts.length === 0 ? { "data-single": "" } : {}, children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "dmt-fields", ...efforts.length === 0 ? { "data-single": "" } : {}, children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(
                     "select",
                     {
                       className: "dmt-select",
@@ -5273,12 +5264,12 @@ function ModelTiers({ wide = true }) {
                         }, `${LABEL[tier]}\u5DF2\u6539\u4E3A ${shortName(next.name)}\uFF0C\u4E0B\u4E00\u4E2A\u4EFB\u52A1\u751F\u6548`);
                       },
                       children: [
-                        option === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("option", { value: keyOf(route), children: route == null ? "\uFF08\u9ED8\u8BA4\u6A21\u578B\uFF09" : `${route.model}\uFF08\u4E0D\u53EF\u7528\uFF09` }) : null,
-                        groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("optgroup", { label: group.name, children: group.models.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("option", { value: keyOf(entry), children: shortName(entry.name) }, keyOf(entry))) }, group.name))
+                        option === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("option", { value: keyOf(route), children: route == null ? "\uFF08\u9ED8\u8BA4\u6A21\u578B\uFF09" : `${route.model}\uFF08\u4E0D\u53EF\u7528\uFF09` }) : null,
+                        groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("optgroup", { label: group.name, children: group.models.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("option", { value: keyOf(entry), children: shortName(entry.name) }, keyOf(entry))) }, group.name))
                       ]
                     }
                   ),
-                  efforts.length === 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+                  efforts.length === 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(
                     "select",
                     {
                       className: "dmt-select",
@@ -5294,8 +5285,8 @@ function ModelTiers({ wide = true }) {
                         }, `${LABEL[tier]}\u63A8\u7406\u5F3A\u5EA6\u5DF2\u4FDD\u5B58`);
                       },
                       children: [
-                        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("option", { value: "", children: "\u63A8\u7406\uFF1A\u9ED8\u8BA4" }),
-                        efforts.map((effort) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("option", { value: effort, children: `\u63A8\u7406\uFF1A${EFFORT_LABEL[effort] ?? effort}` }, effort))
+                        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("option", { value: "", children: "\u63A8\u7406\uFF1A\u9ED8\u8BA4" }),
+                        efforts.map((effort) => /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("option", { value: effort, children: `\u63A8\u7406\uFF1A${EFFORT_LABEL[effort] ?? effort}` }, effort))
                       ]
                     }
                   )
@@ -5306,12 +5297,12 @@ function ModelTiers({ wide = true }) {
               const choice = doc.manager ?? "strongest";
               const value = choice === "strongest" ? STRONGEST : choice === "inherit" ? INHERIT : keyOf(choice);
               const effective = doc.managerEffective;
-              return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "dmt-tier", "data-tier-block": "manager", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "dmt-tier-head", children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-dot", "data-tier": "manager" }),
-                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-tier-name", children: "Manager" }),
-                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-tier-hint", title: "\u6BCF\u4E2A\u5206\u533A\u7684 manager \u8D1F\u8D23\u62C6\u4EFB\u52A1\u3001\u6392\u987A\u5E8F\u3001\u8BB0\u4F4F\u5206\u533A\u505A\u8FC7\u4EC0\u4E48", children: "\u62C6\u4EFB\u52A1\u3001\u6392\u987A\u5E8F\u3001\u8BB0\u4F4F\u5206\u533A\u5386\u53F2" }),
-                  choice === "strongest" ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dmt-tag", children: "\u9ED8\u8BA4" }) : /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+              return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "dmt-tier", "data-tier-block": "manager", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "dmt-tier-head", children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-dot", "data-tier": "manager" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-tier-name", children: "Manager" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-tier-hint", title: "\u6BCF\u4E2A\u5206\u533A\u7684 manager \u8D1F\u8D23\u62C6\u4EFB\u52A1\u3001\u6392\u987A\u5E8F\u3001\u8BB0\u4F4F\u5206\u533A\u505A\u8FC7\u4EC0\u4E48", children: "\u62C6\u4EFB\u52A1\u3001\u6392\u987A\u5E8F\u3001\u8BB0\u4F4F\u5206\u533A\u5386\u53F2" }),
+                  choice === "strongest" ? /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "dmt-tag", children: "\u9ED8\u8BA4" }) : /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
                     "button",
                     {
                       type: "button",
@@ -5324,7 +5315,7 @@ function ModelTiers({ wide = true }) {
                     }
                   )
                 ] }),
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "dmt-fields", "data-single": "", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "dmt-fields", "data-single": "", children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(
                   "select",
                   {
                     className: "dmt-select",
@@ -5351,17 +5342,17 @@ function ModelTiers({ wide = true }) {
                       );
                     },
                     children: [
-                      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("option", { value: STRONGEST, children: "\u81EA\u52A8\u9009\u6700\u5F3A" }),
-                      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("option", { value: INHERIT, children: "\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B" }),
-                      groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("optgroup", { label: group.name, children: group.models.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("option", { value: keyOf(entry), children: shortName(entry.name) }, keyOf(entry))) }, group.name))
+                      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("option", { value: STRONGEST, children: "\u81EA\u52A8\u9009\u6700\u5F3A" }),
+                      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("option", { value: INHERIT, children: "\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B" }),
+                      groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("optgroup", { label: group.name, children: group.models.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("option", { value: keyOf(entry), children: shortName(entry.name) }, keyOf(entry))) }, group.name))
                     ]
                   }
                 ) }),
-                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "dmt-switch-hint", "data-manager-effective": "", children: effective === void 0 ? "\u5BBF\u4E3B\u8FD8\u6CA1\u66F4\u65B0\uFF0Cmanager \u6682\u65F6\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B" : `\u5B9E\u9645\u4F7F\u7528\uFF1A${effective.route === void 0 ? labelOf(doc.defaultModel) : labelOf(effective.route)}${effective.route?.reasoningEffort === void 0 ? "" : ` \xB7 \u63A8\u7406${EFFORT_LABEL[effective.route.reasoningEffort] ?? effective.route.reasoningEffort}`}\uFF08${MANAGER_SOURCE[effective.source] ?? effective.source}\uFF09` })
+                /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "dmt-switch-hint", "data-manager-effective": "", children: effective === void 0 ? "\u5BBF\u4E3B\u8FD8\u6CA1\u66F4\u65B0\uFF0Cmanager \u6682\u65F6\u8DDF\u968F\u9ED8\u8BA4\u6A21\u578B" : `\u5B9E\u9645\u4F7F\u7528\uFF1A${effective.route === void 0 ? labelOf(doc.defaultModel) : labelOf(effective.route)}${effective.route?.reasoningEffort === void 0 ? "" : ` \xB7 \u63A8\u7406${EFFORT_LABEL[effective.route.reasoningEffort] ?? effective.route.reasoningEffort}`}\uFF08${MANAGER_SOURCE[effective.source] ?? effective.source}\uFF09` })
               ] });
             })()
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "dmt-pop-foot", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u4FEE\u6539\u7ACB\u5373\u4FDD\u5B58\uFF0C\u4ECE\u4E0B\u4E00\u4E2A\u6D3E\u51FA\u7684\u4EFB\u52A1\u5F00\u59CB\u751F\u6548" })
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "dmt-pop-foot", ...msg?.bad === true ? { "data-bad": "" } : {}, children: msg?.text ?? "\u4FEE\u6539\u7ACB\u5373\u4FDD\u5B58\uFF0C\u4ECE\u4E0B\u4E00\u4E2A\u6D3E\u51FA\u7684\u4EFB\u52A1\u5F00\u59CB\u751F\u6548" })
         ]
       }
     )
@@ -5502,8 +5493,7 @@ var zh = {
   // Right-Sidebar task rail: segment strip, group captions, header actions.
   "board.title": "\u4EFB\u52A1",
   "seg.active": "\u8FDB\u884C\u4E2D",
-  "seg.next": "\u63A5\u4E0B\u6765",
-  "seg.scheduled": "\u6392\u7A0B\u4EFB\u52A1",
+  "seg.workspace": "\u5DE5\u4F5C\u533A",
   "seg.resolved": "\u5DF2\u7ED3\u675F",
   "grp.running": "\u8FDB\u884C\u4E2D",
   "grp.blocked": "\u5DF2\u6682\u505C \xB7 \u9700\u8981\u5904\u7406",
@@ -5516,7 +5506,7 @@ var zh = {
   "hold.resumed": "\u5DF2\u6062\u590D\uFF1A{title}",
   "hold.resumeFailed": "\u6062\u590D\u5931\u8D25\uFF1A{message}",
   "hold.resumeFailedShort": "\u6062\u590D\u5931\u8D25",
-  "grp.queued": "\u6392\u961F\u4E2D",
+  "grp.queued": "\u6392\u961F \xB7 \u7B49\u524D\u7F6E\u6216\u540D\u989D",
   "grp.stale": "\u5DF2\u5931\u6548\u5206\u533A",
   "grp.done": "\u5DF2\u5B8C\u6210",
   "grp.failed": "\u5931\u8D25",
@@ -5578,7 +5568,6 @@ var zh = {
   "progress.failed": "{n} \u5931\u8D25",
   "notices.title": "\u8FDB\u5EA6\u63D0\u9192",
   "notices.more": "\u8FD8\u6709 {n} \u6761",
-  "ws.open": "\u5DE5\u4F5C\u533A",
   "ws.title": "\u5DE5\u4F5C\u533A",
   "ws.subtitle": "\u6BCF\u4E2A\u5206\u533A\u7684\u6839\u76EE\u5F55\u91CC\u6709\u54EA\u4E9B\u6587\u4EF6\uFF0C\u54EA\u4E9B\u5728\u5206\u533A\u8303\u56F4\u5185",
   "ws.partitions": "\u5206\u533A",
@@ -5880,8 +5869,7 @@ var en = {
   // Right-Sidebar task rail: segment strip, group captions, header actions.
   "board.title": "Tasks",
   "seg.active": "Active",
-  "seg.next": "Up next",
-  "seg.scheduled": "Scheduled",
+  "seg.workspace": "Workspace",
   "seg.resolved": "Resolved",
   "grp.running": "Running",
   "grp.blocked": "Paused \xB7 needs input",
@@ -5894,7 +5882,7 @@ var en = {
   "hold.resumed": "Resumed: {title}",
   "hold.resumeFailed": "Resume failed: {message}",
   "hold.resumeFailedShort": "Resume failed",
-  "grp.queued": "Up next",
+  "grp.queued": "Queued \xB7 waiting on a prerequisite or a slot",
   "grp.stale": "Removed partitions",
   "grp.done": "Done",
   "grp.failed": "Failed",
@@ -5956,7 +5944,6 @@ var en = {
   "progress.failed": "{n} failed",
   "notices.title": "Progress notices",
   "notices.more": "{n} more",
-  "ws.open": "Workspace",
   "ws.title": "Workspace",
   "ws.subtitle": "Files under each partition root, and which ones are in scope",
   "ws.partitions": "Partitions",
@@ -6463,7 +6450,6 @@ function resolveSource(factory) {
 var TAB_ID = "dsh-client-ui-router/board";
 var TAB_KIND = "router-board";
 var PANEL_ID = "router/routing";
-var WORKSPACE_ID = "router/workspace";
 var inject = ["slots", "locale", "sidebarRightTabs", "sidebarRight"];
 function boardTabDefinition(t) {
   return {
@@ -6627,26 +6613,6 @@ function applyInner(ctx) {
     locale: NS,
     label: () => t("warroom.open")
   }, RoutingIcon));
-  ctx.slots.inject("main", () => ctx.slots.register({
-    name: "main",
-    key: WORKSPACE_ID,
-    locale: NS,
-    inject: () => {
-      const face = panelFace();
-      return {
-        controller: face.controller,
-        t: face.t,
-        ...face.onOpenSession === void 0 ? {} : { onOpenSession: face.onOpenSession }
-      };
-    }
-  }, WorkspacePage));
-  ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({
-    name: "sidebar.panellist",
-    id: WORKSPACE_ID,
-    order: -39,
-    locale: NS,
-    label: () => t("ws.open")
-  }, WorkspaceIcon));
   installModelTierStyles();
   ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
     name: "sidebar.footer.action",

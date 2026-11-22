@@ -140,8 +140,7 @@ export declare const DICTIONARIES: {
         'compact.state.stale': string;
         'board.title': string;
         'seg.active': string;
-        'seg.next': string;
-        'seg.scheduled': string;
+        'seg.workspace': string;
         'seg.resolved': string;
         'grp.running': string;
         'grp.blocked': string;
@@ -216,7 +215,6 @@ export declare const DICTIONARIES: {
         'progress.failed': string;
         'notices.title': string;
         'notices.more': string;
-        'ws.open': string;
         'ws.title': string;
         'ws.subtitle': string;
         'ws.partitions': string;
@@ -517,8 +515,7 @@ export declare const DICTIONARIES: {
         'compact.state.stale': string;
         'board.title': string;
         'seg.active': string;
-        'seg.next': string;
-        'seg.scheduled': string;
+        'seg.workspace': string;
         'seg.resolved': string;
         'grp.running': string;
         'grp.blocked': string;
@@ -593,7 +590,6 @@ export declare const DICTIONARIES: {
         'progress.failed': string;
         'notices.title': string;
         'notices.more': string;
-        'ws.open': string;
         'ws.title': string;
         'ws.subtitle': string;
         'ws.partitions': string;

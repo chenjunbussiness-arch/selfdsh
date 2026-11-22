@@ -1,5 +1,6 @@
 /**
  * 工作区: what files each partition holds, and the rules a worker works by.
+ * Shown as the task board's 工作区 tab (`embedded`): one scrolling column.
  *
  * Left: the partitions, then the selected partition's file tree. The tree reads
  * one directory level per request (`GET /api/router/files?partition=&path=`), so
@@ -30,6 +31,11 @@ export interface WorkspacePageProps {
   readonly controller: RouterBoardController
   readonly t: (key: string, values?: Record<string, string | number>) => string
   readonly onOpenSession?: (sessionId: string) => void
+  /**
+   * Rendered inside the task board's 工作区 tab: no page header (the board has
+   * its own), one scrolling column, and the board keeps the read loop running.
+   */
+  readonly embedded?: boolean
 }
 
 /** One directory's read state. */
@@ -127,6 +133,13 @@ button.dshws-node:hover{background:var(--c-hover)}
 .dshws-empty{padding:48px var(--sp-4);color:var(--c-text3);text-align:center}
 @container (max-width:640px){.dshws-body{grid-template-columns:1fr}.dshws-left{border-right:0;border-bottom:1px solid var(--c-line-soft);max-height:55%}}
 .dshws-wrap{container-type:inline-size;height:100%}
+.dshws[data-embed]{height:auto;flex:1 1 auto;min-height:0;overflow:auto;background:transparent}
+.dshws[data-embed] .dshws-body{display:block}
+.dshws[data-embed] .dshws-left{border-right:0;border-bottom:1px solid var(--c-line-soft)}
+.dshws[data-embed] .dshws-parts{max-height:none}
+.dshws[data-embed] .dshws-tree{max-height:320px}
+.dshws[data-embed] .dshws-right{overflow:visible;padding:var(--sp-3) var(--sp-3) var(--sp-5)}
+.dshws-wrap[data-embed]{height:auto;flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
 `
 
 const CARET = 'M4.5 3l3 3-3 3'
@@ -150,7 +163,7 @@ const OPEN_ORDER: readonly string[] = ['running', 'blocked', 'suspended', 'queue
  * @param props - controller, translate and the Session opener.
  * @returns the page.
  */
-export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePageProps) {
+export function WorkspacePage({ controller, t, onOpenSession, embedded = false }: WorkspacePageProps) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
   const board = state.board
   const theme = useBoardTheme()
@@ -161,10 +174,12 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
   const now = Date.now()
 
   useEffect(() => {
+    // Embedded, the board around it already follows the source.
+    if (embedded) return
     const detach = controller.start()
     void controller.load()
     return () => { detach() }
-  }, [controller])
+  }, [controller, embedded])
 
   // Select the first partition once the board arrives, and keep the choice
   // valid if a partition disappears.
@@ -515,17 +530,19 @@ export function WorkspacePage({ controller, t, onOpenSession }: WorkspacePagePro
   const problems = current?.problems ?? []
 
   return (
-    <div className="dshws-wrap">
-      <div className="dshrc dshws" data-router-workspace data-theme={theme.mode}>
+    <div className="dshws-wrap" data-embed={embedded ? '' : undefined}>
+      <div className="dshrc dshws" data-router-workspace data-theme={theme.mode} data-embed={embedded ? '' : undefined}>
         <style>{STYLE}</style>
-        <header className="dshws-head">
-          <div className="dshws-ht">
-            <h2 className="dshws-title">{t('ws.title')}</h2>
-            <p className="dshws-sub">{t('ws.subtitle')}</p>
-          </div>
-          <ThemeButton className="dshws-theme" pref={theme.pref} setPref={theme.setPref} t={t} />
-          <button type="button" className="dshws-btn" onClick={refresh}>{t('ws.refresh')}</button>
-        </header>
+        {!embedded && (
+          <header className="dshws-head">
+            <div className="dshws-ht">
+              <h2 className="dshws-title">{t('ws.title')}</h2>
+              <p className="dshws-sub">{t('ws.subtitle')}</p>
+            </div>
+            <ThemeButton className="dshws-theme" pref={theme.pref} setPref={theme.setPref} t={t} />
+            <button type="button" className="dshws-btn" onClick={refresh}>{t('ws.refresh')}</button>
+          </header>
+        )}
         {board === null
           ? <div className="dshws-empty">{t('board.loading')}</div>
           : current === undefined
