@@ -33,7 +33,7 @@ export function RouterPanelButton({ controller, t, open }: RouterPanelButtonProp
   return (
     <button
       type="button"
-      className="dshr-btn"
+      className="dshr-entry"
       onClick={open}
       title={t('panel.title')}
       aria-label={t('panel.title')}
@@ -42,10 +42,10 @@ export function RouterPanelButton({ controller, t, open }: RouterPanelButtonProp
       <span aria-hidden="true">▤</span>
       <span>{t('panel.title')}</span>
       {awaiting > 0 && (
-        <span className="dshr-tab-count" data-tone="warn" title={t('lane.reported')}>{awaiting}</span>
+        <span className="dshr-entry-count" data-tone="warn" title={t('lane.reported')}>{awaiting}</span>
       )}
       {awaiting === 0 && running > 0 && (
-        <span className="dshr-tab-count" title={t('lane.running')}>{running}</span>
+        <span className="dshr-entry-count" title={t('lane.running')}>{running}</span>
       )}
     </button>
   )

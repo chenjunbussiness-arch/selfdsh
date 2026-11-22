@@ -136,24 +136,26 @@ export function ProfileForm(props: ProfileFormProps): ReactNode {
     >
       <h2 className="dshv-form-title">{editing ? t('form.title.edit') : t('form.title.new')}</h2>
 
-      <div className="dshv-field">
-        <label className="dshv-label" htmlFor="dshv-name">{t('form.name')}</label>
-        <input id="dshv-name" className="dshv-input" value={form.name} maxLength={64} onChange={event => { set({ name: event.target.value }) }} />
-      </div>
+      <div className="dshv-group">
+        <div className="dshv-field">
+          <label className="dshv-label" htmlFor="dshv-name">{t('form.name')}</label>
+          <input id="dshv-name" className="dshv-input" value={form.name} maxLength={64} onChange={event => { set({ name: event.target.value }) }} />
+        </div>
 
-      <div className="dshv-field">
-        <span className="dshv-label" id="dshv-type-label">{t('form.type')}</span>
-        <div className="dshv-seg" role="radiogroup" aria-labelledby="dshv-type-label">
-          {types.map(type => (
-            <button key={type} type="button" role="radio" aria-checked={form.type === type} onClick={() => { pickType(type) }}>
-              {t(`type.${type}` as 'type.password')}
-            </button>
-          ))}
+        <div className="dshv-field">
+          <span className="dshv-label" id="dshv-type-label">{t('form.type')}</span>
+          <div className="dshv-seg" role="radiogroup" aria-labelledby="dshv-type-label">
+            {types.map(type => (
+              <button key={type} type="button" role="radio" aria-checked={form.type === type} onClick={() => { pickType(type) }}>
+                {t(`type.${type}` as 'type.password')}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
       {form.type === 'password' && (
-        <>
+        <div className="dshv-group">
           <div className="dshv-grid">
             <div className="dshv-field">
               <label className="dshv-label" htmlFor="dshv-host">{t('form.host')}</label>
@@ -193,11 +195,11 @@ export function ProfileForm(props: ProfileFormProps): ReactNode {
               <input id="dshv-cert" className="dshv-input" data-mono="true" value={form.trustedCert} placeholder="e46d4aff08ba…" onChange={event => { set({ trustedCert: event.target.value }) }} />
             </div>
           </div>
-        </>
+        </div>
       )}
 
       {form.type === 'token-url' && (
-        <>
+        <div className="dshv-group">
           <div className="dshv-field">
             <label className="dshv-label" htmlFor="dshv-url">{t('form.url')}</label>
             <input
@@ -212,11 +214,11 @@ export function ProfileForm(props: ProfileFormProps): ReactNode {
             <input id="dshv-cert2" className="dshv-input" data-mono="true" value={form.trustedCert} onChange={event => { set({ trustedCert: event.target.value }) }} />
             <p className="dshv-hint">{t('form.cert.hint')}</p>
           </div>
-        </>
+        </div>
       )}
 
       {form.type === 'custom' && (
-        <>
+        <div className="dshv-group">
           <div className="dshv-field">
             <label className="dshv-label" htmlFor="dshv-cmd">{t('form.command')}</label>
             <textarea id="dshv-cmd" className="dshv-input" data-mono="true" value={form.command} onChange={event => { set({ command: event.target.value }) }} />
@@ -226,22 +228,26 @@ export function ProfileForm(props: ProfileFormProps): ReactNode {
             <label className="dshv-label" htmlFor="dshv-url2">{t('form.url')}</label>
             <input id="dshv-url2" className="dshv-input" data-mono="true" type="password" autoComplete="new-password" value={form.secret} placeholder={form.secretConfigured ? t('form.url.set') : ''} onChange={event => { set({ secret: event.target.value }) }} />
           </div>
-        </>
+        </div>
       )}
 
-      <div className="dshv-field">
-        <label className="dshv-label" htmlFor="dshv-targets">{t('form.targets')}</label>
-        <textarea id="dshv-targets" className="dshv-input" data-mono="true" value={form.targets} placeholder={'198.51.100.0/24\ngit.corp.example'} onChange={event => { set({ targets: event.target.value }) }} />
-        <p className="dshv-hint">{t('form.targets.hint')}</p>
+      <div className="dshv-group">
+        <div className="dshv-field">
+          <label className="dshv-label" htmlFor="dshv-targets">{t('form.targets')}</label>
+          <textarea id="dshv-targets" className="dshv-input" data-mono="true" value={form.targets} placeholder={'198.51.100.0/24\ngit.corp.example'} onChange={event => { set({ targets: event.target.value }) }} />
+          <p className="dshv-hint">{t('form.targets.hint')}</p>
+        </div>
+
+        <label className="dshv-check">
+          <input type="checkbox" checked={form.setDns} onChange={event => { set({ setDns: event.target.checked }) }} />
+          <span>{t('form.dns')}</span>
+        </label>
       </div>
 
-      <label className="dshv-check">
-        <input type="checkbox" checked={form.setDns} onChange={event => { set({ setDns: event.target.checked }) }} />
-        <span>{t('form.dns')}</span>
-      </label>
-
-      <p className="dshv-hint">{t('form.secret.write-only')}</p>
-      {error !== undefined && <p className="dshv-form-error" role="alert">{t('form.error', { message: error })}</p>}
+      <div className="dshv-form-notes">
+        <p className="dshv-hint">{t('form.secret.write-only')}</p>
+        {error !== undefined && <p className="dshv-form-error" role="alert">{t('form.error', { message: error })}</p>}
+      </div>
 
       <div className="dshv-form-foot">
         <button type="submit" className="dshv-btn" data-kind="primary" disabled={props.busy}>{props.busy ? t('action.saving') : t('action.save')}</button>

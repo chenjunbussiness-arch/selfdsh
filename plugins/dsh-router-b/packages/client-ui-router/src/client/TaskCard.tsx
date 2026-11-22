@@ -190,8 +190,7 @@ export function TaskCard({
         {rejecting && onVerify !== undefined && (
           <div className="dshr-task-actions">
             <input
-              className="dshr-input"
-              style={{ minHeight: 0, height: 26, padding: '0 6px' }}
+              className="dshr-input dshr-reject-input"
               placeholder={t('task.reject.reason')}
               value={reason}
               onChange={event => { setReason(event.target.value) }}

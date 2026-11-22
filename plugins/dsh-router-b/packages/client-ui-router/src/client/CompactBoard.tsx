@@ -11,6 +11,14 @@
  * 已结束 holds 已完成, 失败, 已取消 and 已失效分区. 工作区 is the partitions' files,
  * rules, open tasks and memory ({@link WorkspacePage} in its embedded form).
  *
+ * Other plugins add tabs after those three through `board-tabs.ts`, a registry
+ * on `globalThis` (the bundles are built apart and cannot import each other).
+ * An extension tab looks exactly like a built-in one, may carry a count, and its
+ * body is the plugin's own component rendered with `{ embedded: true, onClose }`
+ * inside an error boundary, so a throwing extension costs one line, not the
+ * panel. The task-only controls (search, batch mode, the board's read error and
+ * sample-data banners) stay out of an extension tab, as search does for 工作区.
+ *
  * There used to be 接下来 and 排程任务 tabs. 接下来 only ever held queued rows,
  * which with the usual unlimited slots exist only while a staged task waits on
  * its prerequisites; 排程任务 had no producer at all (the router has no
@@ -42,7 +50,8 @@
  * @module client-ui-router/compact-board
  */
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { Component, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import type { ComponentType, ReactNode } from 'react'
 import type { GroupProgressView, HostTaskState, NoticeView, PartitionView, TaskView, TodoItem } from './contract.ts'
 import type { ControlAction, ControlExtra } from './source.ts'
 import type { RouterBoardController } from './controller.ts'
@@ -52,6 +61,7 @@ import { BOARD_TOKENS_CSS, type BoardTone } from './styles.ts'
 import { ApprovalsSection, BatchBar, DESK_CSS, LivePanel, NO_FILTER, ReassignDialog, failureKey, type BatchFilter } from './Desk.tsx'
 import { ThemeButton, useBoardTheme } from './theme.tsx'
 import { WorkspacePage } from './WorkspacePage.tsx'
+import { boardTabs, type BoardTabProps } from './board-tabs.ts'
 
 /** Props supplied by the tab registration. */
 export interface CompactBoardProps {
@@ -64,8 +74,20 @@ export interface CompactBoardProps {
   readonly sessions?: SessionsFace
 }
 
-/** A tab of the segment strip. */
-export type BoardTab = 'active' | 'resolved' | 'workspace'
+/** A built-in tab of the segment strip. */
+export type BuiltinTab = 'active' | 'resolved' | 'workspace'
+
+/** A tab of the segment strip: built in, or `ext:<id>` registered through board-tabs.ts. */
+export type BoardTab = BuiltinTab | `ext:${string}`
+
+/** Prefix of an extension tab's {@link BoardTab} id. */
+const EXT_PREFIX = 'ext:'
+
+/** Whether a tab is one of the three built-in ones (and so has task groups). */
+const isBuiltin = (tab: BoardTab): tab is BuiltinTab => !tab.startsWith(EXT_PREFIX)
+
+/** The shared extension-tab registry; created here or by whichever plugin loaded first. */
+const EXT_TABS = boardTabs()
 
 /**
  * A status bucket rendered under one caption inside a tab.
@@ -81,14 +103,14 @@ const PAGE = 12
 const POLL_MS = 3000
 
 /** Tab order, left to right. */
-const TABS: readonly { id: BoardTab; key: string }[] = [
+const TABS: readonly { id: BuiltinTab; key: string }[] = [
   { id: 'active', key: 'seg.active' },
   { id: 'resolved', key: 'seg.resolved' },
   { id: 'workspace', key: 'seg.workspace' },
 ]
 
 /** Group order inside each tab. */
-const TAB_GROUPS: Readonly<Record<BoardTab, readonly Group[]>> = {
+const TAB_GROUPS: Readonly<Record<BuiltinTab, readonly Group[]>> = {
   active: ['running', 'blocked', 'suspended', 'queued'],
   resolved: ['done', 'failed', 'cancelled', 'stale'],
   // Not a status view: the partitions' files, rules and memory.
@@ -425,8 +447,8 @@ const ICON_BATCH = 'M3 4.5h2M3 8h2M3 11.5h2M7.5 4.5H13M7.5 8H13M7.5 11.5H13'
 /*
  * Board stylesheet. Tokens (state colours, hover/press, 4px spacing scale, 28px
  * control height, 6px radius) come from BOARD_TOKENS_CSS in styles.ts; this
- * block only uses them. No bordered boxes: grouping is whitespace plus 1px
- * low-contrast dividers.
+ * block only uses them. No bordered boxes and no dividers: grouping is
+ * whitespace and tone (docs/UI-STYLE.md).
  */
 const STYLE = `${BOARD_TOKENS_CSS}
 .dshrc{container-type:inline-size;display:flex;flex-direction:column;height:100%;min-height:0;background:var(--c-bg);color:var(--c-text);font-size:13px;line-height:1.47;letter-spacing:-.003em;text-align:left;transition:background-color var(--dur) var(--ease),color var(--dur) var(--ease)}
@@ -438,14 +460,14 @@ const STYLE = `${BOARD_TOKENS_CSS}
 .dshrc-head{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-3) var(--sp-1) var(--sp-4);flex:none}
 .dshrc-title{flex:1 1 auto;min-width:0;margin:0;font-size:13px;font-weight:600;line-height:20px;color:var(--c-text)}
 .dshrc-acts{display:flex;align-items:center;gap:var(--sp-1);flex:none}
-.dshrc-ico{display:flex;align-items:center;justify-content:center;width:var(--h-ctl);height:var(--h-ctl);padding:0;border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text2);cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.dshrc-ico{display:flex;align-items:center;justify-content:center;width:var(--h-ctl);height:var(--h-ctl);padding:0;border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text2);cursor:pointer;transition:background-color .15s ease,color .15s ease}
 .dshrc-ico:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-ico:active{background:var(--c-press);color:var(--c-text)}
 .dshrc-ico svg{width:16px;height:16px;display:block}
-.dshrc-tabs{display:flex;align-items:center;gap:var(--sp-1);flex:none;padding:var(--sp-1) var(--sp-3) var(--sp-2) var(--sp-4);overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--c-line-soft)}
+.dshrc-tabs{display:flex;align-items:center;gap:var(--sp-1);flex:none;padding:var(--sp-1) var(--sp-3) var(--sp-2) var(--sp-4);overflow-x:auto;scrollbar-width:none}
 .dshrc-tabs::-webkit-scrollbar{display:none}
-.dshrc-find{flex:0 1 160px;min-width:72px;height:24px;margin-left:auto;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px}
-.dshrc-tab{flex:none;height:var(--h-ctl);padding:0 var(--sp-3);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text2);font-size:12px;font-weight:500;line-height:var(--h-ctl);cursor:pointer;white-space:nowrap;transition:background-color .12s ease,color .12s ease}
+.dshrc-find{flex:0 1 160px;min-width:72px;height:24px;margin-left:auto;padding:0 var(--sp-2);border:0;border-radius:var(--r-pill);background:var(--c-surface);color:var(--c-text);font-size:12px}
+.dshrc-tab{flex:none;height:var(--h-ctl);padding:0 var(--sp-3);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text2);font-size:12px;font-weight:500;line-height:var(--h-ctl);cursor:pointer;white-space:nowrap;transition:background-color .15s ease,color .15s ease}
 .dshrc-tab:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-tab:active{background:var(--c-press)}
 .dshrc-tab[data-on]{background:var(--c-pill);color:var(--c-text);font-weight:600}
@@ -455,10 +477,14 @@ const STYLE = `${BOARD_TOKENS_CSS}
 @keyframes dshrc-spin{to{transform:rotate(360deg)}}
 .dshrc-row[data-link]:focus-visible{outline:2px solid var(--c-focus);outline-offset:-2px}
 .dshrc-ws{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+/* Extension tab body (board-tabs.ts): it fills the column, and the shell tokens an
+   extension paints with (docs/UI-STYLE.md) follow this board's 白天/黑夜 choice. */
+.dshrc-ext{overflow:hidden;--dsw-alias-bg-base:var(--c-bg);--dsw-alias-bg-layer-1:var(--c-surface);--dsw-alias-bg-layer-2:var(--c-pill);--dsw-alias-label-primary:var(--c-text);--dsw-alias-label-secondary:var(--c-text2);--dsw-alias-label-tertiary:var(--c-text3);--dsw-alias-border-l:var(--c-line);--dsw-alias-interactive-bg-hover:var(--c-hover);--dsw-alias-interactive-bg-press:var(--c-press);--dsw-alias-state-success-primary:var(--c-ok);--dsw-alias-state-warn-primary:var(--c-warn);--dsw-alias-state-error-primary:var(--c-bad);--dsw-alias-state-idle-primary:var(--c-idle)}
+.dshrc-ext>:not(.dshrc-err){flex:1 1 auto;min-height:0}
 .dshrc-list{flex:1 1 auto;min-height:0;overflow:auto;padding:0 var(--sp-1) 24px;scrollbar-width:thin}
 .dshrc-group{margin-top:var(--sp-4)}
-.dshrc-group+.dshrc-group{padding-top:var(--sp-3);margin-top:var(--sp-1);border-top:1px solid var(--c-line-soft)}
-.dshrc-gh{display:flex;align-items:center;gap:var(--sp-2);width:100%;height:var(--h-ctl);margin:0 0 6px;padding:0 var(--sp-3) 0 var(--sp-2);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text2);font-size:11px;font-weight:600;line-height:16px;letter-spacing:.02em;text-transform:uppercase;text-align:left;cursor:pointer;transition:background-color .12s ease}
+.dshrc-group+.dshrc-group{margin-top:var(--sp-5)}
+.dshrc-gh{display:flex;align-items:center;gap:var(--sp-2);width:100%;height:var(--h-ctl);margin:0 0 4px;padding:0 var(--sp-3) 0 var(--sp-2);border:0;border-radius:var(--r-ctl);background:transparent;color:var(--c-text3);font-size:12px;font-weight:500;line-height:18px;letter-spacing:0;text-align:left;cursor:pointer;transition:background-color .15s ease}
 .dshrc-gh:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-gh:active{background:var(--c-press)}
 .dshrc-gcaret{flex:none;width:16px;height:16px;color:var(--c-text3);transition:transform .15s ease}
@@ -466,8 +492,9 @@ const STYLE = `${BOARD_TOKENS_CSS}
 .dshrc-gn{color:inherit}
 .dshrc-gc,.dshrc-gshown{font-weight:500;color:var(--c-text3);font-variant-numeric:tabular-nums;white-space:nowrap;letter-spacing:0}
 .dshrc-family{display:block}
-.dshrc-family+.dshrc-family{border-top:1px solid var(--c-line-soft)}
-.dshrc-row{display:flex;align-items:center;gap:var(--sp-2);width:100%;min-height:var(--h-row);padding:var(--sp-1) var(--sp-3);border-radius:var(--r-ctl);cursor:default;transition:background-color .12s ease}
+.dshrc-child{display:block;min-width:0}
+.dshrc-family+.dshrc-family{margin-top:2px}
+.dshrc-row{display:flex;align-items:center;gap:var(--sp-2);width:100%;min-height:var(--h-row);padding:var(--sp-1) var(--sp-3);border-radius:var(--r-ctl);cursor:default;transition:background-color .15s ease}
 .dshrc-row[data-link]{cursor:pointer}
 .dshrc-row[data-link]:hover{background:var(--c-hover)}
 .dshrc-row[data-link]:active{background:var(--c-press)}
@@ -476,12 +503,12 @@ const STYLE = `${BOARD_TOKENS_CSS}
 .dshrc-rt{flex:1 1 auto;min-width:56px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500;line-height:20px;color:var(--c-text)}
 .dshrc-sub .dshrc-rt{font-weight:400;color:var(--c-text2)}
 .dshrc-row[data-group="stale"] .dshrc-rt{color:var(--c-text2)}
-.dshrc-meta{display:flex;align-items:baseline;gap:var(--sp-2);min-width:0;font-size:11px;line-height:16px;color:var(--c-text3);white-space:nowrap}
-.dshrc-rm{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:16px;color:var(--c-text3);font-variant-numeric:tabular-nums}
+.dshrc-meta{display:flex;align-items:baseline;gap:var(--sp-2);min-width:0;font-size:12px;line-height:18px;color:var(--c-text3);white-space:nowrap}
+.dshrc-rm{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px;color:var(--c-text3);font-variant-numeric:tabular-nums}
 .dshrc-sub>.dshrc-rm{flex:0 1 auto;max-width:40%;text-align:right}
-.dshrc-id{flex:none;font-family:var(--f-mono);font-size:11px;line-height:16px;color:var(--c-id);white-space:nowrap}
-.dshrc-st{flex:none;display:inline-flex;align-items:center;gap:var(--sp-1);font-size:11px;line-height:16px;white-space:nowrap;color:var(--st-cancelled-text)}
-.dshrc-dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--st-cancelled-dot)}
+.dshrc-id{flex:none;font-family:var(--f-mono);font-size:12px;line-height:18px;color:var(--c-id);white-space:nowrap}
+.dshrc-st{flex:none;display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:18px;white-space:nowrap;color:var(--st-cancelled-text)}
+.dshrc-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--st-cancelled-dot)}
 .dshrc-st[data-color="running"]{color:var(--st-running-text)}.dshrc-st[data-color="running"] .dshrc-dot{background:var(--st-running-dot);animation:dshrc-pulse 1.6s ease-in-out infinite}
 .dshrc-st[data-color="blocked"]{color:var(--st-blocked-text)}.dshrc-st[data-color="blocked"] .dshrc-dot{background:var(--st-blocked-dot)}
 .dshrc-st[data-color="done"]{color:var(--st-done-text)}.dshrc-st[data-color="done"] .dshrc-dot{background:var(--st-done-dot)}
@@ -490,63 +517,63 @@ const STYLE = `${BOARD_TOKENS_CSS}
 @keyframes dshrc-pulse{0%,100%{opacity:1}50%{opacity:.4}}
 /* Worker fold chip: ghost button, 28x28 minimum hit area, 16px caret. The
    negative block margin keeps it from growing the 44px family row. */
-.dshrc-chip{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-1);min-width:var(--h-ctl);height:var(--h-ctl);margin-block:-4px;padding:0 var(--sp-2) 0 var(--sp-1);border:1px solid transparent;border-radius:var(--r-ctl);background:transparent;color:var(--c-text3);font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;cursor:pointer;white-space:nowrap;transition:background-color .12s ease,border-color .12s ease,color .12s ease}
-.dshrc-chip:hover{border-color:var(--c-ghost-line);background:var(--c-raised);color:var(--c-text)}
+.dshrc-chip{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-1);min-width:var(--h-ctl);height:var(--h-ctl);margin-block:-4px;padding:0 var(--sp-2) 0 var(--sp-1);border:0;border-radius:var(--r-pill);background:transparent;color:var(--c-text3);font-size:12px;line-height:16px;font-variant-numeric:tabular-nums;cursor:pointer;white-space:nowrap;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.dshrc-chip:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-chip:active{background:var(--c-press);color:var(--c-text)}
 .dshrc-caret{flex:none;width:16px;height:16px;display:block;transition:transform .15s ease}
 .dshrc-caret[data-open]{transform:rotate(90deg)}
-.dshrc-tag{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 var(--sp-1);border-radius:4px;background:var(--st-cancelled-bg);color:var(--c-text3);font-size:11px;line-height:16px;white-space:nowrap;font-variant-numeric:tabular-nums}
-.dshrc-fold{display:flex;align-items:center;gap:var(--sp-1);height:var(--h-ctl);margin:var(--sp-1) 0 0 var(--sp-1);padding:0 var(--sp-2);border:1px solid transparent;border-radius:var(--r-ctl);background:transparent;color:var(--c-text3);font-size:12px;cursor:pointer;font-variant-numeric:tabular-nums}
-.dshrc-fold:hover{border-color:var(--c-ghost-line);color:var(--c-text)}
+.dshrc-tag{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:var(--r-pill);background:var(--st-cancelled-bg);color:var(--c-text3);font-size:12px;line-height:16px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.dshrc-fold{display:flex;align-items:center;gap:var(--sp-1);height:var(--h-ctl);margin:var(--sp-1) 0 0 var(--sp-1);padding:0 var(--sp-3);border:0;border-radius:var(--r-pill);background:transparent;color:var(--c-text3);font-size:12.5px;cursor:pointer;font-variant-numeric:tabular-nums}
+.dshrc-fold:hover{background:var(--c-hover);color:var(--c-text)}
 .dshrc-fold:active{background:var(--c-press)}
 .dshrc-err{display:flex;align-items:center;gap:var(--sp-2);flex:none;margin:var(--sp-2) var(--sp-3) 0;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-ctl);background:var(--st-failed-bg);color:var(--c-text);font-size:12px;line-height:16px}
 .dshrc-err-text{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
 .dshrc-err-msg{color:var(--st-failed-text)}
-.dshrc-err-stale{display:block;color:var(--c-text3);font-size:11px}
-.dshrc-err-btn,.dshrc-hold-btn{flex:none;height:var(--h-ctl);padding:0 var(--sp-3);border:1px solid transparent;border-radius:var(--r-ctl);background:transparent;color:var(--c-text);font-size:12px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease}
-.dshrc-err-btn{border-color:var(--c-ghost-line)}
-.dshrc-err-btn:hover,.dshrc-hold-btn:hover:not(:disabled){border-color:var(--c-ghost-line);background:var(--c-raised)}
+.dshrc-err-stale{display:block;color:var(--c-text3);font-size:12px}
+.dshrc-err-btn,.dshrc-hold-btn{flex:none;height:var(--h-ctl);padding:0 14px;border:0;border-radius:var(--r-pill);background:transparent;color:var(--c-text);font-size:12px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .15s ease,border-color .15s ease}
+.dshrc-err-btn{background:var(--c-hover)}
+.dshrc-err-btn:hover,.dshrc-hold-btn:hover:not(:disabled){background:var(--c-press)}
 .dshrc-err-btn:active,.dshrc-hold-btn:active:not(:disabled){background:var(--c-press)}
-.dshrc-sample{flex:none;margin:var(--sp-2) var(--sp-3) 0;padding:var(--sp-1) var(--sp-3);border-radius:var(--r-ctl);background:var(--st-blocked-bg);color:var(--st-blocked-text);font-size:11px}
+.dshrc-sample{flex:none;margin:var(--sp-2) var(--sp-3) 0;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-ctl);background:var(--st-blocked-bg);color:var(--st-blocked-text);font-size:12.5px}
 .dshrc-hold{display:flex;align-items:center;gap:var(--sp-2);min-width:0;margin:-4px 0 var(--sp-1);padding:0 var(--sp-3) 0 28px;font-size:12px;line-height:16px;color:var(--c-text2)}
 .dshrc-hold-why{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshrc-hold-err{flex:0 1 auto;min-width:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--st-failed-text)}
 .dshrc-hold-btn{color:var(--st-blocked-text)}
 .dshrc-notice{flex:none;margin:var(--sp-2) var(--sp-3) 0;padding:var(--sp-1) var(--sp-3);border-radius:var(--r-ctl);background:var(--st-done-bg);color:var(--st-done-text);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .dshrc-notice[data-tone="bad"]{background:var(--st-failed-bg);color:var(--st-failed-text)}
-.dshrc-empty{padding:36px var(--sp-4);color:var(--c-text3);text-align:center;font-size:12px}
+.dshrc-empty{padding:36px var(--sp-4);color:var(--c-text3);text-align:center;font-size:13px;line-height:20px}
 /* Row actions: hidden until the row is hovered or focused, so a quiet list stays quiet. */
-.dshrc-acts-row{flex:none;display:flex;align-items:center;gap:2px;opacity:.55;transition:opacity .12s ease}
+.dshrc-acts-row{flex:none;display:flex;align-items:center;gap:2px;opacity:.55;transition:opacity .15s ease}
 .dshrc-row:hover .dshrc-acts-row,.dshrc-row:focus-within .dshrc-acts-row,.dshrc-acts-row[data-busy]{opacity:1}
-.dshrc-act{height:22px;margin-block:-3px;padding:0 var(--sp-2);border:1px solid var(--c-ghost-line);border-radius:var(--r-ctl);background:var(--c-raised);color:var(--c-text2);font-size:11px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.dshrc-act{height:22px;margin-block:-3px;padding:0 var(--sp-2);border:0;border-radius:var(--r-pill);background:var(--c-raised);color:var(--c-text2);font-size:12px;line-height:16px;white-space:nowrap;cursor:pointer;transition:background-color .15s ease,color .15s ease}
 .dshrc-act[data-tone="stop"]:hover{color:var(--st-failed-text)}
-.dshrc-act[data-armed]{border-color:var(--st-failed-text);color:var(--st-failed-text);font-weight:600}
+.dshrc-act[data-armed]{color:var(--st-failed-text);font-weight:600}
 .dshrc-act:hover:not(:disabled){color:var(--c-text);background:var(--c-hover)}
 .dshrc-act:active:not(:disabled){background:var(--c-press)}
 .dshrc-wait{display:flex;align-items:center;gap:var(--sp-2);min-width:0;margin:-4px 0 var(--sp-1);padding:0 var(--sp-3) 0 28px;font-size:12px;line-height:16px;color:var(--c-text3)}
 .dshrc-wait-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshrc-wait .dshrc-id{color:var(--c-text2)}
-.dshrc-sform{display:flex;flex-direction:column;gap:var(--sp-2);margin:0 var(--sp-2) var(--sp-2) 28px;padding:var(--sp-2) var(--sp-3);border:1px solid var(--c-line);border-radius:var(--r-ctl);background:var(--c-line-soft)}
-.dshrc-sform label{display:flex;flex-direction:column;gap:2px;font-size:11px;line-height:16px;color:var(--c-text2)}
-.dshrc-sform input{height:var(--h-ctl);padding:0 var(--sp-2);border:1px solid var(--c-line);border-radius:var(--r-ctl);background:var(--c-raised);color:var(--c-text);font:inherit;font-size:12px}
-.dshrc-sform input:focus-visible{outline:2px solid var(--c-focus);outline-offset:0}
-.dshrc-sform-hint{font-size:11px;color:var(--c-text3)}
+.dshrc-sform{display:flex;flex-direction:column;gap:var(--sp-2);margin:0 var(--sp-2) var(--sp-2) 28px;padding:var(--sp-3) 14px;border-radius:14px;background:var(--c-surface)}
+.dshrc-sform label{display:flex;flex-direction:column;gap:6px;font-size:12.5px;line-height:18px;font-weight:500;color:var(--c-text2)}
+.dshrc-sform input{height:var(--h-input);padding:0 var(--sp-3);border:0;border-radius:var(--r-ctl);background:var(--c-raised);color:var(--c-text);font:inherit;font-size:13px;transition:box-shadow var(--dur)}
+.dshrc-sform input:focus-visible{outline:none;box-shadow:0 0 0 1.5px var(--c-accent)}
+.dshrc-sform-hint{font-size:12px;color:var(--c-text3)}
 .dshrc-sform-btns{display:flex;justify-content:flex-end;gap:var(--sp-2)}
-.dshrc-sform-err{font-size:11px;color:var(--st-failed-text)}
+.dshrc-sform-err{font-size:12px;color:var(--st-failed-text)}
 .dshrc-prog{display:flex;flex-direction:column;gap:var(--sp-2);margin:var(--sp-3) var(--sp-2) 0;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-ctl);background:var(--c-line-soft)}
-.dshrc-prog-h,.dshrc-nt-h{font-size:11px;font-weight:600;line-height:16px;letter-spacing:.02em;color:var(--c-text2)}
+.dshrc-prog-h,.dshrc-nt-h{font-size:12px;font-weight:500;line-height:18px;letter-spacing:0;color:var(--c-text3)}
 .dshrc-prog-item{display:flex;flex-direction:column;gap:3px;min-width:0}
 .dshrc-prog-top{display:flex;align-items:baseline;gap:var(--sp-2);min-width:0;font-size:12px;line-height:16px}
 .dshrc-prog-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-text)}
 .dshrc-prog-num{flex:none;font-variant-numeric:tabular-nums;color:var(--c-text2)}
-.dshrc-bar{position:relative;display:flex;height:4px;border-radius:2px;overflow:hidden;background:var(--c-line)}
+.dshrc-bar{position:relative;display:flex;height:4px;border-radius:var(--r-pill);overflow:hidden;background:color-mix(in srgb,var(--c-text3) 20%,transparent)}
 .dshrc-bar>span{display:block;height:100%}
 .dshrc-bar>[data-k="done"]{background:var(--st-done-dot)}
 .dshrc-bar>[data-k="run"]{background:var(--st-running-dot)}
 .dshrc-bar>[data-k="susp"]{background:var(--st-blocked-dot)}
 .dshrc-bar>[data-k="fail"]{background:var(--st-failed-dot)}
-.dshrc-prog-sub{font-size:11px;line-height:16px;color:var(--c-text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dshrc-nt{margin:var(--sp-4) var(--sp-2) 0;padding-top:var(--sp-3);border-top:1px solid var(--c-line-soft)}
+.dshrc-prog-sub{font-size:12px;line-height:16px;color:var(--c-text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dshrc-nt{margin:var(--sp-5) var(--sp-2) 0}
 .dshrc-nt-list{display:flex;flex-direction:column;gap:var(--sp-1);margin:var(--sp-2) 0 0;padding:0;list-style:none}
 .dshrc-nt-item{display:flex;gap:var(--sp-2);padding:0 var(--sp-1);font-size:12px;line-height:18px;color:var(--c-text2)}
 .dshrc-nt-time{flex:none;min-width:44px;color:var(--c-text3);font-variant-numeric:tabular-nums}
@@ -555,32 +582,31 @@ ${DESK_CSS}
 /* Appearance: quiet, roomy, one accent. Pill segments, pill search, rounded rows. */
 .dshrc{position:relative;-webkit-font-smoothing:antialiased}
 .dshrc-head{padding:var(--sp-4) var(--sp-3) var(--sp-2) var(--sp-4)}
-.dshrc-title{font-size:17px;font-weight:600;line-height:22px;letter-spacing:-.022em}
+.dshrc-title{font-size:17px;font-weight:600;line-height:26px;letter-spacing:0}
 .dshrc-ico{border-radius:50%}
-.dshrc-ico[aria-pressed="true"]{background:var(--c-pill);color:var(--c-text)}
+.dshrc-ico[aria-pressed="true"]{background:var(--c-accent-soft);color:var(--c-accent)}
 .dshrc-tabs{gap:2px;padding:var(--sp-1) var(--sp-3) var(--sp-3) var(--sp-4);border-bottom:0}
-.dshrc-tab{height:28px;padding:0 12px;border-radius:var(--r-pill);font-size:12.5px}
-.dshrc-tab[data-on]{background:var(--c-text);color:var(--c-bg)}
+.dshrc-tab{height:var(--h-ctl);padding:0 14px;border-radius:var(--r-pill);font-size:13px}
+.dshrc-tab[data-on]{background:var(--c-accent-soft);color:var(--c-accent)}
 .dshrc-tab[data-on] .dshrc-tab-n{color:inherit;opacity:.7}
-.dshrc-find{height:28px;padding:0 12px;border:0;border-radius:var(--r-pill);background:var(--c-pill);font-size:12.5px;transition:box-shadow var(--dur) var(--ease)}
+.dshrc-find{height:var(--h-ctl);padding:0 12px;border:0;border-radius:var(--r-pill);background:var(--c-surface);font-size:12.5px;transition:box-shadow var(--dur) var(--ease)}
 .dshrc-find::placeholder{color:var(--c-text3)}
-.dshrc-find:focus{outline:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--c-accent) 28%,transparent)}
-.dshrc-row{border-radius:10px}
-.dshrc-family+.dshrc-family{border-top-color:transparent}
+.dshrc-find:focus{outline:none;box-shadow:0 0 0 1.5px var(--c-accent)}
+.dshrc-row{border-radius:12px}
 .dshrc-act{height:24px;padding:0 10px;border:0;border-radius:var(--r-pill);background:var(--c-pill);color:var(--c-text2)}
 /* With a pointer, a row's buttons appear on hover or focus, so titles keep their room; touch keeps them visible. */
 @media (hover:hover){.dshrc-acts-row{display:none}.dshrc-row:hover .dshrc-acts-row,.dshrc-row:focus-within .dshrc-acts-row,.dshrc-acts-row[data-busy],.dshrc-acts-row:has([aria-pressed="true"]){display:flex}}
 .dshrc-act[data-armed]{background:var(--st-failed-bg)}
 .dshrc-act[data-tone="live"][aria-pressed="true"]{background:var(--c-accent);color:var(--c-on-accent)}
-.dshrc-err,.dshrc-notice,.dshrc-sample,.dshrc-prog{border-radius:12px}
+.dshrc-err,.dshrc-notice,.dshrc-sample,.dshrc-prog{border-radius:14px}
 .dshrc-prog{background:var(--c-surface);padding:var(--sp-3)}
-.dshrc-pr,.dshrc-moved{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:var(--r-pill);background:var(--st-running-bg);color:var(--st-running-text);font-size:11px;font-weight:500;line-height:16px;text-decoration:none;white-space:nowrap;cursor:pointer;border:0}
+.dshrc-pr,.dshrc-moved{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:var(--r-pill);background:var(--st-running-bg);color:var(--st-running-text);font-size:12px;font-weight:500;line-height:16px;text-decoration:none;white-space:nowrap;cursor:pointer;border:0}
 .dshrc-pr:hover{text-decoration:underline}
 .dshrc-moved{background:var(--c-pill);color:var(--c-text2)}
 .dshrc-moved:hover{color:var(--c-text)}
 .dshrc[data-batch-on] .dshrc-acts-row{display:none}
 .dshrc-pick{flex:none;width:15px;height:15px;margin:0 2px 0 0;cursor:pointer}
-.dshrc-row[data-picked]{background:color-mix(in srgb,var(--c-accent) 9%,transparent)}
+.dshrc-row[data-picked]{background:var(--c-accent-soft)}
 @media (prefers-reduced-motion:reduce){.dshrc *{transition:none!important;animation:none!important}}
 /* Narrow rail (about 340px at a 1024 viewport): title and status dot only. */
 @container (max-width:379px){
@@ -590,6 +616,53 @@ ${DESK_CSS}
 .dshrc-st{padding:0 var(--sp-1)}
 }
 `
+
+interface ExtTabBoundaryProps {
+  readonly t: CompactBoardProps['t']
+  /** The tab's caption, for the error line and the console. */
+  readonly label: string
+  readonly children?: ReactNode
+}
+
+interface ExtTabBoundaryState {
+  readonly failed: boolean
+  readonly error: unknown
+}
+
+/**
+ * Keeps a throwing extension tab inside its own body.
+ *
+ * The component comes from another plugin's bundle; whatever it throws while
+ * rendering stops here and shows as one error line with a 重试 that remounts it,
+ * so the tab strip, the header and the built-in tabs keep working.
+ */
+class ExtTabBoundary extends Component<ExtTabBoundaryProps, ExtTabBoundaryState> {
+  override state: ExtTabBoundaryState = { failed: false, error: undefined }
+
+  static getDerivedStateFromError(error: unknown): ExtTabBoundaryState {
+    return { failed: true, error }
+  }
+
+  override componentDidCatch(error: unknown): void {
+    console.error(`[client-ui-router] extension tab "${this.props.label}" threw`, error)
+  }
+
+  override render(): ReactNode {
+    if (!this.state.failed) return this.props.children ?? null
+    const error = this.state.error
+    const message = error instanceof Error ? error.message : String(error)
+    return (
+      <div className="dshrc-err" role="alert" data-ext-error>
+        <span className="dshrc-err-text">
+          <span className="dshrc-err-msg">{this.props.t('ext.error', { name: this.props.label, message })}</span>
+        </span>
+        <button type="button" className="dshrc-err-btn" onClick={() => { this.setState({ failed: false, error: undefined }) }}>
+          {this.props.t('board.retry')}
+        </button>
+      </div>
+    )
+  }
+}
 
 /**
  * Render the board.
@@ -602,6 +675,16 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   const sessionFace = sessions ?? NO_SESSIONS
   const sessionList = useSyncExternalStore(sessionFace.list.subscribe, sessionFace.list.getSnapshot, sessionFace.list.getSnapshot)
   const [tab, setTab] = useState<BoardTab>('active')
+  // Extension tabs other plugins registered (board-tabs.ts), drawn after the built-in three.
+  const extTabs = useSyncExternalStore(EXT_TABS.subscribe, EXT_TABS.list, EXT_TABS.list)
+  const extId = tab.startsWith(EXT_PREFIX) ? tab.slice(EXT_PREFIX.length) : undefined
+  const ext = extId === undefined ? undefined : extTabs.find(item => item.id === extId)
+  // The tab drawn: a selected extension tab that was just withdrawn reads as 现在
+  // until the effect below moves the selection there for good.
+  const shownTab: BoardTab = extId !== undefined && ext === undefined ? 'active' : tab
+  useEffect(() => {
+    if (extId !== undefined && ext === undefined) setTab('active')
+  }, [extId, ext])
   // Filter text: a family stays when any of its tasks matches by title, id or workspace.
   const [query, setQuery] = useState('')
   // Families the user folded by hand. Empty means every family is open, so the
@@ -778,7 +861,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
     }
     const causes = [...causeN].map(([key, n]) => ({ key, n })).sort((left, right) => right.n - left.n || left.key.localeCompare(right.key))
     const groupFams = new Map<Group, Family[]>()
-    for (const group of Object.keys(TAB_GROUPS).flatMap(id => TAB_GROUPS[id as BoardTab])) groupFams.set(group, [])
+    for (const group of Object.keys(TAB_GROUPS).flatMap(id => TAB_GROUPS[id as BuiltinTab])) groupFams.set(group, [])
     for (const family of families) {
       const list = groupFams.get(family.group)
       if (list !== undefined) list.push(family)
@@ -823,7 +906,8 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   useEffect(() => {
     if (board === null || landed) return
     setLanded(true)
-    if ((tabCounts.get(tab) ?? 0) > 0) return
+    // An extension tab the user picked before the first board arrived stays picked.
+    if (!isBuiltin(tab) || (tabCounts.get(tab) ?? 0) > 0) return
     const next = TABS.find(item => (tabCounts.get(item.id) ?? 0) > 0)
     if (next !== undefined) setTab(next.id)
   }, [board, landed, tabCounts, tab])
@@ -1352,18 +1436,20 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   }
   const movingTask = moving === null ? undefined : (board?.tasks ?? []).find(task => task.id === moving.id)
 
-  const groups = TAB_GROUPS[tab]
+  const groups: readonly Group[] = isBuiltin(shownTab) ? TAB_GROUPS[shownTab] : []
+  const taskTab = isBuiltin(shownTab)
+  const ExtBody = ext === undefined ? undefined : ext.Component as unknown as ComponentType<BoardTabProps>
   const shownCount = groups.reduce((sum, group) => sum + (model.counts.get(group) ?? 0), 0)
   const failed = state.status === 'error'
   const lastOk = board === null ? '' : clockTime(board.fetchedAt)
 
   return (
-    <div className="dshrc" data-router-compact data-tab={tab} data-theme={theme.mode} data-batch-on={batchOn ? '' : undefined}>
+    <div className="dshrc" data-router-compact data-tab={shownTab} data-theme={theme.mode} data-batch-on={batchOn ? '' : undefined}>
       <style>{STYLE}</style>
       <header className="dshrc-head">
         <h2 className="dshrc-title">{t('board.title')}</h2>
         <div className="dshrc-acts">
-          {controller.canBatch && (
+          {controller.canBatch && taskTab && (
             <button type="button" className="dshrc-ico" aria-pressed={batchOn}
               title={t(batchOn ? 'batch.exit' : 'batch.enter')} aria-label={t(batchOn ? 'batch.exit' : 'batch.enter')}
               onClick={() => { exitOrEnterBatch() }}>
@@ -1392,7 +1478,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
       <div className="dshrc-tabs" role="tablist" aria-label={t('panel.title')}>
         {TABS.map(item => (
           <button key={item.id} type="button" role="tab" className="dshrc-tab"
-            data-on={tab === item.id ? '' : undefined} aria-selected={tab === item.id}
+            data-on={shownTab === item.id ? '' : undefined} aria-selected={shownTab === item.id}
             onClick={() => { setTab(item.id) }}>
             {t(item.key)}
             {(tabCounts.get(item.id) ?? 0) > 0 && <span className="dshrc-tab-n">{tabCounts.get(item.id)}</span>}
@@ -1401,11 +1487,23 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
             )}
           </button>
         ))}
-        {tab !== 'workspace' && <input className="dshrc-find" type="search" value={query} placeholder={t('board.find')} aria-label={t('board.find')}
+        {extTabs.map((item) => {
+          const id: BoardTab = `${EXT_PREFIX}${item.id}`
+          return (
+            <button key={id} type="button" role="tab" className="dshrc-tab" data-ext={item.id}
+              data-on={shownTab === id ? '' : undefined} aria-selected={shownTab === id}
+              onClick={() => { setTab(id) }}>
+              {item.label}
+              {item.badge !== undefined && <span className="dshrc-tab-n">{item.badge}</span>}
+              {item.flag !== undefined && <span className="dshrc-tab-flag" title={item.flag} aria-label={item.flag} />}
+            </button>
+          )
+        })}
+        {taskTab && shownTab !== 'workspace' && <input className="dshrc-find" type="search" value={query} placeholder={t('board.find')} aria-label={t('board.find')}
           onChange={(event) => { setQuery(event.target.value) }}
           onKeyDown={(event) => { if (event.key === 'Escape') setQuery('') }} />}
       </div>
-      {failed && (
+      {failed && taskTab && (
         <div className="dshrc-err" role="alert" data-router-error>
           <span className="dshrc-err-text">
             <span className="dshrc-err-msg">{t('board.error', { message: state.error ?? '' })}</span>
@@ -1416,13 +1514,21 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
           </button>
         </div>
       )}
-      {board !== null && board.origin === 'mock' && (
+      {board !== null && board.origin === 'mock' && taskTab && (
         <div className="dshrc-sample" data-router-sample title={t('board.mock.hint')}>{t('board.mock')}</div>
       )}
       {notice !== null && (
         <div className="dshrc-notice" role="status" data-tone={notice.tone}>{notice.text}</div>
       )}
-      {tab === 'workspace'
+      {ext !== undefined && ExtBody !== undefined
+        ? (
+            <div className="dshrc-ws dshrc-ext" data-ext={ext.id}>
+              <ExtTabBoundary key={ext.id} t={t} label={ext.label}>
+                <ExtBody embedded {...onClose === undefined ? {} : { onClose }} />
+              </ExtTabBoundary>
+            </div>
+          )
+        : shownTab === 'workspace'
         ? (
             <div className="dshrc-ws">
               <WorkspacePage controller={controller} t={t} embedded
@@ -1453,11 +1559,11 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
           ? <div className="dshrc-empty">{failed ? t('board.emptyOnError') : t('board.loading')}</div>
           : (
               <>
-                {tab === 'active' && progressBlock(board.groups ?? [])}
+                {shownTab === 'active' && progressBlock(board.groups ?? [])}
                 {shownCount === 0
                   ? <div className="dshrc-empty">{t('compact.empty')}</div>
                   : groups.map(groupBlock)}
-                {tab === 'active' && noticeBlock(board.notices ?? [])}
+                {shownTab === 'active' && noticeBlock(board.notices ?? [])}
               </>
             )}
       </div>

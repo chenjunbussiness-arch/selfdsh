@@ -8,6 +8,9 @@
  *      shortcut;
  *   3. its dictionaries.
  *
+ * It also hosts the board's extension tabs (`board-tabs.ts`): other plugins
+ * register a tab in a `globalThis` registry and the board draws it.
+ *
  * The panel draws its own left rail (projects + API-key status) inside the right
  * column: the app's left Sidebar has no free content seat for a third-party
  * plugin — `sidebar` is a single slot occupied by `dsh-client-ui-sidebar`, whose
@@ -34,6 +37,7 @@ import { RoutingIcon } from './RoutingIcon.tsx'
 import { CompactBoard } from './CompactBoard.tsx'
 import { WarRoomRedirect } from './WarRoomRedirect.tsx'
 import { ModelTiers, installModelTierStyles } from './ModelTiers.tsx'
+import { boardTabs } from './board-tabs.ts'
 import { DICTIONARIES, NS } from './locales.ts'
 import { installStyles } from './styles.ts'
 import { createHostSource, createHttpActions, resolveSource, type BoardSource } from './source.ts'
@@ -163,6 +167,12 @@ function applyInner(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS)
 
   ctx.effect(() => ctx.sidebarRightTabs.register(boardTabDefinition(t)), 'client-ui-router: tab type')
+
+  // Extension tabs (board-tabs.ts): declare this board as the one that renders
+  // them, at plugin start rather than when the tab first mounts — another plugin
+  // (dsh-agent-hub) waits a few seconds for this declaration before it falls back
+  // to a Sidebar row of its own, and the board tab may not be opened for a while.
+  ctx.effect(() => boardTabs().consume('dsh-router-b'), 'client-ui-router: board extension tabs')
 
   // Header button: open the board tab, or hide it when it is the tab on show.
   const openWarRoom = (): void => { void openAnchor(ctx) }

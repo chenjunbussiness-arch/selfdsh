@@ -141,7 +141,7 @@ export function ProjectRail({
           ? (
             <div className="dshr-create">
               <input
-                className="dshr-input dshr-create-input"
+                className="dshr-input"
                 placeholder={t('rail.name.placeholder')}
                 value={draft}
                 autoFocus

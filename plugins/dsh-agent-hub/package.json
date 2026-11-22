@@ -1,0 +1,29 @@
+{
+  "name": "dsh-agent-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent hub for DeepSeek Harness: DSH is the only controller; external agent platforms (AWS Quick, Claude Code, Kiro, ...) register with a DSH-issued token, lease only their own tasks and return results over the dsh-agent/1.0 protocol",
+  "type": "module",
+  "icon": "./icon.svg",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": ["index.js", "cordis.patch.yml", "icon.svg", "locale", "packages"],
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "install:profile": "node scripts/install.mjs",
+    "test": "node --test packages/host-agent-hub/tests/*.test.mjs",
+    "build": "node packages/client-ui-agent-hub/scripts/build-client.mjs"
+  },
+  "dependencies": {
+    "dsh-host-agent-hub": "file:./packages/host-agent-hub",
+    "dsh-client-ui-agent-hub": "file:./packages/client-ui-agent-hub"
+  },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

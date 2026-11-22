@@ -265,3 +265,18 @@
   name: "@deepseek-ai/dsh-client-ui-settings"
   config:
     enabled: false
+
+# ── dsh-secrets：本机的密钥库位置与口令来源 ───────────────────────────────
+# 换机时只改这里的路径。口令本身不写在这里，写在 envFile 指向的 .env 里：
+#   install -m 600 /dev/null /root/.dsh/.env      # 已存在就跳过
+#   echo "DSH_SECRETS_PASSPHRASE='你的口令'" >> /root/.dsh/.env
+# 查找顺序：进程环境变量 DSH_SECRETS_PASSPHRASE（非空）→ envFile 里的同名行。
+# 改 .env 不用重启；改本文件后按 docs/README-MIGRATE.md 的方式重启 dsh-web。
+- id: host-secrets
+  name: dsh-host-secrets
+  config:
+    vaultPath: /root/.dsh/secrets.vault      # 加密库文件
+    keySource: passphrase-env               # passphrase-env | keyfile
+    passphraseEnv: DSH_SECRETS_PASSPHRASE   # 口令变量名
+    envFile: /root/.dsh/.env                # 口令所在的 dotenv 文件；false = 只看进程环境
+    # keyfilePath: /root/.dsh/secrets.key   # keySource=keyfile 时启用，权限 600

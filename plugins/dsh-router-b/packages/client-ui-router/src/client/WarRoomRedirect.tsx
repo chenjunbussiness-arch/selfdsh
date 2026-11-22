@@ -24,9 +24,9 @@ export interface WarRoomRedirectProps {
 export function WarRoomRedirect({ t, open }: WarRoomRedirectProps) {
   useEffect(() => { open() }, [open])
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, height: '100%' }}>
-      <div style={{ opacity: 0.7 }}>{t('warroom.opening')}</div>
-      <button type="button" className="dshr-btn" style={{ height: 32, padding: '0 16px' }} onClick={open}>{t('warroom.open')}</button>
+    <div className="dshr-redirect" role="status">
+      <p className="dshr-redirect-text">{t('warroom.opening')}</p>
+      <button type="button" className="dshr-btn" data-tone="primary" onClick={open}>{t('warroom.open')}</button>
     </div>
   )
 }

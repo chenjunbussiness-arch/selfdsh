@@ -1,0 +1,195 @@
+/**
+ * DSH-only control tools for dsh-agent-hub (controller side of `dsh-agent/2.0`).
+ *
+ * These are registered on the Harness tool registry, so only the DSH model (and
+ * the operator driving it) can call them. Each tool is one call to the hub's
+ * controller API (`/v1/ctl/*`, docs/DSH-HUB-PROTOCOL-v2.md 5.2) through
+ * hub-client.js; the hub does the validation, routing and isolation (cancel /
+ * retry only by the creating controller).
+ *
+ * The controller token (DSH_HUB_TOKEN) never appears in a tool result or error.
+ * `agent_provision` returns the new WORKER token exactly once, by design.
+ *
+ * @module host-agent-hub/tools
+ */
+
+import { HubError } from './hub-client.js'
+
+const objectSchema = { type: 'object' }
+const renderJson = (_args, value) => [{ type: 'text', text: JSON.stringify(value, undefined, 2) }]
+const str = { type: 'string' }
+const strList = { type: 'array', items: str }
+
+export const TOOL_NAMES = [
+  'agent_provision', 'agent_revoke', 'agent_list', 'agent_requests', 'agent_approve', 'agent_reject',
+  'task_dispatch', 'task_list', 'task_get', 'task_cancel', 'task_retry',
+]
+
+/**
+ * Run one tool body: the output goes through `client.scrub` (the controller token
+ * can never be part of a tool result); a HubError gets `[code]` in front of its message.
+ */
+async function run(client, fn) {
+  try {
+    return client.scrub(await fn())
+  } catch (error) {
+    if (error instanceof HubError) {
+      throw new HubError(error.status, error.code, `[${error.code}] ${client.redact(error.message)}`, { fromHub: error.fromHub })
+    }
+    throw error
+  }
+}
+
+/**
+ * @param {{ client: ReturnType<typeof import('./hub-client.js').createHubClient> }} deps
+ */
+export function createTools({ client }) {
+  const tools = []
+  const define = def => tools.push({
+    isConcurrencySafe: () => false,
+    output: { schema: objectSchema, render: renderJson },
+    ...def,
+    parameters: { type: 'object', additionalProperties: false, ...def.parameters },
+    execute: (raw, options) => run(client, () => def.execute(raw ?? {}, options)),
+  })
+  const workerEndpoint = () => (client.config.hubUrl === undefined ? undefined : `${client.config.hubUrl}/v1`)
+
+  define({
+    name: 'agent_provision',
+    description: 'Directly issue a worker (agent) on the hub, e.g. "quick-mydesk". Returns the worker token ONCE (only its hash is kept on the hub); the worker sends it as X-DSH-Token with ?id=<agent_id> to the hub endpoint. Re-provisioning re-keys. Prefer the enrollment flow (agent_requests / agent_approve) for workers on other machines.',
+    parameters: {
+      required: ['agent_id'],
+      properties: {
+        agent_id: { type: 'string', description: 'Worker id, /^[a-z][a-z0-9-]{1,47}$/, suggested <agent>-<machine>, e.g. "quick-mydesk".' },
+        platform: { type: 'string', description: 'aws-quick | claude-code | kiro | custom ...' },
+        mode: { type: 'string', enum: ['poll', 'push'], description: 'poll = scheduled pickup (AWS Quick); push = long-running worker.' },
+        node: { type: 'string', description: 'Machine name the worker runs on (mydesk / cloud ...), used by task routing (task.node).' },
+        workspaces: { ...strList, description: 'Workspace names (router-b partition names) the worker is granted, e.g. ["deepseek-harness"].' },
+        capabilities: { ...strList, description: 'For pool:<capability> routing, e.g. research, document, data, code.' },
+        max_concurrency: { type: 'integer', minimum: 1, maximum: 32 },
+        description: str,
+      },
+    },
+    async execute(raw) {
+      const out = await client.provision(raw)
+      return { ...out, endpoint: workerEndpoint(), note: 'Store this worker token now; it is not shown again.' }
+    },
+  })
+
+  define({
+    name: 'agent_revoke',
+    description: 'Revoke a worker: its token stops working at once and its running tasks go back to the queue.',
+    parameters: { required: ['agent_id'], properties: { agent_id: str } },
+    execute: raw => client.revoke(raw.agent_id),
+  })
+
+  define({
+    name: 'agent_list',
+    description: 'List the workers known to the hub: status (pending = approved but token not collected, online = heartbeat / poll within 90 s, offline, left = said goodbye, revoked), last_seen, client version, node, workspaces, capabilities and running tasks.',
+    parameters: { properties: {} },
+    isConcurrencySafe: () => true,
+    execute: async () => ({ agents: await client.listAgents() }),
+  })
+
+  define({
+    name: 'agent_requests',
+    description: 'List enrollment requests from workers asking to join (default: pending). Review platform, node, workspaces, capabilities and source address before approving.',
+    parameters: { properties: { status: { type: 'string', enum: ['pending', 'approved', 'rejected', 'expired', 'all'] } } },
+    isConcurrencySafe: () => true,
+    execute: async raw => ({ requests: await client.listRequests(raw.status ?? 'pending') }),
+  })
+
+  define({
+    name: 'agent_approve',
+    description: 'Approve an enrollment request. Optionally NARROW its capabilities, workspaces or max_concurrency (the hub refuses widening). The worker collects its token itself; DSH never sees it.',
+    parameters: {
+      required: ['request_id'],
+      properties: {
+        request_id: str,
+        capabilities: strList,
+        workspaces: { ...strList, description: 'Subset of the requested workspace names to grant.' },
+        max_concurrency: { type: 'integer', minimum: 1, maximum: 32 },
+      },
+    },
+    execute: raw => client.approve(raw),
+  })
+
+  define({
+    name: 'agent_reject',
+    description: 'Reject an enrollment request.',
+    parameters: { required: ['request_id'], properties: { request_id: str, reason: str } },
+    execute: raw => client.reject(raw.request_id, raw.reason),
+  })
+
+  define({
+    name: 'task_dispatch',
+    description: 'Dispatch a task to one worker ("quick-mydesk") or to any worker with a capability ("pool:research"). Workers only get tasks when they poll, so a task for an offline worker waits in the queue: the answer then has warnings (agent-offline / no-online-worker); pass require_online: true to refuse instead. The instruction must be self-contained. `workspace` is a workspace NAME (never a path; required for type "code"); `node` pins a machine; `ref` is the git branch/commit the worker checks out first. Inputs are small files given inline. Use depends_on to chain tasks: upstream outputs become inputs of the next task.',
+    parameters: {
+      required: ['agent', 'title', 'instruction'],
+      properties: {
+        agent: { type: 'string', description: 'Worker id or pool:<capability>.' },
+        title: str,
+        instruction: str,
+        type: { type: 'string', enum: ['research', 'document', 'data', 'code', 'review', 'custom'] },
+        workspace: { type: 'string', description: 'Workspace name (router-b partition name), e.g. "deepseek-harness". Required when type is "code".' },
+        node: { type: 'string', description: 'Optional: only a worker on this machine (mydesk / cloud ...) may take it.' },
+        ref: { type: 'string', description: 'Optional git branch or commit to check out before working.' },
+        task_id: { type: 'string', description: 'Optional; generated when omitted.' },
+        inputs: { type: 'array', items: { type: 'object', properties: { name: str, text: str, base64: str }, required: ['name'] } },
+        output: { type: 'object', description: '{ format, filename, requirements }' },
+        priority: { type: 'string', enum: ['low', 'normal', 'high'] },
+        deadline: { type: 'string', description: 'ISO 8601 with offset.' },
+        lease_seconds: { type: 'integer', minimum: 60 },
+        depends_on: strList,
+        parent_task_id: str,
+        context: { type: 'object' },
+        require_online: { type: 'boolean', description: 'Refuse (409 agent-offline / no-online-worker) instead of queueing when no suitable worker is online right now. Default false: the task is queued and the answer carries warnings ["agent-offline"] or ["no-online-worker"].' },
+      },
+    },
+    async execute(raw) {
+      if (raw.type === 'code' && (typeof raw.workspace !== 'string' || raw.workspace.trim() === '')) {
+        throw new HubError(400, 'bad-task', 'workspace is required for type "code" (a workspace name, not a path)')
+      }
+      return client.dispatch(raw)
+    },
+  })
+
+  define({
+    name: 'task_list',
+    description: 'List tasks, newest first, optionally by status (pending/accepted/running/completed/failed/cancelled/dead), agent (id or pool:<capability>) or workspace name.',
+    parameters: { properties: { status: str, agent: str, workspace: str, limit: { type: 'integer', minimum: 1, maximum: 200 } } },
+    isConcurrencySafe: () => true,
+    execute: async raw => ({ tasks: await client.listTasks({ status: raw.status, agent: raw.agent, workspace: raw.workspace, limit: raw.limit }) }),
+  })
+
+  define({
+    name: 'task_get',
+    description: 'Full task: instruction, history, result summary and output file list. Pass output_name to also read one output file as text (first 60000 chars).',
+    parameters: { required: ['task_id'], properties: { task_id: str, output_name: str } },
+    isConcurrencySafe: () => true,
+    async execute(raw) {
+      const task = { ...await client.getTask(raw.task_id) }
+      if (raw.output_name) {
+        const bytes = await client.readOutput(raw.task_id, raw.output_name)
+        task.output_text = bytes.toString('utf8').slice(0, 60000)
+      }
+      return task
+    },
+  })
+
+  define({
+    name: 'task_cancel',
+    description: 'Cancel a task that is not finished (only tasks this DSH dispatched). The worker will be refused when it reports on it.',
+    parameters: { required: ['task_id'], properties: { task_id: str, reason: str } },
+    execute: raw => client.cancel(raw.task_id, raw.reason),
+  })
+
+  define({
+    name: 'task_retry',
+    description: 'Put a finished (failed/cancelled/dead/completed) task back in the queue, optionally to another worker or pool (only tasks this DSH dispatched).',
+    parameters: { required: ['task_id'], properties: { task_id: str, agent: str } },
+    execute: raw => client.retry(raw.task_id, raw.agent),
+  })
+
+  return tools
+}

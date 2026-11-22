@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Agent 调度中心",
+    "description": "DSH 作为唯一调度方，给外部 agent 平台（AWS Quick、Claude Code、Kiro 等）派发任务；agent 用 DSH 签发的令牌只能领取自己的任务并回传结果。侧边栏“Agent 调度”页只读展示任务、agent 和待审批申请。",
+    "detail": "README.md"
+  }
+}

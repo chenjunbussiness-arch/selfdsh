@@ -4,11 +4,16 @@
  *
  * Same approach as the dsh-vpn / dsh-egress installers, idempotent:
  *
- *   1. points the profile's `package.json` at this bundle and its host sub-package
- *      with `link:`;
+ *   1. points the profile's `package.json` at this bundle and its two sub-packages
+ *      (dsh-host-secrets, dsh-client-ui-secrets) with `link:`;
  *   2. registers the bundle in `dsh.profile.bundles` (sub-packages are libraries,
  *      not bundles);
- *   3. creates the two `node_modules` entries as directory links.
+ *   3. creates the three `node_modules` entries as directory links (junctions on
+ *      Windows).
+ *
+ * The dashboard's browser half (`packages/client-ui-secrets/lib/client.js`) is
+ * a build artifact: run `node scripts/build.mjs` first; the installer only warns
+ * when it is missing.
  *
  * It never runs a package manager (a profile-level `pnpm install` rewrites the
  * whole tree), never touches any other bundle, and `--dry-run` writes nothing.
@@ -28,7 +33,7 @@ import { fileURLToPath } from 'node:url'
 
 const BUNDLE = dirname(dirname(fileURLToPath(import.meta.url)))
 const NAME = 'dsh-secrets'
-const SUBS = ['dsh-host-secrets']
+const SUBS = ['dsh-host-secrets', 'dsh-client-ui-secrets']
 
 const argv = process.argv.slice(2)
 let profileArg
@@ -82,6 +87,7 @@ if (!Array.isArray(bundles)) {
 const wanted = {
   [NAME]: `link:${BUNDLE.replace(/\\/g, '/')}`,
   'dsh-host-secrets': `link:${join(BUNDLE, 'packages', 'host-secrets').replace(/\\/g, '/')}`,
+  'dsh-client-ui-secrets': `link:${join(BUNDLE, 'packages', 'client-ui-secrets').replace(/\\/g, '/')}`,
 }
 
 if (uninstall) {
@@ -135,5 +141,8 @@ else {
   if (dryRun) console.log('(dry run: nothing written)')
 }
 if (!uninstall) {
-  console.log('\nNext: restart the service that owns this profile (the operator decides when), then check the log for\n  "dsh-secrets: vault <path> (keySource ...), 10 tools registered". Set DSH_SECRETS_PASSPHRASE in the service environment first.')
+  const built = ['packages/client-ui-secrets/lib/client.js', 'packages/client-ui-secrets/lib/index.js']
+    .filter(file => !existsSync(join(BUNDLE, file)))
+  if (built.length > 0) console.warn(`warning: not built yet: ${built.join(', ')} (run \`node scripts/build.mjs\`; the secret_* tools work without it, only the dashboard page is missing)`)
+  console.log('\nNext: restart the service that owns this profile (the operator decides when), then check the log for\n  "dsh-secrets: vault <path> (keySource ...), 10 tools registered" and\n  "dsh-secrets: read-only dashboard bridge mounted at /api/secrets/{summary,list}". Set DSH_SECRETS_PASSPHRASE in the service environment first.')
 }

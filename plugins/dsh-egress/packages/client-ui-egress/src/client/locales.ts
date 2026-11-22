@@ -97,6 +97,7 @@ const zh = {
   'log.fail': '失败',
   'log.show': '展开',
   'log.hide': '收起',
+  'notice.dismiss': '关闭提示',
 } as const
 
 const en: Record<keyof typeof zh, string> = {
@@ -187,6 +188,7 @@ const en: Record<keyof typeof zh, string> = {
   'log.fail': 'failed',
   'log.show': 'Show',
   'log.hide': 'Hide',
+  'notice.dismiss': 'Dismiss',
 }
 
 /** Dictionaries keyed by locale id. */

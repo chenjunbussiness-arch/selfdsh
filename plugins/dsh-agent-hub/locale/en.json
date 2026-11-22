@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Agent hub",
+    "description": "DSH is the only controller: it dispatches tasks to external agent platforms (AWS Quick, Claude Code, Kiro, ...); agents use a DSH-issued token and can only lease their own tasks and return results. A read-only \"Agent hub\" page in the Sidebar shows tasks, agents and pending enrollment requests.",
+    "detail": "README.md"
+  }
+}

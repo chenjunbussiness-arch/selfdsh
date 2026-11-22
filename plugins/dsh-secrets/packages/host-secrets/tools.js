@@ -70,7 +70,13 @@ export function truncateChars(text, max = LIST_DESCRIPTION_CHARS) {
   return chars.length <= max ? text : `${chars.slice(0, max).join('')}…`
 }
 
-function item(name, entry, { fullDescription = false } = {}) {
+/**
+ * The value-free view of one entry: metadata, fingerprint and length only.
+ * Shared by `secret_list` and the read-only dashboard bridge (bridge.js).
+ * @param {string} name
+ * @param {{value: string, description: string, tags: string[], createdAt: string, updatedAt: string, metaUpdatedAt: string}} entry
+ */
+export function item(name, entry, { fullDescription = false } = {}) {
   return {
     name,
     description: fullDescription ? entry.description : truncateChars(entry.description),
@@ -81,6 +87,25 @@ function item(name, entry, { fullDescription = false } = {}) {
     updatedAt: entry.updatedAt,
     metaUpdatedAt: entry.metaUpdatedAt,
   }
+}
+
+/**
+ * Sorted names matching an exact tag and/or a case-insensitive keyword in the
+ * name or description. `tag: undefined` and `query: undefined | ''` match
+ * everything (exactly `secret_list`'s historical semantics). Shared by
+ * `secret_list` and the dashboard bridge so both filter identically.
+ * @param {Record<string, {description: string, tags: string[]}>} entries
+ * @param {{tag?: string, query?: string}} [filter]
+ * @returns {string[]}
+ */
+export function filterNames(entries, { tag, query } = {}) {
+  const needle = query?.toLowerCase()
+  return Object.keys(entries).sort().filter((name) => {
+    const entry = entries[name]
+    if (tag !== undefined && !entry.tags.includes(tag)) return false
+    if (needle !== undefined && needle !== '' && !name.toLowerCase().includes(needle) && !entry.description.toLowerCase().includes(needle)) return false
+    return true
+  })
 }
 
 /** Run `body`; rethrow any failure with its message redacted (stack dropped). */
@@ -286,13 +311,7 @@ export function createTools({ vault, config, logger }) {
       if (raw?.tag !== undefined && typeof raw.tag !== 'string') throw new Error('tag must be a string')
       if (raw?.query !== undefined && typeof raw.query !== 'string') throw new Error('query must be a string')
       const { entries } = await vault.load()
-      const query = raw?.query?.toLowerCase()
-      const items = Object.keys(entries).sort().filter((name) => {
-        const entry = entries[name]
-        if (raw?.tag !== undefined && !entry.tags.includes(raw.tag)) return false
-        if (query !== undefined && query !== '' && !name.toLowerCase().includes(query) && !entry.description.toLowerCase().includes(query)) return false
-        return true
-      }).map(name => item(name, entries[name]))
+      const items = filterNames(entries, { tag: raw?.tag, query: raw?.query }).map(name => item(name, entries[name]))
       return { items, total: items.length }
     },
   })

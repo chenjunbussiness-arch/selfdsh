@@ -1,0 +1,19 @@
+{
+  "port": 7891,
+  "host": "0.0.0.0",
+  "tls": {
+    "cert": "/etc/dsh-hub/tls/fullchain.pem",
+    "key": "/etc/dsh-hub/tls/privkey.pem"
+  },
+  "allow": [
+    "127.0.0.1/32",
+    "::1",
+    "203.0.113.7/32",
+    "10.8.0.0/24"
+  ],
+  "trustProxy": false,
+  "maxRetries": 2,
+  "offlineAfterMs": 90000,
+  "sweepIntervalMs": 15000,
+  "maxResultBytes": 20971520
+}

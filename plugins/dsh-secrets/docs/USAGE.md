@@ -21,6 +21,7 @@
 | 条目字段 | `value`、`description`、`tags`、`createdAt`、`updatedAt`、`metaUpdatedAt`（`fingerprint`、`length` 按需算，不落盘） |
 | 名字正则 | `/^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/` |
 | 工具数量 | 10 个，启动日志会打印 `10 tools registered` |
+| 只读看板 | Web 侧栏“密钥”页 + `GET /api/secrets/summary`、`GET /api/secrets/list`（登录校验，只有元数据/指纹/长度），见 [DASHBOARD.md](DASHBOARD.md) |
 
 10 个工具：`secret_set`、`secret_describe`、`secret_list`、`secret_check`、`secret_rename`、
 `secret_delete`、`secret_exec`、`secret_http`、`secret_export`、`secret_import`。
@@ -53,10 +54,14 @@ node scripts/install.mjs --profile /root/.dsh/profiles/web
 它做的三件事，每一件都可重复执行（幂等，已装则打印 `already installed`）：
 
 1. profile 的 `package.json` 里，`dependencies` 写入
-   `dsh-secrets: link:<本仓库>` 和 `dsh-host-secrets: link:<本仓库>/packages/host-secrets`；
-2. `dsh.profile.bundles` 里保证有 `dsh-secrets`，并把 `dsh-host-secrets` 从 bundles 里移除
-   （它是被引用的库，不是 bundle）；
-3. 在 `<profile>/node_modules/` 下建这两个名字的目录软链。
+   `dsh-secrets: link:<本仓库>`、`dsh-host-secrets: link:<本仓库>/packages/host-secrets` 和
+   `dsh-client-ui-secrets: link:<本仓库>/packages/client-ui-secrets`（只读看板页）；
+2. `dsh.profile.bundles` 里保证有 `dsh-secrets`，并把两个子包从 bundles 里移除
+   （它们是被引用的库，不是 bundle）；
+3. 在 `<profile>/node_modules/` 下建这三个名字的目录软链（Windows 上是 junction）。
+
+看板页的浏览器产物 `packages/client-ui-secrets/lib/client.js` 需要先 `node scripts/build.mjs`
+构建；没构建时安装脚本只打印 warning，工具不受影响。详见 [DASHBOARD.md](DASHBOARD.md) §4–§5。
 
 其它副作用与前置条件（都来自 `install.mjs`）：
 
@@ -72,14 +77,14 @@ node scripts/install.mjs --profile /root/.dsh/profiles/web
 node scripts/install.mjs --profile /root/.dsh/profiles/web --uninstall
 ```
 
-只做反向的三件事：删掉两个 `dependencies`、从 `bundles` 里删 `dsh-secrets`、删两个软链。
+只做反向的三件事：删掉三个 `dependencies`、从 `bundles` 里删 `dsh-secrets`、删三个软链。
 **vault 文件和 keyfile 原样保留**，不会删数据；要销毁数据得自己 `rm`。
 
 ### 1.3 装完要重启，还是 HMR 就够？
 
 - **HMR 只对客户端 bundle 有效**（例如 `client-ui-*/lib/client.js` 这类浏览器侧产物）。
-- `dsh-secrets` 全部是**宿主侧 Node 代码**（`packages/host-secrets/*.js`），DSH 只在**启动时**
-  加载一次。所以装完、改完源码、改完 profile 的 `cordis.patch.yml`，都必须重启。
+- `dsh-secrets` 的工具与看板接口是**宿主侧 Node 代码**（`packages/host-secrets/*.js`），DSH 只在**启动时**
+  加载一次（看板页 `client-ui-secrets/lib/client.js` 是浏览器侧产物，重建后刷新页面即可，但首次挂载仍需重启）。所以装完、改完源码、改完 profile 的 `cordis.patch.yml`，都必须重启。
 - 重启走：
 
 ```bash
@@ -98,6 +103,23 @@ grep 'dsh-secrets:' /var/log/dsh-web.log | tail -1
 ```
 
 ### 1.4 把口令交给 DSH 服务进程
+
+**推荐：写进 `<DSH home>/.env`（默认 `/root/.dsh/.env`），插件自己读取。**
+
+```bash
+install -m 600 /dev/null /root/.dsh/.env        # 已存在就跳过这一步
+echo "DSH_SECRETS_PASSPHRASE='你的口令'" >> /root/.dsh/.env
+chmod 600 /root/.dsh/.env
+```
+
+- 查找顺序：① 进程环境变量 `DSH_SECRETS_PASSPHRASE`（非空才算）→ ② `envFile` 里的同名行。
+- `.env` 修改后自动生效（按文件修改时间和大小检测），不用重启。
+- 路径和变量名在 profile 的 `cordis.patch.yml` 里配置（`vaultPath`、`passphraseEnv`、`envFile`），见 §1.6。
+- 用这种方式时口令不在 DSH 进程的环境变量里，所以 `secret_exec` 起的子进程也继承不到它。
+- 文件对组或其他用户可读时，日志里会提醒 `chmod 600`，但不会打印任何值。
+
+下面两种（systemd 注入）仍然可用，进程环境变量优先于 `.env`：
+
 
 服务是 `dsh-web.service`（`User=root`，`StandardOutput=append:/var/log/dsh-web.log`）。
 只有该进程的环境里有 `DSH_SECRETS_PASSPHRASE`，工具才能解密；在交互 shell 里 `export` 对
@@ -197,6 +219,7 @@ config 里的未知键会抛 `dsh-host-secrets config: unknown key <key>`；类�
 | `vaultPath` | `<DSH_HOME>/secrets.vault` | vault 文件路径，会被 `resolve()` 成绝对路径 |
 | `keySource` | `passphrase-env` | 只能是 `passphrase-env` 或 `keyfile` |
 | `passphraseEnv` | `DSH_SECRETS_PASSPHRASE` | 存放主口令的环境变量名 |
+| `envFile` | `<DSH home>/.env` | 读取口令的 dotenv 文件；`false` 表示只看进程环境变量 |
 | `keyfilePath` | `<DSH_HOME>/secrets.key` | `keySource: keyfile` 时使用 |
 | `scryptN` / `scryptR` / `scryptP` | 32768 / 8 / 1 | N 必须是 2 的幂，1024–1048576；r 1–32；p 1–16 |
 | `maxOutputChars` | 65536 | exec/http 输出截断长度，256–10000000 |
@@ -315,6 +338,8 @@ scrypt 参数 N=32768（2^15）、r=8、p=1、16 字节 salt、32 字节 key、`
   **60 个码点**并加 `…`（截断只影响展示）。
 - `fingerprint` = `sha256(value)` 的前 8 个十六进制字符；`length` 是码点数，不是字节数。
 - 这条不需要「值」，但 vault 存在时仍要能解密才列得出来；vault 文件不存在就当空库。
+- 人要看同样的信息，用 Web 侧栏的 **密钥看板**（[DASHBOARD.md](DASHBOARD.md)）：同一个 `item()`
+  投影、同一套筛选（`filterNames()`），描述不截断，同样不含值。
 
 ### 3.4 核对：`secret_check`
 

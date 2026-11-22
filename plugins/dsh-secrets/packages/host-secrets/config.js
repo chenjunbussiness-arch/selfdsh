@@ -12,7 +12,7 @@ export function dshHome(env = process.env) {
 }
 
 const KEYS = new Set([
-  'vaultPath', 'keySource', 'passphraseEnv', 'keyfilePath', 'scryptN', 'scryptR', 'scryptP',
+  'vaultPath', 'keySource', 'passphraseEnv', 'envFile', 'keyfilePath', 'scryptN', 'scryptR', 'scryptP',
   'maxOutputChars', 'execTimeoutMs', 'execMaxTimeoutMs', 'execAllowedCommands', 'httpAllowedHosts',
   'httpTimeoutMs', 'httpFollowRedirects', 'redactToolOutput', 'redactMinLength', 'lockTimeoutMs', 'lockStaleMs',
 ])
@@ -67,6 +67,8 @@ export function resolveConfig(raw, env = process.env) {
     vaultPath: resolve(str(config.vaultPath, 'vaultPath', join(home, 'secrets.vault'))),
     keySource,
     passphraseEnv: str(config.passphraseEnv, 'passphraseEnv', 'DSH_SECRETS_PASSPHRASE'),
+    // false = only the process environment; a string = that dotenv file; default <DSH home>/.env
+    envFile: config.envFile === false ? null : resolve(str(config.envFile, 'envFile', join(home, '.env'))),
     keyfilePath: resolve(str(config.keyfilePath, 'keyfilePath', join(home, 'secrets.key'))),
     scrypt: {
       N: scryptN,

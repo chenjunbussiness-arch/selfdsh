@@ -1,0 +1,34 @@
+{
+  "name": "dsh-client-ui-agent-hub",
+  "description": "Read-only dispatch panel for the DSH Web client: task counts, agents (online, platform, capabilities, running tasks), task list with detail/history/result summary and pending enrollment requests, backed by the dsh-host-agent-hub admin routes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "MIT",
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "src"
+  ],
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": ["dsh", "dsh-plugin", "client-ui", "agent-hub"]
+}

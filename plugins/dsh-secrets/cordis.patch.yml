@@ -1,26 +1,51 @@
 # dsh-secrets — bundle patch layer
 #
-# Mounts host-secrets: an AES-256-GCM encrypted vault at <DSH home>/secrets.vault
-# and the tools secret_set / secret_describe / secret_list / secret_delete /
-# secret_rename / secret_check / secret_exec / secret_http / secret_export /
-# secret_import. No tool returns a secret value. See DESIGN.md.
+# Mounts the two halves of dsh-secrets:
 #
-# Every key under `config` is optional:
-#   vaultPath            vault file (default <DSH home>/secrets.vault)
-#   keySource            passphrase-env (default) | keyfile
-#   passphraseEnv        env var with the master passphrase (default DSH_SECRETS_PASSPHRASE)
-#   keyfilePath          keyfile, mode 600 (default <DSH home>/secrets.key)
+#   host-secrets        an AES-256-GCM encrypted vault at <DSH home>/secrets.vault
+#                       and the tools secret_set / secret_describe / secret_list /
+#                       secret_delete / secret_rename / secret_check / secret_exec /
+#                       secret_http / secret_export / secret_import, plus the
+#                       read-only, login-guarded GET routes /api/secrets/summary and
+#                       /api/secrets/list (metadata, fingerprint, length only)
+#   client-ui-secrets   the read-only "密钥看板" page and its Sidebar row; its host
+#                       half is empty. Needs lib/client.js built (scripts/build.mjs).
+#
+# No tool and no route returns a secret value. See DESIGN.md, docs/DASHBOARD.md.
+#
+# ── 配置（config 下每一项都可省略；括号里是默认值）────────────────────────────
+# 位置类
+#   vaultPath        加密库文件（<DSH home>/secrets.vault）。DSH home = $DSH_HOME，未设时为 ~/.dsh
+#   keyfilePath      keySource=keyfile 时的密钥文件，权限必须 600（<DSH home>/secrets.key）
+#   envFile          读取主口令的 dotenv 文件（<DSH home>/.env）；写 false 表示只看进程环境变量
+# 主密钥来源
+#   keySource        passphrase-env（默认）：口令来自 passphraseEnv 指定的变量
+#                    keyfile：读 keyfilePath，不需要口令
+#   passphraseEnv    口令的变量名（DSH_SECRETS_PASSPHRASE）
+#                    查找顺序：① 进程环境变量（非空才算）→ ② envFile 里的同名行
+#                    .env 改了会自动重读，不用重启；文件不存在时跳过；
+#                    组/其他用户可读时会在日志里提醒 chmod 600（不打印任何值）
+# 其他
 #   scryptN/R/P          32768 / 8 / 1
 #   maxOutputChars       65536
-#   execTimeoutMs        60000 (capped by execMaxTimeoutMs 600000)
-#   execAllowedCommands  null = any command; a list restricts secret_exec
-#   httpAllowedHosts     null = any host; list of hosts or *.suffix
+#   execTimeoutMs        60000（上限 execMaxTimeoutMs 600000）
+#   execAllowedCommands  null = 不限；列表 = 只允许这些命令用 secret_exec
+#   httpAllowedHosts     null = 不限；主机名列表，支持 *.suffix
 #   httpTimeoutMs        30000
 #   httpFollowRedirects  false
-#   redactToolOutput     true: redact known values from every tool's text output
+#   redactToolOutput     true：所有工具的文本输出里把已知密钥值打码
 #   redactMinLength      8
 #   lockTimeoutMs        10000
 #   lockStaleMs          30000
+#
+# .env 示例（/root/.dsh/.env，chmod 600；DSH 凭据层也读这个文件，可以共用）：
+#   # dsh-secrets 主口令
+#   DSH_SECRETS_PASSPHRASE='一串足够长的随机口令'
+#   KIRO_API_KEY=...
+# 格式：KEY=值；# 开头是注释；可带 export 前缀；值可用单/双引号（双引号里支持 \n \t \" \\）；
+# 不加引号时 " #" 之后算注释。
+#
+# 机器相关的值（路径）建议写在 profile 的 cordis.patch.yml 里覆盖，见 profile/cordis.patch.yml。
 
 - insert:
     - id: host-secrets
@@ -28,4 +53,7 @@
       config:
         keySource: passphrase-env
         passphraseEnv: DSH_SECRETS_PASSPHRASE
+        # envFile / vaultPath 不写就用默认的 <DSH home>/.env、<DSH home>/secrets.vault
         redactToolOutput: true
+    - id: client-ui-secrets
+      name: dsh-client-ui-secrets

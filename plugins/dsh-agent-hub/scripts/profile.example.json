@@ -1,0 +1,8 @@
+{
+  "node": "mydesk",
+  "dshProfile": "C:/Users/<you>/.dsh/profiles/web",
+  "workspaces": {
+    "deepseek-harness": "E:/PythonProject/dsh-warroom",
+    "rca-ab-test": null
+  }
+}

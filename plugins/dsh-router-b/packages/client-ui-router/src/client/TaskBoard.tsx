@@ -139,7 +139,11 @@ export function TaskBoard(props: TaskBoardProps) {
         {onOpenWarRoom !== undefined && (
           <button type="button" className="dshr-icon-btn" data-warroom="open"
             aria-label={t('warroom.open')} title={t('warroom.open')} onClick={onOpenWarRoom}>
-            <span aria-hidden="true">💬</span>
+            {/* Chat glyph, drawn in currentColor: an emoji would bring its own colours. */}
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+              <path d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7l-3 2.5v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"
+                fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+            </svg>
             <span className="dshr-btn-label">{t('warroom.open')}</span>
           </button>
         )}

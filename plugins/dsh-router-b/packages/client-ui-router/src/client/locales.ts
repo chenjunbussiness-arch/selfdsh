@@ -398,6 +398,9 @@ const zh = {
   'batch.running': '执行中…',
   'batch.ok': '成功 {n}',
   'batch.failed': '失败 {n}',
+
+  // Extension tabs from other plugins (board-tabs.ts).
+  'ext.error': '「{name}」这个标签页出错了：{message}',
 }
 
 const en: typeof zh = {
@@ -789,6 +792,9 @@ const en: typeof zh = {
   'batch.running': 'Running…',
   'batch.ok': '{n} done',
   'batch.failed': '{n} failed',
+
+  // Extension tabs from other plugins (board-tabs.ts).
+  'ext.error': 'The “{name}” tab failed: {message}',
 }
 
 /** Locale dictionaries registered by the plugin. */

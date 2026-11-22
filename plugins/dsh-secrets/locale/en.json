@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Secrets vault",
+    "description": "Local encrypted secret vault: agents can store and use secrets (env injection, HTTP placeholders) but no tool reads a value back; includes a read-only dashboard (name, description, tags, fingerprint, length, update time).",
+    "detail": "docs/USAGE.md"
+  }
+}

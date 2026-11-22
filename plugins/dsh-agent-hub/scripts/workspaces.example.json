@@ -1,0 +1,11 @@
+{
+  "node": "mydesk",
+  "profile": "C:/Users/<you>/.dsh/profiles/web",
+  "workspaces": {
+    "deepseek-harness": "E:/PythonProject/dsh-warroom",
+    "rca-ab-test": null
+  },
+  "hubUrl": "hub.example.com",
+  "tokenFile": "~/.dsh/worker/quick-mydesk.token",
+  "proxy": "http://127.0.0.1:7890"
+}

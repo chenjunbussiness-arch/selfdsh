@@ -1,0 +1,37 @@
+# dsh-hub (protocol dsh-agent/2.0) - systemd unit
+#
+# Install (replace __DSH_WARROOM__ with the absolute path of the repo checkout,
+# e.g. /srv/dsh-warroom, and check the node path with `command -v node`):
+#   sed 's#__DSH_WARROOM__#/srv/dsh-warroom#g' deploy/dsh-hub.service > /etc/systemd/system/dsh-hub.service
+#   systemctl daemon-reload && systemctl enable --now dsh-hub
+#   journalctl -u dsh-hub -f
+#
+# Config: /root/.dsh/agent-hub/hub.json (DSH_HOME below). State in the same folder.
+
+[Unit]
+Description=dsh-hub (DSH agent hub, dsh-agent/2.0, port 7891)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__DSH_WARROOM__/services/dsh-hub
+Environment=DSH_HOME=/root/.dsh
+# Default port 7891 (7890 is the Clash/mihomo proxy port on the workstation;
+# mihomo on this server uses 17890/17892). Override only if 7891 is taken:
+# Environment=DSH_HUB_PORT=7891
+ExecStart=/usr/bin/node server.mjs
+Restart=on-failure
+RestartSec=5
+# 78 = configuration error (bad hub.json, missing TLS files, plain HTTP on a public address): do not loop.
+RestartPreventExitStatus=78
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

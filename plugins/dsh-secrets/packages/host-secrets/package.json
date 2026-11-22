@@ -2,7 +2,7 @@
   "name": "dsh-host-secrets",
   "version": "0.1.0",
   "private": true,
-  "description": "Host half of dsh-secrets: encrypted local vault and the secret_* tools (write and use, never read)",
+  "description": "Host half of dsh-secrets: encrypted local vault, the secret_* tools (write and use, never read) and the read-only, login-guarded dashboard bridge /api/secrets/{summary,list}",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -10,6 +10,8 @@
     "./vault": "./vault.js",
     "./redact": "./redact.js",
     "./placeholders": "./placeholders.js",
+    "./bridge": "./bridge.js",
+    "./env-file": "./env-file.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -18,7 +20,9 @@
     "vault.js",
     "redact.js",
     "placeholders.js",
-    "tools.js"
+    "tools.js",
+    "bridge.js",
+    "env-file.js"
   ],
   "scripts": {
     "test": "node --test tests/*.test.mjs"

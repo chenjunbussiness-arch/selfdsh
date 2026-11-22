@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Secrets vault">
+  <title>Secrets vault</title>
+  <!-- A padlock with a keyhole: values go in and are used, never read back. -->
+  <g fill="none" stroke="#4d6bfe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="6" y="14" width="20" height="14" rx="3" />
+    <path d="M10.5 14V10a5.5 5.5 0 0 1 11 0v4" />
+    <path d="M16 20v3" />
+  </g>
+  <circle cx="16" cy="19.5" r="1.6" fill="#4d6bfe" />
+</svg>

@@ -134,6 +134,30 @@ rc.3 的 `practices.md:35` 明文要求客户端插件**不要** `require` `@dee
 声明内容抄自 rc.3 asar 里的真实源码，每块都标了出处。等这个包进了 monorepo，
 删掉这个 shim、改成对 `packages/client/ui-slots` 等项目的 project reference 即可，其余代码不用动。
 
+### 5.1 任务板的扩展 tab（`src/client/board-tabs.ts`）
+
+右侧任务板的分段条「现在 / 已结束 / 工作区」后面可以接**别的插件的 tab**（目前是 dsh-agent-hub 的「Agent」）。
+插件各自打包、不能在构建时互相 import，React 由宿主模块表提供（同一个实例），所以对接点是 `globalThis` 上的注册表：
+
+```ts
+// globalThis.__dshRouterBoardTabs__ ，v: 1；board-tabs.ts 在两个插件里逐字节相同，谁先加载谁创建
+const off = boardTabs().register({ id, order, label: () => string, Component, badge?: () => number | undefined, flag?: () => string | undefined })
+boardTabs().list()            // 按 order 排序的快照；label/badge 已求值；内容不变时返回同一个数组
+boardTabs().subscribe(fn)     // 变化通知（注册/注销/notify/消费者增减），返回取消订阅
+boardTabs().notify()          // 生产方：label 或 badge 的答案变了
+boardTabs().consume(name)     // 消费方（本插件 apply 时调用一次），返回撤销
+boardTabs().hasConsumer()     // 是否有任务板声明了自己；生产方据此决定要不要自己的兜底入口
+```
+
+- `flag`（v1 内新增的可选字段）：返回非空字符串时，tab 上画一个 `.dshrc-tab-flag` 小圆点，字符串用作 `title` 和 `aria-label`（最多保留 200 字）；返回 `undefined` 或空串不画。和 `badge` 互相独立。旧版注册表不会读取它，旧版任务板不会画它，都只会退化成「没有圆点」，所以不用升 `REGISTRY_VERSION`。
+
+- 本插件在 `apply` 里 `consume('dsh-router-b')`（不是等面板第一次挂载），`CompactBoard` 用 `useSyncExternalStore` 订阅 `list()`。
+- 扩展 tab 的 id 是 `ext:<id>`，样式与内置 tab 完全相同（`.dshrc-tab`），有 badge 时显示计数；`id` 重复时后注册的替换前一个。
+- 内容区渲染 `Component`，props 为 `{ embedded: true, onClose }`，外面包一层 ErrorBoundary：扩展组件抛错只显示一行错误和「重试」，不影响面板其他部分。`label()` / `badge()` 抛错由注册表兜住（退回 id / 无徽标）。
+- 扩展 tab 下隐藏只对任务有意义的控件：搜索框、批量模式按钮、读板失败条、示例数据条（工作区 tab 原本只隐藏搜索框）。
+- 当前选中的扩展 tab 被注销时回到「现在」。
+- 扩展内容区把 `--dsw-alias-*` 主题变量重新指向本面板的 `--c-*`，所以按 docs/UI-STYLE.md 写的扩展组件会跟随面板自己的 白天/黑夜 选择。
+
 ## 6. 已知风险
 
 1. **没进真机 profile**：见 §3。真机上唯一没被覆盖的变量是「AppFrame 里右侧栏的可用高度/宽度」
