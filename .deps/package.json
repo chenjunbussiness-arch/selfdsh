@@ -1,0 +1,14 @@
+{
+  "name": "dsh-warroom-build-deps",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
