@@ -35,6 +35,7 @@ await build({
     contents: [
       "export * from './src/client/Desk.tsx'",
       "export { CompactBoard } from './src/client/CompactBoard.tsx'",
+      "export { WorkspacePage } from './src/client/WorkspacePage.tsx'",
       "export { RouterBoardController } from './src/client/controller.ts'",
       "export { createMockSource } from './src/client/mock.ts'",
       "export { DICTIONARIES } from './src/client/locales.ts'",
@@ -188,4 +189,25 @@ test('first render: theme, batch toggle, PR and 改派 links, row actions', asyn
   assert.ok(markup.includes('.dshd-live'), 'desk stylesheet is included')
   assert.ok(!markup.includes('class="dshd-scrim"'), 'no dialog until asked')
   assert.ok(!markup.includes('class="dshd-live"'), 'no output panel until asked')
+})
+
+test('tabs: 进行中 / 已结束 / 工作区; queued and removed-partition rows live inside them', async () => {
+  const controller = await fresh()
+  const markup = renderToStaticMarkup(React.createElement(desk.CompactBoard, { controller, t }))
+  const tabs = [...markup.matchAll(/role="tab"[^>]*>([^<]+)/g)].map(match => match[1])
+  assert.deepEqual(tabs, [t('seg.active'), t('seg.resolved'), t('seg.workspace')])
+  assert.ok(!markup.includes('接下来') && !markup.includes('排程任务'), 'the empty 接下来 / 排程任务 tabs are gone')
+  assert.ok(!('seg.next' in zh) && !('seg.scheduled' in zh))
+  // The queued sample row is on the first tab now, under 排队.
+  assert.ok(markup.includes(t('grp.queued')), 'queued rows show under 进行中')
+})
+
+test('工作区 renders inside the board: no page header, one column', async () => {
+  const controller = await fresh()
+  const markup = renderToStaticMarkup(React.createElement(desk.WorkspacePage, { controller, t, embedded: true }))
+  assert.ok(markup.includes('data-embed=""'), 'embedded marker')
+  assert.ok(!markup.includes('class="dshws-title"'), 'no second page title inside the board')
+  assert.ok(markup.includes('class="dshws-parts"'), 'partitions listed')
+  const page = renderToStaticMarkup(React.createElement(desk.WorkspacePage, { controller, t }))
+  assert.ok(page.includes('class="dshws-title"'), 'the standalone page keeps its header')
 })

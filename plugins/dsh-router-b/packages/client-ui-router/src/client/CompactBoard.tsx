@@ -2,13 +2,20 @@
  * Right-Sidebar task board: a progress tree, styled after Claude Duet's rail.
  *
  * One quiet column: a titled header with icon-only actions, a pill segment strip
- * (进行中 / 接下来 / 排程任务 / 已结束), then status groups. A group caption counts
+ * (进行中 / 已结束 / 工作区), then status groups. A group caption counts
  * task *families*, and each family is one row — the manager's task — with the
  * workers it dispatched indented underneath behind a `n 个 worker` chip. Rows
  * never repeat a work item as two siblings.
  *
- * The groups are 进行中, 已暂停（需要处理）, 已挂起（等前置）, 排队中, 已失效分区,
- * 已完成, 失败 and 已取消. A parked (`blocked`) row carries a second line with its
+ * 进行中 holds 进行中, 已暂停（需要处理）, 已挂起（等前置） and 排队（等前置或名额）;
+ * 已结束 holds 已完成, 失败, 已取消 and 已失效分区. 工作区 is the partitions' files,
+ * rules, open tasks and memory ({@link WorkspacePage} in its embedded form).
+ *
+ * There used to be 接下来 and 排程任务 tabs. 接下来 only ever held queued rows,
+ * which with the usual unlimited slots exist only while a staged task waits on
+ * its prerequisites; 排程任务 had no producer at all (the router has no
+ * scheduler) and in fact listed rows of removed partitions. Both now live as a
+ * group inside the tab they belong to. A parked (`blocked`) row carries a second line with its
  * reason and a 恢复 button that sends `task_control resume`; a suspended row
  * says what it waits for, and a queued row held back by the task order says
  * which prerequisites are still open. Live rows offer 挂起 (with an optional
@@ -44,6 +51,7 @@ import { NO_SESSIONS, todosOf, type SessionsFace } from './native-todos.ts'
 import { BOARD_TOKENS_CSS, type BoardTone } from './styles.ts'
 import { ApprovalsSection, BatchBar, DESK_CSS, LivePanel, NO_FILTER, ReassignDialog, failureKey, type BatchFilter } from './Desk.tsx'
 import { ThemeButton, useBoardTheme } from './theme.tsx'
+import { WorkspacePage } from './WorkspacePage.tsx'
 
 /** Props supplied by the tab registration. */
 export interface CompactBoardProps {
@@ -57,7 +65,7 @@ export interface CompactBoardProps {
 }
 
 /** A tab of the segment strip. */
-export type BoardTab = 'active' | 'next' | 'scheduled' | 'resolved'
+export type BoardTab = 'active' | 'resolved' | 'workspace'
 
 /**
  * A status bucket rendered under one caption inside a tab.
@@ -72,20 +80,19 @@ export type Group = 'running' | 'blocked' | 'suspended' | 'queued' | 'stale' | '
 const PAGE = 12
 const POLL_MS = 3000
 
-/** Tab order, left to right, mirroring the reference's four segments. */
+/** Tab order, left to right. */
 const TABS: readonly { id: BoardTab; key: string }[] = [
   { id: 'active', key: 'seg.active' },
-  { id: 'next', key: 'seg.next' },
-  { id: 'scheduled', key: 'seg.scheduled' },
   { id: 'resolved', key: 'seg.resolved' },
+  { id: 'workspace', key: 'seg.workspace' },
 ]
 
 /** Group order inside each tab. */
 const TAB_GROUPS: Readonly<Record<BoardTab, readonly Group[]>> = {
-  active: ['running', 'blocked', 'suspended'],
-  next: ['queued'],
-  scheduled: ['stale'],
-  resolved: ['done', 'failed', 'cancelled'],
+  active: ['running', 'blocked', 'suspended', 'queued'],
+  resolved: ['done', 'failed', 'cancelled', 'stale'],
+  // Not a status view: the partitions' files, rules and memory.
+  workspace: [],
 }
 
 /** Caption key per group. */
@@ -447,6 +454,7 @@ const STYLE = `${BOARD_TOKENS_CSS}
 .dshrc-ico[data-busy] svg{animation:dshrc-spin .8s linear infinite}
 @keyframes dshrc-spin{to{transform:rotate(360deg)}}
 .dshrc-row[data-link]:focus-visible{outline:2px solid var(--c-focus);outline-offset:-2px}
+.dshrc-ws{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
 .dshrc-list{flex:1 1 auto;min-height:0;overflow:auto;padding:0 var(--sp-1) 24px;scrollbar-width:thin}
 .dshrc-group{margin-top:var(--sp-4)}
 .dshrc-group+.dshrc-group{padding-top:var(--sp-3);margin-top:var(--sp-1);border-top:1px solid var(--c-line-soft)}
@@ -1393,9 +1401,9 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
             )}
           </button>
         ))}
-        <input className="dshrc-find" type="search" value={query} placeholder={t('board.find')} aria-label={t('board.find')}
+        {tab !== 'workspace' && <input className="dshrc-find" type="search" value={query} placeholder={t('board.find')} aria-label={t('board.find')}
           onChange={(event) => { setQuery(event.target.value) }}
-          onKeyDown={(event) => { if (event.key === 'Escape') setQuery('') }} />
+          onKeyDown={(event) => { if (event.key === 'Escape') setQuery('') }} />}
       </div>
       {failed && (
         <div className="dshrc-err" role="alert" data-router-error>
@@ -1414,6 +1422,14 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
       {notice !== null && (
         <div className="dshrc-notice" role="status" data-tone={notice.tone}>{notice.text}</div>
       )}
+      {tab === 'workspace'
+        ? (
+            <div className="dshrc-ws">
+              <WorkspacePage controller={controller} t={t} embedded
+                {...onOpenSession === undefined ? {} : { onOpenSession }} />
+            </div>
+          )
+        : (
       <div className="dshrc-list">
         <ApprovalsSection controller={controller} t={t} titleOf={model.titleOf} nameOf={model.nameOf}
           refreshKey={board?.fetchedAt ?? ''} />
@@ -1445,6 +1461,7 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
               </>
             )}
       </div>
+          )}
       {movingTask !== undefined && moving !== null && (
         <ReassignDialog controller={controller} t={t} task={movingTask} partitions={model.partitions} focus={moving.focus}
           onClose={() => { setMoving(null) }}

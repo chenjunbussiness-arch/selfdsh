@@ -2,13 +2,20 @@
  * Right-Sidebar task board: a progress tree, styled after Claude Duet's rail.
  *
  * One quiet column: a titled header with icon-only actions, a pill segment strip
- * (进行中 / 接下来 / 排程任务 / 已结束), then status groups. A group caption counts
+ * (进行中 / 已结束 / 工作区), then status groups. A group caption counts
  * task *families*, and each family is one row — the manager's task — with the
  * workers it dispatched indented underneath behind a `n 个 worker` chip. Rows
  * never repeat a work item as two siblings.
  *
- * The groups are 进行中, 已暂停（需要处理）, 已挂起（等前置）, 排队中, 已失效分区,
- * 已完成, 失败 and 已取消. A parked (`blocked`) row carries a second line with its
+ * 进行中 holds 进行中, 已暂停（需要处理）, 已挂起（等前置） and 排队（等前置或名额）;
+ * 已结束 holds 已完成, 失败, 已取消 and 已失效分区. 工作区 is the partitions' files,
+ * rules, open tasks and memory ({@link WorkspacePage} in its embedded form).
+ *
+ * There used to be 接下来 and 排程任务 tabs. 接下来 only ever held queued rows,
+ * which with the usual unlimited slots exist only while a staged task waits on
+ * its prerequisites; 排程任务 had no producer at all (the router has no
+ * scheduler) and in fact listed rows of removed partitions. Both now live as a
+ * group inside the tab they belong to. A parked (`blocked`) row carries a second line with its
  * reason and a 恢复 button that sends `task_control resume`; a suspended row
  * says what it waits for, and a queued row held back by the task order says
  * which prerequisites are still open. Live rows offer 挂起 (with an optional
@@ -48,7 +55,7 @@ export interface CompactBoardProps {
     readonly sessions?: SessionsFace;
 }
 /** A tab of the segment strip. */
-export type BoardTab = 'active' | 'next' | 'scheduled' | 'resolved';
+export type BoardTab = 'active' | 'resolved' | 'workspace';
 /**
  * A status bucket rendered under one caption inside a tab.
  *
