@@ -105,7 +105,7 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 
 - CLI 只读写 `controllers.json`，不碰 `state.json`，所以**服务运行时也可以执行**。服务每次处理控制方请求时都会重新读取 `controllers.json`，在 mutation 内部还会再读一次，所以 `add` 和 `revoke` 不需要重启就能生效。
 - `add` 一个已经存在且未吊销的 id 会报错。要换令牌，先 `revoke` 再 `add`，旧令牌会立即失效。
-- 拿到的令牌放到控制方那边（环境变量 `DSH_HUB_TOKEN` 或 dsh-secrets），不要写进仓库。
+- 拿到的令牌放到控制方那边（DSH 进程的环境变量 `DSH_HUB_TOKEN`，或控制方插件默认读取的 `<DSH home>/agent-hub/controller.env`，chmod 600），不要写进仓库。**不要写进 `<DSH home>/.env`**：DSH 不允许那里出现 `DSH_` 开头的变量，会拒绝启动。
 - 退出码：0 成功，1 操作失败（id 不合法、已存在、不存在），2 用法错误。
 
 ## 5. 接口（前缀 `/v1`，端口 7891）

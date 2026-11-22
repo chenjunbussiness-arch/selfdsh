@@ -104,13 +104,20 @@ grep 'dsh-secrets:' /var/log/dsh-web.log | tail -1
 
 ### 1.4 把口令交给 DSH 服务进程
 
-**推荐：写进 `<DSH home>/.env`（默认 `/root/.dsh/.env`），插件自己读取。**
+**推荐：写进 `<DSH home>/secrets.env`（默认 `/root/.dsh/secrets.env`），插件自己读取。**
 
 ```bash
-install -m 600 /dev/null /root/.dsh/.env        # 已存在就跳过这一步
-echo "DSH_SECRETS_PASSPHRASE='你的口令'" >> /root/.dsh/.env
-chmod 600 /root/.dsh/.env
+install -m 600 /dev/null /root/.dsh/secrets.env        # 已存在就跳过这一步
+echo "DSH_SECRETS_PASSPHRASE='你的口令'" >> /root/.dsh/secrets.env
+chmod 600 /root/.dsh/secrets.env
 ```
+
+> ⚠ **不要写进 `<DSH home>/.env`（`/root/.dsh/.env`）。** 那是 DSH 自己的凭据文件，DSH 不允许
+> 里面出现任何 `DSH_` 开头的变量：只要有一行 `DSH_SECRETS_PASSPHRASE=...`，DSH 启动时就报
+> `... sets "DSH_SECRETS_PASSPHRASE", which only the launching environment may set ...` 并退出。
+> 插件发现 `envFile` 指向 `<DSH home>/.env` 且 `passphraseEnv` 以 `DSH_` 开头时不会读它，
+> 只在日志里提醒一次（不打印任何值）。已经写进去的：把那一行挪到 `<DSH home>/secrets.env`
+> （或 systemd `EnvironmentFile`），再从 `<DSH home>/.env` 删掉。
 
 - 查找顺序：① 进程环境变量 `DSH_SECRETS_PASSPHRASE`（非空才算）→ ② `envFile` 里的同名行。
 - `.env` 修改后自动生效（按文件修改时间和大小检测），不用重启。
@@ -219,7 +226,7 @@ config 里的未知键会抛 `dsh-host-secrets config: unknown key <key>`；类�
 | `vaultPath` | `<DSH_HOME>/secrets.vault` | vault 文件路径，会被 `resolve()` 成绝对路径 |
 | `keySource` | `passphrase-env` | 只能是 `passphrase-env` 或 `keyfile` |
 | `passphraseEnv` | `DSH_SECRETS_PASSPHRASE` | 存放主口令的环境变量名 |
-| `envFile` | `<DSH home>/.env` | 读取口令的 dotenv 文件；`false` 表示只看进程环境变量 |
+| `envFile` | `<DSH home>/secrets.env` | 读取口令的 dotenv 文件；`false` 表示只看进程环境变量。不能是 `<DSH home>/.env`（DSH 不允许那里出现 `DSH_` 开头的变量，会拒绝启动；插件对 `DSH_*` 变量名不读该文件并告警） |
 | `keyfilePath` | `<DSH_HOME>/secrets.key` | `keySource: keyfile` 时使用 |
 | `scryptN` / `scryptR` / `scryptP` | 32768 / 8 / 1 | N 必须是 2 的幂，1024–1048576；r 1–32；p 1–16 |
 | `maxOutputChars` | 65536 | exec/http 输出截断长度，256–10000000 |

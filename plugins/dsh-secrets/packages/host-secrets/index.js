@@ -16,7 +16,7 @@ import { BRIDGE_BASE, createRoutes, requireLogin } from './bridge.js'
 import { resolveConfig } from './config.js'
 import { createRedactor } from './redact.js'
 import { createTools } from './tools.js'
-import { createEnvSource } from './env-file.js'
+import { RESERVED_ENV_RE, createEnvSource, isDshDotEnv } from './env-file.js'
 import { Vault } from './vault.js'
 
 export const name = 'dsh-host-secrets'
@@ -77,7 +77,13 @@ export function apply(ctx, rawConfig) {
     scrypt: config.scrypt,
     lockTimeoutMs: config.lockTimeoutMs,
     lockStaleMs: config.lockStaleMs,
-    env: createEnvSource({ file: config.envFile, logger: ctx.logger }),
+    // <DSH home>/.env is never read for DSH_* names (DSH refuses to start on them); warns once.
+    env: createEnvSource({
+      file: config.envFile,
+      logger: ctx.logger,
+      dshHome: config.dshHome,
+      names: config.keySource === 'passphrase-env' ? [config.passphraseEnv] : [],
+    }),
   })
   for (const tool of createTools({ vault, config, logger: ctx.logger })) {
     ctx.effect(() => ctx.tools.register(tool))
@@ -91,7 +97,7 @@ export function apply(ctx, rawConfig) {
   }
   mountBridge(ctx, vault)
   ctx.logger?.info?.(`dsh-secrets: vault ${config.vaultPath} (keySource ${config.keySource}`
-    + (config.keySource === 'passphrase-env' ? `, passphrase from $${config.passphraseEnv} or ${config.envFile ?? '(no env file)'}` : `, keyfile ${config.keyfilePath}`)
+    + (config.keySource === 'passphrase-env' ? `, passphrase from $${config.passphraseEnv} or ${config.envFile === null ? '(no env file)' : isDshDotEnv(config.envFile, config.dshHome) && RESERVED_ENV_RE.test(config.passphraseEnv) ? `(not ${config.envFile}: DSH's own .env)` : config.envFile}` : `, keyfile ${config.keyfilePath}`)
     + '), 10 tools registered')
 }
 

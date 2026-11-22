@@ -18,6 +18,12 @@
  *
  * Values are never logged here; callers only learn which keys exist.
  *
+ * Which file: `<DSH home>/agent-hub/controller.env` by default (config `envFile`).
+ * Do NOT point it at `<DSH home>/.env` with a `DSH_*` variable: that is DSH's own
+ * credential file, and DSH refuses to start when it contains any `DSH_*` line
+ * ("only the launching environment may set" those). hub-client.js skips such a
+ * file and warns; this reader itself does not care which path it gets.
+ *
  * @module host-agent-hub/env-file
  */
 

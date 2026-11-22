@@ -103,7 +103,7 @@ node server.mjs controller list | revoke <id>
 ## 6. DSH 插件（控制方）
 
 `plugins/dsh-agent-hub` 变成 hub 的**客户端**：
-- 配置 `hubUrl`（如 `https://<服务器>:7891`）、`controllerId`、可选 `proxy`（MYDESK 上的 dsh-local 填 `http://127.0.0.1:7890`；和 hub 同机的 dsh-cloud 用 `https://127.0.0.1:7891` 直连（配 `caFile`，证书 SAN 含 127.0.0.1），不填）；令牌从环境变量 `DSH_HUB_TOKEN` 读，或写进 `<DSH home>/.env`。
+- 配置 `hubUrl`（如 `https://<服务器>:7891`）、`controllerId`、可选 `proxy`（MYDESK 上的 dsh-local 填 `http://127.0.0.1:7890`；和 hub 同机的 dsh-cloud 用 `https://127.0.0.1:7891` 直连（配 `caFile`，证书 SAN 含 127.0.0.1），不填）；令牌从环境变量 `DSH_HUB_TOKEN` 读，或写进 `<DSH home>/agent-hub/controller.env`（插件默认的 `envFile`，chmod 600）。**不能写进 `<DSH home>/.env`**：DSH 不允许那里出现任何 `DSH_` 开头的变量，会拒绝启动。
 - 11 个工具不变，内部改成调 `/v1/ctl/*`；`task_dispatch` 多了 `workspace` / `node` / `ref` 参数。
 - 面板接口 `/api/agent-hub/admin/*` 保持原路径和返回结构，由插件转发到 hub。
 

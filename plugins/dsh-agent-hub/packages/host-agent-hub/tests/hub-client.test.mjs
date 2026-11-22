@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CONFIG_CODES, DEFAULT_TIMEOUT_MS, HubError, PROTOCOL, TOKEN_ENV, TOKEN_HEADER, createHubClient, redact, resolveConfig } from '../hub-client.js'
+import { CONFIG_CODES, DEFAULT_TIMEOUT_MS, HubError, PROTOCOL, TOKEN_ENV, TOKEN_HEADER, comparablePath, createHubClient, defaultEnvFile, isDshCredentialsFile, redact, resolveConfig } from '../hub-client.js'
 import { CONTROLLER, HUB_URL, TOKEN, assertNoToken, expectHubError, fakeFs, fakeHub, fakeLogger, makeClient } from './helpers.mjs'
 
 const ok = body => ({ body })
@@ -76,14 +76,16 @@ test('resolveConfig: every problem is reported, nothing throws', () => {
   }
 })
 
-test('resolveConfig: tokenEnv and envFile defaults (<DSH home>/.env)', () => {
+test('resolveConfig: tokenEnv and envFile defaults (<DSH home>/agent-hub/controller.env)', () => {
   const join = (...p) => p.join('/').replace(/\\/g, '/')
   const norm = x => x.replace(/\\/g, '/')
   const d = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x' }, { env: {}, homedir: () => '/home/u' })
   assert.equal(d.tokenEnv, 'DSH_HUB_TOKEN')
-  assert.equal(norm(d.envFile), join('/home/u', '.dsh', '.env'))
+  assert.equal(norm(d.envFile), join('/home/u', '.dsh', 'agent-hub', 'controller.env'))
+  assert.equal(d.envFileBlocked, false)
+  assert.deepEqual(d.warnings, [], 'the default file is not DSH\'s .env: no warning')
   const h = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x' }, { env: { DSH_HOME: '/srv/dsh' }, homedir: () => '/home/u' })
-  assert.equal(norm(h.envFile), '/srv/dsh/.env')
+  assert.equal(norm(h.envFile), '/srv/dsh/agent-hub/controller.env')
   const c = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', tokenEnv: 'HUB_TOKEN_CLOUD', envFile: ' /etc/dsh/hub.env ' }, { env: { DSH_HOME: '/srv/dsh' } })
   assert.equal(c.tokenEnv, 'HUB_TOKEN_CLOUD')
   assert.equal(c.envFile, '/etc/dsh/hub.env')
@@ -345,7 +347,7 @@ test('redact / scrub', () => {
 // --- token sources: environment first, then the .env file ----------------------------
 
 const FILE_TOKEN = 'dshc_dsh-test_FromTheDotEnvFile0123456789'
-const ENV_FILE = '/srv/dsh/.env'
+const ENV_FILE = '/srv/dsh/agent-hub/controller.env'
 
 test('token priority: process env wins, the .env file is the fallback, the file is never read when env has it', async () => {
   const fs = fakeFs({ [ENV_FILE]: `# hub\nDSH_HUB_TOKEN=${FILE_TOKEN}\n` })
@@ -366,12 +368,13 @@ test('token priority: process env wins, the .env file is the fallback, the file 
   assert.equal(calls.at(-1).headers['X-DSH-Token'], FILE_TOKEN, 'an empty env value falls back to the file')
 })
 
-test('envFile default is <DSH_HOME>/.env, else ~/.dsh/.env; an explicit envFile overrides', async () => {
-  const home = fakeFs({ '/home/test/.dsh/.env': `DSH_HUB_TOKEN=${FILE_TOKEN}` })
+test('envFile default is <DSH_HOME>/agent-hub/controller.env, else ~/.dsh/agent-hub/controller.env; an explicit envFile overrides', async () => {
+  const home = fakeFs({ '/home/test/.dsh/agent-hub/controller.env': `DSH_HUB_TOKEN=${FILE_TOKEN}`, '/home/test/.dsh/.env': 'DSH_HUB_TOKEN=dshc_dsh-test_NeverReadFromDshDotEnv000' })
   const a = makeClient(() => ok({ agents: [] }), { env: {}, fs: home })
-  assert.equal(a.client.config.envFile.replace(/\\/g, '/'), '/home/test/.dsh/.env')
+  assert.equal(a.client.config.envFile.replace(/\\/g, '/'), '/home/test/.dsh/agent-hub/controller.env')
   await a.client.listAgents()
   assert.equal(a.calls[0].headers['X-DSH-Token'], FILE_TOKEN)
+  assert.ok(!home.reads.includes('/home/test/.dsh/.env'), 'DSH\'s own .env is not read by default')
 
   const explicit = fakeFs({ '/etc/dsh/hub.env': `export DSH_HUB_TOKEN='${FILE_TOKEN}'` })
   const b = makeClient(() => ok({ agents: [] }), { env: { DSH_HOME: '/nowhere' }, fs: explicit, envFile: '/etc/dsh/hub.env' })
@@ -418,10 +421,87 @@ test('a group/other-readable .env warns once (POSIX), is still used, and no valu
   assert.equal(calls.length, 2, 'a loose file is still used')
   const warns = logger.lines.filter(l => l.startsWith('warn '))
   assert.equal(warns.length, 1, 'warned once')
-  assert.match(warns[0], /readable by group or others \(mode 644\); run: chmod 600 \/srv\/dsh\/\.env/)
+  assert.match(warns[0], /readable by group or others \(mode 644\); run: chmod 600 \/srv\/dsh\/agent-hub\/controller\.env/)
   for (const line of [...logger.lines, error.message]) assert.ok(!line.includes(FILE_TOKEN) && !line.includes('FromTheDotEnv'), line)
 
   const win = makeClient(() => ok({ agents: [] }), { env: { DSH_HOME: '/srv/dsh' }, fs, logger: fakeLogger(), platform: 'win32' })
   await win.client.listAgents()
   assert.deepEqual(win.logger.lines.filter(l => l.startsWith('warn ')), [], 'no POSIX mode check on Windows')
+})
+
+// --- <DSH home>/.env is DSH's own credential file: no DSH_* variable may come from it ---
+
+const DSH_DOT_ENV = '/srv/dsh/.env'
+const DOT_ENV_TOKEN = 'dshc_dsh-test_FromDshOwnDotEnv0123456789'
+
+test('defaultEnvFile / comparablePath / isDshCredentialsFile', () => {
+  assert.equal(defaultEnvFile({ DSH_HOME: '/srv/dsh' }).replace(/\\/g, '/'), '/srv/dsh/agent-hub/controller.env')
+  assert.equal(defaultEnvFile({}, () => '/home/u').replace(/\\/g, '/'), '/home/u/.dsh/agent-hub/controller.env')
+  assert.equal(comparablePath('C:\\Users\\Me\\.DSH\\.\\x\\..\\.env\\'), 'c:/users/me/.dsh/.env')
+  assert.equal(comparablePath('/srv//dsh/./.env'), '/srv/dsh/.env')
+  const env = { DSH_HOME: '/srv/dsh' }
+  for (const p of ['/srv/dsh/.env', '/srv/dsh//.env', '/srv/dsh/./.env', '/srv/dsh/agent-hub/../.env', '/SRV/DSH/.ENV', '\\srv\\dsh\\.env', ' /srv/dsh/.env/ ']) assert.equal(isDshCredentialsFile(p, env), true, p)
+  for (const p of ['/srv/dsh/agent-hub/controller.env', '/srv/dsh/.env.bak', '/srv/.env', '/srv/dsh/worker/.env', '/srv/dsh2/.env']) assert.equal(isDshCredentialsFile(p, env), false, p)
+})
+
+test('envFile = <DSH home>/.env with tokenEnv DSH_HUB_TOKEN: the file is never read, a migration warning is given', async () => {
+  const fs = fakeFs({ [DSH_DOT_ENV]: `DSH_HUB_TOKEN=${DOT_ENV_TOKEN}\n` })
+  const logger = fakeLogger()
+  const env = { DSH_HOME: '/srv/dsh' }
+  const { client, calls } = makeClient(() => ok({ agents: [] }), { env, fs, logger, envFile: DSH_DOT_ENV })
+  assert.equal(client.config.envFileBlocked, true)
+  const warning = client.config.warnings.join('\n')
+  assert.match(warning, /DSH 不允许 <DSH home>\/\.env 里出现 DSH_ 开头的变量（会拒绝启动）/)
+  assert.match(warning, /把 DSH_HUB_TOKEN 移到 <DSH home>\/agent-hub\/controller\.env/)
+  assert.match(warning, /或改用其他变量名/)
+  assert.ok(!warning.includes(DOT_ENV_TOKEN))
+  assert.equal(client.tokenSource(), undefined, 'value from DSH\'s .env is not adopted')
+  const error = await expectHubError(() => client.listAgents(), 503, 'hub-token-missing')
+  assert.match(error.message, /not read for DSH_\* names/)
+  assert.match(error.message, /agent-hub\/controller\.env/)
+  assert.deepEqual(fs.reads, [], 'readFileSync was never called on DSH\'s .env')
+  assert.equal(calls.length, 0)
+  for (const line of [...logger.lines, error.message]) assert.ok(!line.includes('FromDshOwnDotEnv'), line)
+
+  // the process environment still works
+  env.DSH_HUB_TOKEN = TOKEN
+  await client.listAgents()
+  assert.equal(calls.at(-1).headers['X-DSH-Token'], TOKEN)
+  assert.deepEqual(fs.reads, [])
+})
+
+test('the guard also matches Windows paths (backslashes, other case) and ~/.dsh without DSH_HOME', async () => {
+  const winHome = 'C:\\Users\\13558\\.dsh'
+  for (const envFile of ['c:\\users\\13558\\.DSH\\.env', 'C:/Users/13558/.dsh/.env', 'C:\\Users\\13558\\.dsh\\agent-hub\\..\\.ENV']) {
+    const fs = fakeFs({ [envFile]: `DSH_HUB_TOKEN=${DOT_ENV_TOKEN}` })
+    const { client } = makeClient(() => ok({ agents: [] }), { env: { DSH_HOME: winHome }, fs, envFile, platform: 'win32' })
+    assert.equal(client.config.envFileBlocked, true, envFile)
+    assert.match(client.config.warnings.join(), /DSH 不允许/, envFile)
+    await expectHubError(() => client.listAgents(), 503, 'hub-token-missing')
+    assert.deepEqual(fs.reads, [], envFile)
+  }
+  // lower-case dsh_ prefix is reserved too (Windows variable names are case-insensitive)
+  const lower = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: 'C:\\Users\\13558\\.dsh\\.env', tokenEnv: 'dsh_hub_token' }, { env: { DSH_HOME: winHome } })
+  assert.equal(lower.envFileBlocked, true)
+  // no DSH_HOME: ~/.dsh/.env is DSH's file
+  const home = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: '/home/u/.dsh/.env' }, { env: {}, homedir: () => '/home/u' })
+  assert.equal(home.envFileBlocked, true)
+  // a different DSH home: /home/u/.dsh/.env is then just some file
+  const other = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: '/home/u/.dsh/.env' }, { env: { DSH_HOME: '/srv/dsh' }, homedir: () => '/home/u' })
+  assert.equal(other.envFileBlocked, false)
+  assert.deepEqual(other.warnings, [])
+})
+
+test('tokenEnv AGENT_HUB_TOKEN may be read from <DSH home>/.env, with a weaker warning', async () => {
+  const fs = fakeFs({ [DSH_DOT_ENV]: `AGENT_HUB_TOKEN=${FILE_TOKEN}\n` })
+  const { client, calls } = makeClient(() => ok({ agents: [] }), { env: { DSH_HOME: '/srv/dsh' }, fs, envFile: DSH_DOT_ENV, tokenEnv: 'AGENT_HUB_TOKEN' })
+  assert.equal(client.config.envFileBlocked, false)
+  const warning = client.config.warnings.join('\n')
+  assert.match(warning, /DSH 凭据层/)
+  assert.match(warning, /agent-hub\/controller\.env/)
+  assert.doesNotMatch(warning, /DSH 不允许/)
+  assert.equal(client.tokenSource(), 'envFile')
+  await client.listAgents()
+  assert.equal(calls[0].headers['X-DSH-Token'], FILE_TOKEN)
+  assert.ok(fs.reads.length >= 1 && fs.reads.every(p => p === DSH_DOT_ENV), 'read from <DSH home>/.env')
 })

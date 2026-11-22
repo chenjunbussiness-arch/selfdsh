@@ -17,7 +17,11 @@
 # 位置类
 #   vaultPath        加密库文件（<DSH home>/secrets.vault）。DSH home = $DSH_HOME，未设时为 ~/.dsh
 #   keyfilePath      keySource=keyfile 时的密钥文件，权限必须 600（<DSH home>/secrets.key）
-#   envFile          读取主口令的 dotenv 文件（<DSH home>/.env）；写 false 表示只看进程环境变量
+#   envFile          读取主口令的 dotenv 文件（<DSH home>/secrets.env）；写 false 表示只看进程环境变量
+#                    ⚠ 不要指向 <DSH home>/.env：那是 DSH 自己的凭据文件，里面只要出现
+#                    DSH_ 开头的变量（包括 DSH_SECRETS_PASSPHRASE），DSH 就会拒绝启动
+#                    （"only the launching environment may set ..."）。插件发现 envFile 是
+#                    <DSH home>/.env 且 passphraseEnv 以 DSH_ 开头时不读它，并在日志里提醒一次。
 # 主密钥来源
 #   keySource        passphrase-env（默认）：口令来自 passphraseEnv 指定的变量
 #                    keyfile：读 keyfilePath，不需要口令
@@ -38,10 +42,12 @@
 #   lockTimeoutMs        10000
 #   lockStaleMs          30000
 #
-# .env 示例（/root/.dsh/.env，chmod 600；DSH 凭据层也读这个文件，可以共用）：
+# envFile 示例（/root/.dsh/secrets.env，chmod 600；这是插件自己的文件，DSH 不读它）：
+#   install -m 600 /dev/null /root/.dsh/secrets.env
 #   # dsh-secrets 主口令
 #   DSH_SECRETS_PASSPHRASE='一串足够长的随机口令'
-#   KIRO_API_KEY=...
+# 警告：不要把 DSH_ 开头的变量写进 <DSH home>/.env（/root/.dsh/.env），DSH 会拒绝启动；
+# 那个文件只放 DSH 凭据层自己的键（如 KIRO_API_KEY），不要和本插件共用。
 # 格式：KEY=值；# 开头是注释；可带 export 前缀；值可用单/双引号（双引号里支持 \n \t \" \\）；
 # 不加引号时 " #" 之后算注释。
 #
@@ -53,7 +59,7 @@
       config:
         keySource: passphrase-env
         passphraseEnv: DSH_SECRETS_PASSPHRASE
-        # envFile / vaultPath 不写就用默认的 <DSH home>/.env、<DSH home>/secrets.vault
+        # envFile / vaultPath 不写就用默认的 <DSH home>/secrets.env、<DSH home>/secrets.vault（envFile 绝不能是 <DSH home>/.env）
         redactToolOutput: true
     - id: client-ui-secrets
       name: dsh-client-ui-secrets

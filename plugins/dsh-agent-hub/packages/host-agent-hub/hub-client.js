@@ -23,9 +23,16 @@
  *
  * Token, looked up on every call (no restart needed after rotating it):
  *   1. the process environment variable named by `tokenEnv` (default DSH_HUB_TOKEN);
- *   2. otherwise the `<tokenEnv>=...` line of the `.env` file `envFile`
- *      (default `<DSH home>/.env`, DSH home = $DSH_HOME or ~/.dsh); a missing file is
- *      skipped silently, a file readable by group/others on POSIX gets a warning.
+ *   2. otherwise the `<tokenEnv>=...` line of the `.env`-format file `envFile`
+ *      (default `<DSH home>/agent-hub/controller.env`, DSH home = $DSH_HOME or ~/.dsh);
+ *      a missing file is skipped silently, a file readable by group/others on POSIX
+ *      gets a warning.
+ *   NOT `<DSH home>/.env`: that file is DSH's own credential file, and DSH refuses
+ *   to start when it sets ANY `DSH_*` variable (those may only come from the
+ *   launching environment). So when `envFile` resolves to `<DSH home>/.env`
+ *   (compared normalized, case-insensitively, `\` == `/`) and `tokenEnv` starts
+ *   with `DSH_`, the file is NOT read and resolveConfig() warns how to migrate;
+ *   with another variable name it is read, with a weaker warning.
  * The value is never logged, never part of an error message, a tool output or a
  * panel response: every message that leaves this module goes through `redact()`,
  * which masks the configured token and anything shaped like `dshc_...` / `dsha_...`.
@@ -91,11 +98,51 @@ export function redact(value, token) {
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 
-/** `<DSH home>/.env`, DSH home = $DSH_HOME or ~/.dsh. */
-export function defaultEnvFile(env = globalThis.process?.env ?? {}, home = homedir) {
-  const dshHome = typeof env.DSH_HOME === 'string' && env.DSH_HOME.trim() !== '' ? env.DSH_HOME.trim() : join(home(), '.dsh')
-  return join(dshHome, '.env')
+/** DSH home = $DSH_HOME or ~/.dsh. */
+export function dshHomeDir(env = globalThis.process?.env ?? {}, home = homedir) {
+  return typeof env.DSH_HOME === 'string' && env.DSH_HOME.trim() !== '' ? env.DSH_HOME.trim() : join(home(), '.dsh')
 }
+
+/** Default envFile: `<DSH home>/agent-hub/controller.env` (a file of its own, NOT DSH's `.env`). */
+export function defaultEnvFile(env = globalThis.process?.env ?? {}, home = homedir) {
+  return join(dshHomeDir(env, home), 'agent-hub', 'controller.env')
+}
+
+/**
+ * `<DSH home>/.env`: DSH's OWN credential file. DSH refuses to start when it sets
+ * any `DSH_*` variable ("only the launching environment may set" those).
+ */
+export function dshCredentialsFile(env = globalThis.process?.env ?? {}, home = homedir) {
+  return join(dshHomeDir(env, home), '.env')
+}
+
+/**
+ * Comparable form of a path: `\` -> `/`, empty / `.` segments dropped, `..` applied,
+ * no trailing separator, lower case (Windows paths are case-insensitive).
+ */
+export function comparablePath(path) {
+  const text = String(path ?? '').trim().replace(/\\/g, '/')
+  const absolute = text.startsWith('/')
+  const out = []
+  for (const segment of text.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') {
+      if (out.length > 0 && out.at(-1) !== '..') out.pop()
+      else if (!absolute) out.push('..')
+      continue
+    }
+    out.push(segment)
+  }
+  return `${absolute ? '/' : ''}${out.join('/')}`.toLowerCase()
+}
+
+/** True when `path` is `<DSH home>/.env` (normalized, case-insensitive, either separator). */
+export function isDshCredentialsFile(path, env = globalThis.process?.env ?? {}, home = homedir) {
+  return comparablePath(path) === comparablePath(dshCredentialsFile(env, home))
+}
+
+/** DSH reserves every `DSH_*` name for the launching environment (case-insensitive, as on Windows). */
+export const RESERVED_ENV_RE = /^DSH_/i
 
 /**
  * Validate the plugin config. Never throws: returns `{ problems }` (fatal: every
@@ -136,9 +183,22 @@ export function resolveConfig(config = {}, deps = {}) {
     if (typeof config.tokenEnv !== 'string' || !ENV_NAME_RE.test(config.tokenEnv.trim())) warnings.push(`config.tokenEnv must be a variable name like ${TOKEN_ENV}; using ${TOKEN_ENV}`)
     else tokenEnv = config.tokenEnv.trim()
   }
+  const homeEnv = deps.env ?? globalThis.process?.env ?? {}
+  const homeFn = deps.homedir ?? homedir
+  const recommendedEnvFile = defaultEnvFile(homeEnv, homeFn)
   const envFile = typeof config.envFile === 'string' && config.envFile.trim() !== ''
     ? config.envFile.trim()
-    : defaultEnvFile(deps.env ?? globalThis.process?.env ?? {}, deps.homedir ?? homedir)
+    : recommendedEnvFile
+  // <DSH home>/.env belongs to DSH itself: a DSH_* line there makes DSH refuse to start.
+  let envFileBlocked = false
+  if (isDshCredentialsFile(envFile, homeEnv, homeFn)) {
+    if (RESERVED_ENV_RE.test(tokenEnv)) {
+      envFileBlocked = true
+      warnings.push(`config.envFile ${envFile} is DSH's own <DSH home>/.env and is NOT read for ${tokenEnv}: DSH 不允许 <DSH home>/.env 里出现 DSH_ 开头的变量（会拒绝启动）；把 ${tokenEnv} 移到 <DSH home>/agent-hub/controller.env（${recommendedEnvFile}），或改用其他变量名`)
+    } else {
+      warnings.push(`config.envFile ${envFile} is DSH's own <DSH home>/.env (DSH 凭据层的文件); ${tokenEnv} is read from it, but a separate file is safer: <DSH home>/agent-hub/controller.env (${recommendedEnvFile})`)
+    }
+  }
   const proxy = proxySetting(config.proxy)
   if (proxy.mode === 'invalid') problems.push(proxy.problem)
   else if (proxy.mode !== 'direct' && base?.protocol === 'http:') warnings.push('config.proxy is ignored: an http:// hubUrl is a loopback hub, never proxied')
@@ -149,6 +209,9 @@ export function resolveConfig(config = {}, deps = {}) {
     warnings,
     tokenEnv,
     envFile,
+    /** true: envFile is `<DSH home>/.env` and tokenEnv is a DSH_* name, so the file is never read. */
+    envFileBlocked,
+    recommendedEnvFile,
     hubUrl: base === undefined ? undefined : `${base.origin}${basePath}`,
     origin: base?.origin,
     basePath,
@@ -160,6 +223,12 @@ export function resolveConfig(config = {}, deps = {}) {
     proxyMode: proxy.mode,
     proxy: proxy.mode === 'url' ? proxy.proxy.display : proxy.mode === 'env' ? 'env' : undefined,
   }
+}
+
+/** `<tokenEnv> is not set (...)`, naming where it was looked for (no value). */
+export function tokenMissingMessage(config) {
+  if (config.envFileBlocked) return `${config.tokenEnv} is not set (not in the environment; ${config.envFile} is DSH's own .env and is not read for DSH_* names, use ${config.recommendedEnvFile})`
+  return `${config.tokenEnv} is not set (neither in the environment nor in ${config.envFile})`
 }
 
 /** Network error codes worth naming in the message (no secrets in these). */
@@ -217,6 +286,7 @@ export function createHubClient(options = {}) {
   function lookupToken() {
     const fromEnv = env[config.tokenEnv]
     if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return { value: fromEnv.trim(), source: 'env' }
+    if (config.envFileBlocked) return { value: undefined, source: undefined } // DSH's own .env: never read for DSH_*
     const file = readEnvFile(config.envFile, { fs, platform })
     if (file.warning !== undefined) warnOnce(file.warning)
     const fromFile = file.values[config.tokenEnv]
@@ -241,7 +311,7 @@ export function createHubClient(options = {}) {
   function ensureReady() {
     if (!config.ok) throw new HubError(503, 'hub-not-configured', `agent-hub is not configured: ${config.problems.join('; ')}`)
     const value = token()
-    if (value === undefined) throw new HubError(503, 'hub-token-missing', `${config.tokenEnv} is not set (neither in the environment nor in ${config.envFile}): issue a controller token on the hub machine (node server.mjs controller add ${config.controllerId}) and put it into the DSH service environment or that .env file`)
+    if (value === undefined) throw new HubError(503, 'hub-token-missing', `${tokenMissingMessage(config)}: issue a controller token on the hub machine (node server.mjs controller add ${config.controllerId}) and put it into the DSH service environment or ${config.envFileBlocked ? config.recommendedEnvFile : 'that env file'} (never into <DSH home>/.env: DSH refuses to start on DSH_* lines there)`)
     if (!value.startsWith(`dshc_${config.controllerId}_`)) throw new HubError(503, 'hub-token-mismatch', `${config.tokenEnv} is not a controller token of "${config.controllerId}" (expected dshc_${config.controllerId}_...)`)
     return value
   }

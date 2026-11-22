@@ -69,6 +69,9 @@ Two files live there, both optional and never committed:
                 as in the DSH plugin's env-file. It names the token FILE, never the token;
                 still keep it private (chmod 600; on POSIX a file readable by group or
                 others gets a warning).
+                These DSH_HUB_* / DSH_AGENT_* variables may live ONLY in this
+                worker/.env or in the process environment, never in <DSH home>/.env:
+                DSH itself refuses to start when its own .env sets any DSH_* variable.
   profile.json  this machine and its workspaces (keys below). When it is missing, a
                 legacy workspaces.json in the same folder is read instead (with a
                 migration hint), e.g. ~/.dsh/worker/workspaces.json.
@@ -1509,6 +1512,8 @@ def _proxy_source(st):
 
 ENV_TEMPLATE = """\
 # dsh-hub worker settings of this machine: <DSH home>/worker/.env (keep it private: chmod 600).
+# These DSH_HUB_* / DSH_AGENT_* settings belong ONLY here or in the process environment, never in
+# <DSH home>/.env: DSH itself refuses to start when its own .env sets any DSH_* variable.
 # Priority: command line > process environment > this file > profile.json > default.
 # Relative paths are relative to this folder. Reference: python agent_client.py --help
 

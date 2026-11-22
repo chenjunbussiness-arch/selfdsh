@@ -151,3 +151,26 @@ test('token from a real .env file (tokenEnv renamed): used for calls, only its s
   assert.equal(res.json().error.code, 'hub-unreachable', 'the token was found, the (dead) hub was contacted')
   assertNoToken(fake.logger.lines, res.text)
 })
+
+test('envFile = <DSH home>/.env with DSH_HUB_TOKEN: a real file there is not read, the startup log says how to migrate', async (t) => {
+  withToken(t, undefined)
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-agent-hub-home-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const env = globalThis.process.env
+  const previousHome = env.DSH_HOME
+  env.DSH_HOME = dir
+  t.after(() => {
+    if (previousHome === undefined) delete env.DSH_HOME
+    else env.DSH_HOME = previousHome
+  })
+  const file = join(dir, '.env')
+  await writeFile(file, `DSH_HUB_TOKEN=${TOKEN}\n`, { mode: 0o600 })
+  const fake = mount(t, { connection: { requestRejection: () => undefined } }, { ...DEAD_HUB, envFile: file })
+  const w = warns(fake)
+  assert.ok(w.some(l => l.includes('DSH 不允许 <DSH home>/.env 里出现 DSH_ 开头的变量（会拒绝启动）') && l.includes('agent-hub/controller.env')), w.join('\n'))
+  assert.ok(w.some(l => l.includes('DSH_HUB_TOKEN is not set') && l.includes('not read for DSH_* names')), 'token not taken from DSH\'s .env')
+  assert.ok(!fake.logger.lines.some(l => l.startsWith('info agent-hub: controller token from')))
+  const res = await callRoute(findRoute(fake.routes, OVERVIEW), { method: 'GET' })
+  assert.equal(res.json().error.code, 'hub-token-missing')
+  assertNoToken(fake.logger.lines, res.text)
+})

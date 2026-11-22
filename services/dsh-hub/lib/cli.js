@@ -38,7 +38,7 @@ export async function runCli(argv, { env = {}, home = homedir(), out = console.l
     if (action === 'add' && id !== undefined) {
       const { controller, token } = await hub.addController(id)
       out(`controller ${controller.controller_id} added (${controller.created_at}).`)
-      out('Token - shown only this once; store it now (DSH_HUB_TOKEN or dsh-secrets on the controller):')
+      out('Token - shown only this once; store it now on the controller as DSH_HUB_TOKEN (process env or <DSH home>/agent-hub/controller.env, chmod 600; NEVER <DSH home>/.env - DSH refuses to start on DSH_* lines there):')
       out(token)
       return 0
     }

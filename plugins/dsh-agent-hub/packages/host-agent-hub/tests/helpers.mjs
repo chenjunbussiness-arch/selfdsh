@@ -84,7 +84,8 @@ export function fakeHub(handler = () => ({ body: {} })) {
 
 /**
  * In-memory `fs` for the .env lookup: `{ [path]: text | { text, mode, dir, error } }`.
- * Missing paths throw ENOENT, so a real ~/.dsh/.env is never read by the tests.
+ * Missing paths throw ENOENT, so no real file (~/.dsh/agent-hub/controller.env,
+ * let alone DSH's own ~/.dsh/.env) is ever read by the tests.
  * The map stays live: tests may add, change or delete files between calls.
  */
 export function fakeFs(files = {}) {

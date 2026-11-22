@@ -41,9 +41,10 @@ node plugins/dsh-agent-hub/scripts/install.mjs --profile /root/.dsh/profiles/web
 node plugins/dsh-agent-hub/scripts/install.mjs --profile /root/.dsh/profiles/web
 # 1) 在 hub 机器上为这个 DSH 签发控制方令牌（只显示一次）：
 #      node services/dsh-hub/server.mjs controller add dsh-cloud
-# 2) 把令牌放进 DSH 服务的环境变量，或者写进 <DSH home>/.env（见第 3.2 节）
+# 2) 把令牌放进 DSH 服务的环境变量，或者写进 <DSH home>/agent-hub/controller.env（chmod 600，见第 3.2 节）
+#    ⚠ 不要写进 <DSH home>/.env：DSH 不允许那里出现 DSH_ 开头的变量，会拒绝启动
 # 3) 确认 cordis.patch.yml 里的 hubUrl / controllerId 正确，然后由运维决定何时重启。日志里应该能看到：
-#      agent-hub: controller token from environment variable DSH_HUB_TOKEN   （或 from /root/.dsh/.env (DSH_HUB_TOKEN)）
+#      agent-hub: controller token from environment variable DSH_HUB_TOKEN   （或 from /root/.dsh/agent-hub/controller.env (DSH_HUB_TOKEN)）
 #      agent-hub: mounted /api/agent-hub/admin/* (login, read-only, forwarded to the hub)
 #      agent-hub: 11 control tools registered (agent_*, task_*); controller of https://127.0.0.1:7891 as dsh-cloud
 #      （MYDESK 上的 dsh-local：controller of https://hub.example:7891 as dsh-local via proxy http://127.0.0.1:7890）
@@ -62,7 +63,7 @@ node plugins/dsh-agent-hub/scripts/install.mjs --profile /root/.dsh/profiles/web
 | `caFile` | hub 证书（自签）或其 CA 的 PEM 文件。配置后它是验证 hub 证书的**唯一**信任根；不配置时使用系统 CA。只对 `https://` 生效。 | 不设置 |
 | `timeoutMs` | 单次请求 hub 的超时时间，取值为 1000..120000 的整数。配置非法时给出 warning 并使用默认值。 | `15000` |
 | `tokenEnv` | 存放控制方令牌的**变量名**，进程环境变量和 `.env` 文件都按这个名字查找。 | `DSH_HUB_TOKEN` |
-| `envFile` | 进程环境里没有令牌时读取的 `.env` 文件。 | `<DSH home>/.env`，其中 DSH home = `$DSH_HOME`，未设置时为 `~/.dsh` |
+| `envFile` | 进程环境里没有令牌时读取的 `.env` 格式文件。**不能是 `<DSH home>/.env`**：那是 DSH 自己的凭据文件，里面出现任何 `DSH_` 开头的变量 DSH 都会拒绝启动；`envFile` 指向它且 `tokenEnv` 以 `DSH_` 开头时插件不读它，只给 warning（`tokenEnv` 换成别的名字时可以读，但也有一条较弱的 warning）。 | `<DSH home>/agent-hub/controller.env`，其中 DSH home = `$DSH_HOME`，未设置时为 `~/.dsh` |
 | `proxy` | 怎样连到 `https://` hub。`http://host:port`：总是经过这个 HTTP 代理（可带 `user:pass@`，转成 `Proxy-Authorization: Basic`，凭据不进日志和错误信息；只支持 http:// 代理，不支持 SOCKS）。`env`：读 `HTTPS_PROXY` / `https_proxy` / `HTTP_PROXY` / `http_proxy`（每次调用重新读），`NO_PROXY` / `no_proxy` 命中 hub 主机时直连（逗号分隔：主机名、`.后缀`、`*.后缀`、`host:port`、`*`；不支持 CIDR）。`http://` 回环 hub 永远直连（配了 proxy 只给 warning）。代理连不上、CONNECT 非 200、隧道里 TLS 失败、超时都返回 503 `hub-unreachable`，message 说明是哪一步。示例：MYDESK 上的 dsh-local 填 `http://127.0.0.1:7890`（Clash/mihomo）；和 hub 同机的 dsh-cloud 不填。 | 不设置 = 直连 |
 
 v1 的配置项（`dataDir`、`publicUrl`、`offlineAfterMs`、`sweepIntervalMs`、`maxRetries`、`maxPendingRequests`、`maxResultBytes`）会被忽略，并给出一条 warning。这些设置现在属于 hub 自己的 `<DSH home>/agent-hub/hub.json`。
@@ -78,7 +79,9 @@ v1 的配置项（`dataDir`、`publicUrl`、`offlineAfterMs`、`sweepIntervalMs`
 **查找顺序**（每次调用都会重新查找，所以轮换令牌后不需要重启）：
 
 1. 进程环境变量 `<tokenEnv>`（默认 `DSH_HUB_TOKEN`），值不为空就使用它；
-2. 否则读取 `envFile`（默认 `<DSH home>/.env`）里 `<tokenEnv>=…` 这一行。
+2. 否则读取 `envFile`（默认 `<DSH home>/agent-hub/controller.env`）里 `<tokenEnv>=…` 这一行。
+
+> ⚠ **不要把 `DSH_HUB_TOKEN` 写进 `<DSH home>/.env`。** DSH 本体把这个文件当作自己的凭据文件，并且禁止里面出现任何 `DSH_` 开头的变量，启动时会报 `... sets "DSH_HUB_TOKEN", which only the launching environment may set ...` 并退出。已经写进去的：把那一行挪到 `<DSH home>/agent-hub/controller.env`，再从 `<DSH home>/.env` 删掉。插件的保护：`envFile` 解析后等于 `<DSH home>/.env`（规范化、不区分大小写、`\` 与 `/` 等价）且 `tokenEnv` 以 `DSH_` 开头时，不读这个文件，并在启动日志里给出迁移提示。
 
 两处都找不到时返回 `hub-token-missing`。找到的令牌如果不是 `dshc_<controllerId>_` 开头（例如属于别的控制方，或者是 worker 令牌），插件会直接返回 `hub-token-mismatch`，**不会发出请求**。
 
@@ -94,7 +97,7 @@ DSH_HUB_TOKEN='dshc_dsh-cloud_xxxxxxxxxxxxxxxx'   # 行尾注释
 
 - 每行一个 `KEY=值`。空行和 `#` 开头的行会被忽略。`export ` 前缀会被忽略。值两边的单引号或双引号是可选的，引号内的内容按字面取值。不加引号时，值后面的 ` #` 开始注释。格式不对的行会被跳过。同一个键出现多次时，以最后一次为准。支持 BOM 和 CRLF。
 - 文件不存在时**静默跳过**。
-- **权限**：这个文件里存的是密钥，请执行 `chmod 600 <envFile>`（只有属主可以读写）。在 POSIX 系统上，如果文件对组或其他用户可读（`mode & 044`），插件仍然会使用它，但会打印**一次** warning。在 Windows 上不检查权限位，请把文件放在用户目录下（默认 ACL 只允许本人访问）。
+- **权限**：这个文件里存的是密钥，POSIX 上请执行 `install -d -m 700 <DSH home>/agent-hub && install -m 600 /dev/null <DSH home>/agent-hub/controller.env`，或者 `chmod 600 <envFile>`（只有属主可以读写）。在 POSIX 系统上，如果文件对组或其他用户可读（`mode & 044`），插件仍然会使用它，但会打印**一次** warning。在 Windows 上不检查权限位，请把文件放在用户目录下（默认 ACL 只允许本人访问）。
 
 **令牌不会出现在任何输出里**：
 
@@ -121,7 +124,7 @@ DSH_HUB_TOKEN='dshc_dsh-cloud_xxxxxxxxxxxxxxxx'   # 行尾注释
 | `agent_revoke` | `POST /v1/ctl/revoke` | |
 | `agent_provision` | `POST /v1/ctl/provision` | 直接签发 worker。额外支持 `node` 和 `workspaces` 参数（契约里没有写明这部分，见第 7 节）。返回的 `endpoint` 是 `<hubUrl>/v1`，worker 直接连接 hub |
 
-出错时工具抛出 `HubError`，消息格式为 `[code] 说明`，例如 `[hub-token-missing] DSH_HUB_TOKEN is not set (neither in the environment nor in /root/.dsh/.env): …`。hub 返回的错误（`404 task-not-found`、`403 not-creator`、`400 bad-task` 等）会保留原来的状态码和 code。
+出错时工具抛出 `HubError`，消息格式为 `[code] 说明`，例如 `[hub-token-missing] DSH_HUB_TOKEN is not set (neither in the environment nor in /root/.dsh/agent-hub/controller.env): …`。hub 返回的错误（`404 task-not-found`、`403 not-creator`、`400 bad-task` 等）会保留原来的状态码和 code。
 
 ## 5. 调度面板
 
@@ -173,14 +176,14 @@ node --test packages/host-agent-hub/tests/*.test.mjs
 
 | 文件 | 内容 |
 |---|---|
-| `hub-client.test.mjs` | URL 和路径前缀、`?id=` 必须是第一个 query 参数、`X-DSH-Token` 头、令牌不进 URL、POST 的 body 和 content-type、`health` 不带令牌、`timeout` / `ca` 选项、`caFile` 缓存与读取失败后重试、hub 返回结构的兼容、错误映射（hub 4xx/5xx、ECONNREFUSED、TLS、socket 超时、整体超时、`request()` 直接抛异常）、缺令牌 / 令牌不匹配 / 未配置时不发请求、令牌不进日志和错误信息；令牌优先级（环境变量 > .env）、`DSH_HOME` 与 `~/.dsh` 的默认值、`tokenEnv` 改名、轮换令牌无需重启、.env 权限 warning 只出现一次且不含令牌值 |
+| `hub-client.test.mjs` | URL 和路径前缀、`?id=` 必须是第一个 query 参数、`X-DSH-Token` 头、令牌不进 URL、POST 的 body 和 content-type、`health` 不带令牌、`timeout` / `ca` 选项、`caFile` 缓存与读取失败后重试、hub 返回结构的兼容、错误映射（hub 4xx/5xx、ECONNREFUSED、TLS、socket 超时、整体超时、`request()` 直接抛异常）、缺令牌 / 令牌不匹配 / 未配置时不发请求、令牌不进日志和错误信息；令牌优先级（环境变量 > envFile）、`DSH_HOME` 与 `~/.dsh` 的默认值（`agent-hub/controller.env`）、`<DSH home>/.env` 保护（`DSH_*` 不读、Windows 路径大小写与反斜杠、非 `DSH_` 变量名只给弱 warning）、`tokenEnv` 改名、轮换令牌无需重启、.env 权限 warning 只出现一次且不含令牌值 |
 | `proxy.test.mjs` | `parseProxyUrl`（只收 http://、默认端口 80、凭据转 Basic、显示脱敏）、`buildConnectRequest`（`CONNECT host:port HTTP/1.1`、Host、Proxy-Authorization 只在有凭据时）、`buildTlsOptions`（IP 不发 SNI）、`shouldBypass`（`*`、主机名、后缀、端口）、`proxySetting` / `resolveProxy`（off、URL、env 的顺序与 NO_PROXY、http 回环永远直连）；用假的 `node:http` / `node:tls` 跑 `openTunnel`：成功、代理连不上、CONNECT 403 / 502、407（以 response 形式）、TLS 证书失败、两段超时，消息里都没有代理凭据；hub 客户端经隧道发请求（`createConnection`、令牌不出现在 CONNECT 里、日志脱敏）、隧道失败映射为 503 `hub-unreachable`、env 模式每次重读 |
 | `env-file.test.mjs` | `.env` 解析（注释、export、单双引号、行尾注释、CRLF、BOM、格式错误的行、同名键以最后一次为准、`__proto__`），文件不存在静默跳过，640/604/644/666 给出 warning、600/700 不给，Windows 不检查，目录或不可读文件给出 warning 且不泄露内容 |
 | `tools.test.mjs` | 11 个工具名、schema（不接受未知参数）、新增参数、并发安全标记、每个工具对应的 hub 调用、`code` 类型必须带 workspace、错误格式为 `[code]`、令牌不进工具输出 |
 | `bridge.test.mjs` | 只剩 5 个 admin 路由、各接口的白名单整形与令牌遮蔽、query 校验、405、503 `hub-unreachable`、本地配置错误时返回 503、401/403 映射为 502 `hub-unauthorized`、500 不返回细节、`requireLogin` |
-| `index.test.mjs` | 注册 11 个工具和 5 个路由、没有 `/v1` 路由、warning（缺配置、缺令牌、不安全的 http、v1 配置项、非法超时）、hub 不可用（`127.0.0.1:1`）时返回 503、从真实 .env 文件读取令牌、dispose 后全部注销 |
+| `index.test.mjs` | 注册 11 个工具和 5 个路由、没有 `/v1` 路由、warning（缺配置、缺令牌、不安全的 http、v1 配置项、非法超时）、hub 不可用（`127.0.0.1:1`）时返回 503、从真实 .env 文件读取令牌、`envFile` 指向真实的 `<DSH home>/.env` 时不读取并给出迁移 warning、dispose 后全部注销 |
 
-测试不会访问真实 hub，也不会读取真实的 `~/.dsh/.env`：`hub-client` 注入假的 `request` 和假的 `fs`；`index.test.mjs` 的 `envFile` 指向一个不存在的路径，或者指向测试中创建的临时文件。
+测试不会访问真实 hub，也不会读取真实的 `~/.dsh/agent-hub/controller.env` 或 `~/.dsh/.env`：`hub-client` 注入假的 `request` 和假的 `fs`；`index.test.mjs` 的 `envFile` 指向一个不存在的路径，或者指向测试中创建的临时文件。
 
 ## 7. 已知限制 / 待办
 

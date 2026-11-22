@@ -42,8 +42,16 @@
 #                 Default: 15000 (an invalid value warns and uses the default).
 #   tokenEnv      NAME of the variable holding the controller token, used both for the
 #                 process environment and for the .env file. Default: DSH_HUB_TOKEN.
-#   envFile       .env file read when the process environment has no <tokenEnv>.
-#                 Default: <DSH home>/.env, where DSH home = $DSH_HOME or ~/.dsh.
+#   envFile       .env-format file read when the process environment has no <tokenEnv>.
+#                 Default: <DSH home>/agent-hub/controller.env, where DSH home =
+#                 $DSH_HOME or ~/.dsh (e.g. /root/.dsh/agent-hub/controller.env,
+#                 C:\Users\<you>\.dsh\agent-hub\controller.env).
+#                 WARNING: never put DSH_HUB_TOKEN (or ANY DSH_* variable) into
+#                 <DSH home>/.env. That file is DSH's own credential file and DSH
+#                 REFUSES TO START when it sets a DSH_* variable ("only the launching
+#                 environment may set ..."). 不要把 DSH_ 开头的变量写进 <DSH home>/.env，
+#                 DSH 会拒绝启动。If envFile points at <DSH home>/.env and tokenEnv starts
+#                 with DSH_, the plugin does not read it and logs a migration warning.
 #   proxy         How this DSH reaches an https:// hub. Node's https.request ignores
 #                 HTTPS_PROXY, so the plugin opens the tunnel itself: CONNECT <hub>:<port>
 #                 on the proxy, then TLS to the hub (hostname checked, caFile applies)
@@ -82,9 +90,14 @@
 #     starts a comment; quoted values are literal; malformed lines are skipped;
 #     the last definition of a key wins;
 #   - a missing file is skipped silently;
-#   - permissions: the file holds a secret. chmod 600 <envFile> (owner read/write
-#     only). On POSIX a file readable by group or others is still used but logs a
-#     warning; on Windows keep it in your user profile (default ACL is owner-only).
+#   - permissions: the file holds a secret. POSIX: chmod 600 <envFile> (owner
+#     read/write only), e.g.
+#         install -d -m 700 /root/.dsh/agent-hub
+#         install -m 600 /dev/null /root/.dsh/agent-hub/controller.env
+#     a file readable by group or others is still used but logs a warning.
+#     Windows: keeping it under your user profile (C:\Users\<you>\.dsh\agent-hub\)
+#     is enough (the default ACL is owner-only).
+#   - the file must NOT be <DSH home>/.env (see envFile above).
 #
 # v1 keys (dataDir, publicUrl, offlineAfterMs, sweepIntervalMs, maxRetries,
 # maxPendingRequests, maxResultBytes) are ignored with a warning: they now live in the
@@ -99,7 +112,7 @@
         # caFile: /root/.dsh/agent-hub/hub-ca.pem
         timeoutMs: 15000
         tokenEnv: DSH_HUB_TOKEN
-        # envFile: /root/.dsh/.env      # default: <DSH home>/.env
+        # envFile: /root/.dsh/agent-hub/controller.env  # default: <DSH home>/agent-hub/controller.env (NEVER <DSH home>/.env)
         # proxy: http://127.0.0.1:7890  # dsh-local on MYDESK (Clash/mihomo); default: unset = direct; or: env
     - id: client-ui-agent-hub
       name: dsh-client-ui-agent-hub

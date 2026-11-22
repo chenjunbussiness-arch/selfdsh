@@ -67,8 +67,12 @@ export function resolveConfig(raw, env = process.env) {
     vaultPath: resolve(str(config.vaultPath, 'vaultPath', join(home, 'secrets.vault'))),
     keySource,
     passphraseEnv: str(config.passphraseEnv, 'passphraseEnv', 'DSH_SECRETS_PASSPHRASE'),
-    // false = only the process environment; a string = that dotenv file; default <DSH home>/.env
-    envFile: config.envFile === false ? null : resolve(str(config.envFile, 'envFile', join(home, '.env'))),
+    // false = only the process environment; a string = that dotenv file; default <DSH home>/secrets.env.
+    // NOT <DSH home>/.env: that is DSH's own credential file and DSH refuses to start when it sets
+    // any DSH_* variable; env-file.js never reads DSH_* names from it (and warns once).
+    envFile: config.envFile === false ? null : resolve(str(config.envFile, 'envFile', join(home, 'secrets.env'))),
+    /** Resolved DSH home (for the `<DSH home>/.env` guard in env-file.js). */
+    dshHome: resolve(home),
     keyfilePath: resolve(str(config.keyfilePath, 'keyfilePath', join(home, 'secrets.key'))),
     scrypt: {
       N: scryptN,

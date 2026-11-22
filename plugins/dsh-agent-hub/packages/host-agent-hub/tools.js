@@ -8,6 +8,8 @@
  * retry only by the creating controller).
  *
  * The controller token (DSH_HUB_TOKEN) never appears in a tool result or error.
+ * It comes from the process environment or <DSH home>/agent-hub/controller.env,
+ * never from <DSH home>/.env (DSH refuses to start on DSH_* lines there).
  * `agent_provision` returns the new WORKER token exactly once, by design.
  *
  * @module host-agent-hub/tools

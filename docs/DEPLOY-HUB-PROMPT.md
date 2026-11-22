@@ -16,6 +16,7 @@
 - 不要 git push，不要改 mihomo（17890/17892），不要关闭或放宽防火墙里 7891 以外的任何规则。
 - 不要重启 dsh-web.service（你自己就跑在里面）。做到需要重启时停下，写报告。
 - 某一步失败就停下，报告原文错误和你的判断，不要绕过 TLS 校验或权限检查。
+- 任何 DSH_ 开头的变量（DSH_HUB_TOKEN、DSH_SECRETS_PASSPHRASE 等）都不能写进 /root/.dsh/.env：那是 DSH 自己的凭据文件，里面一出现 DSH_ 开头的变量，DSH 就拒绝启动（"... which only the launching environment may set ..."）。不要改 /root/.dsh/.env，也不要打印它的内容（只允许用 grep -c 统计 DSH_ 开头的行数）；计数不是 0 就停下告诉我。
 
 步骤：
 0. 环境：node --version（要求 >= 22）、command -v node（记下绝对路径，systemd 要用）、hostname -I、curl -s ifconfig.me（公网 IP）、ss -ltnp | grep -E ':7890|:7891|:17890' 。7891 已被占用就停下报告。
@@ -45,9 +46,9 @@
 
 4. 签发控制方令牌（不要打印令牌）：
    cd $REPO/services/dsh-hub
-   - dsh-cloud：用管道把 `DSH_HOME=/root/.dsh node server.mjs controller add dsh-cloud` 输出里匹配 dshc_[A-Za-z0-9_-]+ 的那一段，追加到 /root/.dsh/.env 的一行 DSH_HUB_TOKEN=<令牌>。/root/.dsh/.env 里原有的 KIRO_API_KEY 等行必须保留（先备份，只追加；如果已经有 DSH_HUB_TOKEN 行，停下问我）。之后 chmod 600 /root/.dsh/.env。
+   - dsh-cloud：先 install -d -m 700 /root/.dsh/agent-hub && install -m 600 /dev/null /root/.dsh/agent-hub/controller.env（文件已存在就先备份，如果里面已经有 DSH_HUB_TOKEN 行，停下问我）。再用管道把 `DSH_HOME=/root/.dsh node server.mjs controller add dsh-cloud` 输出里匹配 dshc_[A-Za-z0-9_-]+ 的那一段，写成一行 DSH_HUB_TOKEN=<令牌> 追加到 /root/.dsh/agent-hub/controller.env。之后 chmod 600 /root/.dsh/agent-hub/controller.env。**不要写进 /root/.dsh/.env**（DSH 会拒绝启动，见红线）。
    - dsh-local：同样方式写进 /root/.dsh/agent-hub/dsh-local.token（chmod 600），由我手动拷到 MYDESK。
-   - 验证只用：grep -c '^DSH_HUB_TOKEN=dshc_dsh-cloud_' /root/.dsh/.env、node server.mjs controller list。
+   - 验证只用：grep -c '^DSH_HUB_TOKEN=dshc_dsh-cloud_' /root/.dsh/agent-hub/controller.env（应为 1）、grep -c '^[[:space:]]*\(export[[:space:]]\+\)\?DSH_' /root/.dsh/.env（应为 0，只看计数，不打印内容）、node server.mjs controller list。
 
 5. systemd：
    sed -e 's#__DSH_WARROOM__#'"$REPO"'#g' -e 's#/usr/bin/node#<第0步的 node 绝对路径>#' $REPO/services/dsh-hub/deploy/dsh-hub.service > /etc/systemd/system/dsh-hub.service
@@ -68,10 +69,10 @@
          caFile: <第2步的 CA 文件；用公共 CA 证书时删掉这一行>
          timeoutMs: 15000
          tokenEnv: DSH_HUB_TOKEN
-         envFile: /root/.dsh/.env
+         envFile: /root/.dsh/agent-hub/controller.env   # 默认值，可省略；绝不能是 /root/.dsh/.env
          # 同机直连，不写 proxy
    - 检查插件配置能被解析：dsh --profile web --dump-config | grep -n -A8 'id: host-agent-hub'（显示时把任何 dshc_ 开头的值打码）。
-   - dsh-secrets 如果也要用新的 .env 读口令：确认 profile 里 host-secrets 的 envFile 指向 /root/.dsh/.env（只汇报现状，不改）。
+   - dsh-secrets：确认 profile 里 host-secrets 的 envFile 是 /root/.dsh/secrets.env（或不写，默认就是它），**不是** /root/.dsh/.env；DSH_SECRETS_PASSPHRASE 也不能在 /root/.dsh/.env 里（只汇报现状和变量名，不改）。
 
 8. 写报告 /root/.dsh/agent-hub/DEPLOY-REPORT.md（不含任何令牌/私钥），内容：$REPO 和分支、测试结果、证书信息、hub 状态和自检结果、防火墙与安全组待办、插件安装输出、改过的文件和备份路径、给 MYDESK 的信息（hub 地址 https://<公网IP>:7891、CA 文件路径（需要拷到 MYDESK）、dsh-local.token 路径）。
    然后停下，告诉我：「可以重启 dsh-web 了」。

@@ -6,7 +6,10 @@
  * tasks, leases, retries and artifacts. This plugin only
  *   - reads its config (hubUrl, controllerId, caFile, timeoutMs, tokenEnv, envFile, proxy)
  *     and the controller token: process env `<tokenEnv>` (default DSH_HUB_TOKEN)
- *     first, else the same key in the .env file `envFile` (default <DSH home>/.env),
+ *     first, else the same key in the .env-format file `envFile` (default
+ *     <DSH home>/agent-hub/controller.env). Never <DSH home>/.env for a DSH_* name:
+ *     DSH refuses to start when its own .env sets any DSH_* variable, so that file
+ *     is skipped with a warning (hub-client.js resolveConfig),
  *   - registers the 11 DSH-only control tools (tools.js -> /v1/ctl/*),
  *   - mounts the login-guarded read-only panel routes /api/agent-hub/admin/*
  *     (bridge.js), which forward to the hub.
@@ -19,7 +22,7 @@
  */
 
 import { ADMIN_BASE, createRoutes, requireLogin } from './bridge.js'
-import { createHubClient } from './hub-client.js'
+import { createHubClient, tokenMissingMessage } from './hub-client.js'
 import { createTools } from './tools.js'
 
 export const name = 'dsh-host-agent-hub'
@@ -50,7 +53,7 @@ export function apply(ctx, config = {}) {
   // Only the SOURCE of the token is logged, never its value.
   const source = client.tokenSource()
   const { tokenEnv, envFile } = client.config
-  if (source === undefined) ctx.logger.warn(`agent-hub: ${tokenEnv} is not set (neither in the environment nor in ${envFile}); tools and panel will answer hub-token-missing (issue one on the hub: node server.mjs controller add ${client.config.controllerId || '<controllerId>'})`)
+  if (source === undefined) ctx.logger.warn(`agent-hub: ${tokenMissingMessage(client.config)}; tools and panel will answer hub-token-missing (issue one on the hub: node server.mjs controller add ${client.config.controllerId || '<controllerId>'})`)
   else ctx.logger.info(`agent-hub: controller token from ${source === 'env' ? `environment variable ${tokenEnv}` : `${envFile} (${tokenEnv})`}`)
 
   for (const tool of createTools({ client })) ctx.effect(() => ctx.tools.register(tool))
