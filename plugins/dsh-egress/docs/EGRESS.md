@@ -77,10 +77,10 @@ HTTP 桥：
 
 ## 5. 给 lead 的部署清单
 
-前提：服务器 `8.134.170.38`，DSH 0.2.2-rc.5，profile `/root/.dsh/profiles/web`，已有 `/srv/dsh-router-b`（bundle 通过 `link:` 挂载）。以下步骤由 lead 执行；插件作者没有对服务器做任何写操作。
+前提：服务器 `<server>`，DSH 0.2.2-rc.5，profile `/root/.dsh/profiles/web`，已有 `/srv/dsh-router-b`（bundle 通过 `link:` 挂载）。以下步骤由 lead 执行；插件作者没有对服务器做任何写操作。
 
 ```powershell
-$key = 'C:\Users\13558\.ssh\ali-zzl-harness.pem'
+$key = '<你的私钥>.pem'
 $ssh = @('-i',$key,'-o','StrictHostKeyChecking=no')
 
 # 0. 本机先构建并测试
@@ -90,10 +90,10 @@ node scripts\build.mjs                      # 必须以 "build ok" 结尾
 # 1. 打包（不含 node_modules 和 preview 产物；tests/fixtures 里是测试专用的自签证书，无关紧要）
 $tar = "$env:TEMP\dsh-egress.tar"
 tar -cf $tar -C E:\PythonProject\dsh-netops --exclude=node_modules --exclude=preview/dist --exclude=.preview.pid --exclude=docs/screenshots egress
-scp @ssh $tar root@8.134.170.38:/tmp/dsh-egress.tar
+scp @ssh $tar root@<server>:/tmp/dsh-egress.tar
 
 # 2. 解压到 /srv/dsh-egress（目录里没有任何服务器上的已有文件被覆盖）
-ssh @ssh root@8.134.170.38 'set -e; mkdir -p /srv/dsh-egress.new && tar -xf /tmp/dsh-egress.tar -C /srv/dsh-egress.new --strip-components=1 && mv /srv/dsh-egress.new /srv/dsh-egress && rm /tmp/dsh-egress.tar && ls /srv/dsh-egress'
+ssh @ssh root@<server> 'set -e; mkdir -p /srv/dsh-egress.new && tar -xf /tmp/dsh-egress.tar -C /srv/dsh-egress.new --strip-components=1 && mv /srv/dsh-egress.new /srv/dsh-egress && rm /tmp/dsh-egress.tar && ls /srv/dsh-egress'
 ```
 
 3. **接入 profile**。优先用安装脚本（幂等，会先备份 `package.json` 为 `package.json.bak-install-<时间>`，只写 link，不跑包管理器）。先 dry-run：
@@ -148,7 +148,7 @@ systemctl restart dsh-web      # 钩子随进程消失，所有请求恢复原�
 
 ## 6. 上线后真机验收
 
-在浏览器里打开 `https://8.134.170.38:8443/`，侧栏出现「出口」。
+在浏览器里打开 `https://<server>:8443/`，侧栏出现「出口」。
 
 1. **状态条**显示「即时生效」，右上角没有「示例数据」徽标；绑定表里有 `api.commandcode.ai [commandecode] → direct（跟随默认）`。
 2. 点 **direct 的「探测」**：记下出口 IP，应该是服务器公网 IP（阿里云）。

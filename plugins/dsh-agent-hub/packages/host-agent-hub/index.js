@@ -7,7 +7,7 @@
  *   - resolves its connection settings (hub-client.js resolveConfig), each one
  *     separately: cordis.patch.yml config > process environment > envFile
  *     (default <DSH home>/agent-hub/controller.env) > default:
- *       hubUrl        DSH_HUB_URL             (bare 8.134.170.38 -> https://8.134.170.38:7891)
+ *       hubUrl        DSH_HUB_URL             (bare 203.0.113.10 -> https://203.0.113.10:7891)
  *       controllerId  DSH_HUB_CONTROLLER_ID
  *       proxy         DSH_HUB_PROXY           (off/direct/none = direct, env, http://h:p; default direct)
  *       caFile        DSH_HUB_CAFILE
@@ -28,7 +28,7 @@
 
 import { ADMIN_BASE, createRoutes, requireLogin } from './bridge.js'
 import { createHubClient, tokenMissingMessage } from './hub-client.js'
-import { createTools } from './tools.js'
+import { TOOL_NAMES, createTools } from './tools.js'
 
 export const name = 'dsh-host-agent-hub'
 export const inject = ['tools']
@@ -93,5 +93,5 @@ export function apply(ctx, config = {}) {
   const route = client.route()
   const via = resolved.ok && route.via !== 'direct' ? ` via proxy ${route.via}` : ''
   const target = resolved.ok ? `${resolved.hubUrl} as ${resolved.controllerId}${via}` : 'an unconfigured hub'
-  ctx.logger.info(`agent-hub: 11 control tools registered (agent_*, task_*); controller of ${target}`)
+  ctx.logger.info(`agent-hub: ${TOOL_NAMES.length} control tools registered (agent_*, task_*, fallback_*); controller of ${target}`)
 }

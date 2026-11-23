@@ -5,7 +5,7 @@
 
 版本基线：运行中的 DSH **0.2.2-rc.3**。下文每条「官方行为」都带
 `包/文件:行号`，路径相对
-`C:\Users\13558\AppData\Local\Programs\DeepSeek Harness\resources\app.asar\dsh\node_modules\@deepseek-ai\`。
+`C:\Users\<你>\AppData\Local\Programs\DeepSeek Harness\resources\app.asar\dsh\node_modules\@deepseek-ai\`。
 
 ---
 
@@ -289,7 +289,7 @@ dsh plugin --profile desktop add file:E:\PythonProject\dsh-router-b
 
 若走 CLI，插件选择还需一步（裸 pnpm add 只写依赖，不写 bundle 列表）：
 把 `"dsh-router-b"` 加进
-`C:\Users\13558\.dsh\profiles\desktop\package.json` 的 `dsh.profile.bundles`，然后
+`C:\Users\<你>\.dsh\profiles\desktop\package.json` 的 `dsh.profile.bundles`，然后
 
 ```powershell
 dsh plugin --profile desktop install

@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Agent 调度中心",
-    "description": "DSH 通过独立的 dsh-hub 服务给外部 agent（AWS Quick、Claude Code、Kiro 等）派任务、收结果，任务板「Agent」tab 只读展示任务、agent 和待审批申请。必须配置：<DSH home>/agent-hub/controller.env 里的 DSH_HUB_URL（如 https://8.134.170.38:7891）、DSH_HUB_CONTROLLER_ID、DSH_HUB_TOKEN（在 hub 上 controller add 签发）（不是 <DSH home>/.env；DSH_HUB_PROXY 可选，默认直连）。worker 机器运行 scripts/agent_client.py init / register / run。",
+    "description": "DSH 通过独立的 dsh-hub 服务给外部 agent（AWS Quick、Claude Code、Kiro 等）派任务、收结果，任务板「Agent」tab 只读展示任务、agent 和待审批申请。必须配置：<DSH home>/agent-hub/controller.env 里的 DSH_HUB_URL（如 https://<hub-host>:7891）、DSH_HUB_CONTROLLER_ID、DSH_HUB_TOKEN（在 hub 上 controller add 签发）（不是 <DSH home>/.env；DSH_HUB_PROXY 可选，默认直连）。worker 机器运行 scripts/agent_client.py init / register / run。",
     "detail": "README.md"
   }
 }

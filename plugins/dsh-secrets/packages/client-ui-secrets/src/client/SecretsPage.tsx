@@ -1,11 +1,13 @@
 /**
- * The secrets dashboard page: a read-only, value-free table of the dsh-secrets
- * vault with tag filter, keyword search and a refresh button.
+ * The secrets page: three views behind a segmented control.
  *
- * Data comes from `GET /api/secrets/summary` (vault status, tag counts) and
- * `GET /api/secrets/list?tag=&query=` (metadata rows), both served by
- * dsh-host-secrets. Neither route returns a value, so this component cannot
- * show one: there is no "reveal" or "copy value" affordance by design.
+ * - Vault: the value-free table of the dsh-secrets vault (tag filter, keyword
+ *   search) with new / replace / edit / rename / delete sheets.
+ * - DSH credentials and Plugins: see Manage.tsx.
+ *
+ * Reads come from `GET /api/secrets/{summary,list}`; writes go to the
+ * management routes. No route returns a value, so this component cannot show
+ * one: there is no "reveal" or "copy value" affordance by design.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -14,8 +16,15 @@ import type { ReactNode } from 'react'
 import type { Filter, ListDocument, SecretItem, SummaryDocument, VaultStatus } from './contract.ts'
 import { ageOf, formatClock, formatDateTime } from './format.ts'
 import type { MessageKey, Translate } from './locales.ts'
+import { CredentialsTab, Layer, PluginsTab, VaultSheet } from './Manage.tsx'
+import type { Toast, VaultSheetMode } from './Manage.tsx'
 import { LockIcon } from './SecretsIcon.tsx'
 import { BridgeError, fetchList, fetchSummary } from './source.ts'
+
+/** The three views. */
+type Tab = 'vault' | 'credentials' | 'plugins'
+const TABS: readonly Tab[] = ['vault', 'credentials', 'plugins']
+const TAB_KEY = 'dsh-secrets.tab'
 
 /** Props of the page: the injected translate function. */
 export interface SecretsPageProps {
@@ -153,11 +162,12 @@ function VaultProblem({ t, vault }: { readonly t: Translate; readonly vault: Vau
 }
 
 /** One metadata row. Deliberately has no value cell. */
-function Row({ t, item, activeTag, onTag }: {
+function Row({ t, item, activeTag, onTag, onAction }: {
   readonly t: Translate
   readonly item: SecretItem
   readonly activeTag: string | undefined
   readonly onTag: (tag: string | undefined) => void
+  readonly onAction: (mode: VaultSheetMode) => void
 }): ReactNode {
   const times = t('cell.times', {
     created: formatDateTime(item.createdAt),
@@ -196,15 +206,21 @@ function Row({ t, item, activeTag, onTag }: {
         <span>{formatDateTime(item.updatedAt)}</span>
         <span className="dss-muted">{ageText(t, item.updatedAt)}</span>
       </td>
+      <td className="dss-cell-actions">
+        <div className="dss-row-actions">
+          <button type="button" className="dss-btn dss-btn-sm" onClick={() => { onAction({ kind: 'replace', item }) }}>{t('action.replace')}</button>
+          <button type="button" className="dss-btn dss-btn-sm" onClick={() => { onAction({ kind: 'edit', item }) }}>{t('action.edit')}</button>
+          <button type="button" className="dss-btn dss-btn-sm" onClick={() => { onAction({ kind: 'rename', item }) }}>{t('action.rename')}</button>
+          <button type="button" className="dss-btn dss-btn-sm" data-danger="true" onClick={() => { onAction({ kind: 'delete', item }) }}>{t('action.delete')}</button>
+        </div>
+      </td>
     </tr>
   )
 }
 
-/**
- * Draw the page.
- * @param props - the injected translate function.
- */
-export function SecretsPage({ t }: SecretsPageProps): ReactNode {
+/** The vault view. */
+function VaultTab({ t, toast }: { readonly t: Translate; readonly toast: Toast }): ReactNode {
+  const [sheet, setSheet] = useState<VaultSheetMode | undefined>(undefined)
   const [tag, setTag] = useState<string | undefined>(undefined)
   const [queryInput, setQueryInput] = useState('')
   const [query, setQuery] = useState('')
@@ -215,6 +231,8 @@ export function SecretsPage({ t }: SecretsPageProps): ReactNode {
   }, [queryInput])
 
   const { state, reload } = useDashboard({ tag, query: query === '' ? undefined : query })
+  const closeSheet = useCallback(() => { setSheet(undefined) }, [])
+  const sheetDone = (message: string): void => { setSheet(undefined); toast('ok', message); reload() }
   const data = state.data
   const summary = data?.summary
   const list = data?.list
@@ -254,6 +272,7 @@ export function SecretsPage({ t }: SecretsPageProps): ReactNode {
       <div className="dss-empty">
         <span className="dss-empty-title">{t('empty.missing.title')}</span>
         <span className="dss-empty-hint">{t('empty.missing.hint')}</span>
+        <button type="button" className="dss-btn" data-primary="true" onClick={() => { setSheet({ kind: 'create' }) }}>{t('action.new')}</button>
       </div>
     )
   } else if (list.total === 0) {
@@ -261,6 +280,7 @@ export function SecretsPage({ t }: SecretsPageProps): ReactNode {
       <div className="dss-empty">
         <span className="dss-empty-title">{t('empty.vault.title')}</span>
         <span className="dss-empty-hint">{t('empty.vault.hint')}</span>
+        <button type="button" className="dss-btn" data-primary="true" onClick={() => { setSheet({ kind: 'create' }) }}>{t('action.new')}</button>
       </div>
     )
   } else {
@@ -319,10 +339,11 @@ export function SecretsPage({ t }: SecretsPageProps): ReactNode {
                     <th scope="col">{t('col.fingerprint')}</th>
                     <th scope="col">{t('col.length')}</th>
                     <th scope="col">{t('col.updated')}</th>
+                    <th scope="col"><span className="dss-sr">{t('col.actions')}</span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {list.items.map(item => <Row key={item.name} t={t} item={item} activeTag={tag} onTag={setTag} />)}
+                  {list.items.map(item => <Row key={item.name} t={t} item={item} activeTag={tag} onTag={setTag} onAction={setSheet} />)}
                 </tbody>
               </table>
             </div>
@@ -330,6 +351,65 @@ export function SecretsPage({ t }: SecretsPageProps): ReactNode {
       </>
     )
   }
+
+  const canWrite = vault !== undefined && vault.state !== 'locked' && vault.state !== 'error'
+  return (
+    <section className="dss-section">
+      <div className="dss-section-head">
+        <div className="dss-head-text">
+          <h2 className="dss-section-title">{t('tab.vault')}</h2>
+          {vault !== undefined && summary !== undefined && <VaultLine t={t} vault={vault} summary={summary} />}
+        </div>
+        <div className="dss-head-actions">
+          {data !== undefined && <span className="dss-updated">{t('updatedAt', { time: formatClock(data.list.generatedAt) })}</span>}
+          <button type="button" className="dss-btn" disabled={state.busy} onClick={reload}>
+            {state.busy && data !== undefined ? t('refreshing') : t('refresh')}
+          </button>
+          {canWrite && <button type="button" className="dss-btn" data-primary="true" onClick={() => { setSheet({ kind: 'create' }) }}>{t('action.new')}</button>}
+        </div>
+      </div>
+      {data !== undefined && state.error !== undefined && (
+        <section className="dss-banner" data-tone="error" role="status">
+          <p className="dss-banner-text">{t('stale', { message: state.error.message, time: formatClock(data.list.generatedAt) })}</p>
+        </section>
+      )}
+      {body}
+      {sheet !== undefined && <VaultSheet t={t} mode={sheet} onClose={closeSheet} onDone={sheetDone} />}
+    </section>
+  )
+}
+
+/** Remembered view (per browser; a convenience, so failures are ignored). */
+function initialTab(): Tab {
+  try {
+    const saved = window.localStorage.getItem(TAB_KEY)
+    if (saved !== null && (TABS as readonly string[]).includes(saved)) return saved as Tab
+  } catch { /* storage blocked */ }
+  return 'vault'
+}
+
+/**
+ * Draw the page.
+ * @param props - the injected translate function.
+ */
+export function SecretsPage({ t }: SecretsPageProps): ReactNode {
+  const [tab, setTab] = useState<Tab>(initialTab)
+  const [toastState, setToastState] = useState<{ tone: 'ok' | 'bad'; text: string; id: number } | undefined>(undefined)
+  const toastId = useRef(0)
+
+  const choose = (next: Tab): void => {
+    setTab(next)
+    try { window.localStorage.setItem(TAB_KEY, next) } catch { /* storage blocked */ }
+  }
+  const toast = useCallback<Toast>((tone, text) => {
+    toastId.current += 1
+    setToastState({ tone, text, id: toastId.current })
+  }, [])
+  useEffect(() => {
+    if (toastState === undefined) return undefined
+    const timer = window.setTimeout(() => { setToastState(undefined) }, 3200)
+    return () => { window.clearTimeout(timer) }
+  }, [toastState])
 
   return (
     <div className="dss-page">
@@ -339,22 +419,30 @@ export function SecretsPage({ t }: SecretsPageProps): ReactNode {
             <h1 className="dss-title">{t('page.title')}</h1>
             <p className="dss-sub">{t('page.subtitle')}</p>
           </div>
-          <div className="dss-head-actions">
-            {data !== undefined && <span className="dss-updated">{t('updatedAt', { time: formatClock(data.list.generatedAt) })}</span>}
-            <button type="button" className="dss-btn" disabled={state.busy} onClick={reload}>
-              {state.busy && data !== undefined ? t('refreshing') : t('refresh')}
-            </button>
-          </div>
         </header>
-        <Notice t={t} />
-        {vault !== undefined && summary !== undefined && <VaultLine t={t} vault={vault} summary={summary} />}
-        {data !== undefined && state.error !== undefined && (
-          <section className="dss-banner" data-tone="error" role="status">
-            <p className="dss-banner-text">{t('stale', { message: state.error.message, time: formatClock(data.list.generatedAt) })}</p>
-          </section>
-        )}
-        {body}
+        <div className="dss-segmented" role="tablist" aria-label={t('tab.aria')}>
+          {TABS.map(name => (
+            <button
+              key={name}
+              type="button"
+              role="tab"
+              aria-selected={tab === name}
+              className="dss-segment"
+              data-on={tab === name}
+              onClick={() => { choose(name) }}
+            >
+              {t(`tab.${name}`)}
+            </button>
+          ))}
+        </div>
+        {tab === 'vault' && <Notice t={t} />}
+        {tab === 'vault' && <VaultTab t={t} toast={toast} />}
+        {tab === 'credentials' && <CredentialsTab t={t} toast={toast} />}
+        {tab === 'plugins' && <PluginsTab t={t} toast={toast} />}
       </div>
+      {toastState !== undefined && (
+        <Layer><div className="dss-toast" data-tone={toastState.tone} role="status" key={toastState.id}>{toastState.text}</div></Layer>
+      )}
     </div>
   )
 }

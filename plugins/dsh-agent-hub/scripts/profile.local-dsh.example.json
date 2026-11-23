@@ -1,0 +1,11 @@
+{
+  "node": "mydesk",
+  "agentId": "dsh-mydesk",
+  "platform": "dsh",
+  "dshProfile": "C:/Users/<you>/.dsh/profiles/web",
+  "workspaces": {
+    "deepseek-harness": "E:/PythonProject/dsh-warroom"
+  },
+  "capabilities": { "browser": 1, "test": 2, "code": 2 },
+  "maxConcurrency": 4
+}

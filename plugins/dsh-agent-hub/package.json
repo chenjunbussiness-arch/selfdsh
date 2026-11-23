@@ -2,7 +2,7 @@
   "name": "dsh-agent-hub",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent hub for DeepSeek Harness: DSH dispatches tasks to external agents (AWS Quick, Claude Code, Kiro, ...) through the standalone dsh-hub service and shows them in a read-only \"Agent\" tab of the task board. Required: <DSH home>/agent-hub/controller.env with DSH_HUB_URL (e.g. https://8.134.170.38:7891), DSH_HUB_CONTROLLER_ID and DSH_HUB_TOKEN (issued on the hub: node server.mjs controller add <id>); DSH_HUB_PROXY is optional (direct by default). Workers run scripts/agent_client.py (init, register, run). See README.md",
+  "description": "Agent hub for DeepSeek Harness: DSH dispatches tasks to external agents (AWS Quick, Claude Code, Kiro, ...) through the standalone dsh-hub service and shows them in a read-only \"Agent\" tab of the task board. Required: <DSH home>/agent-hub/controller.env with DSH_HUB_URL (e.g. https://<hub-host>:7891), DSH_HUB_CONTROLLER_ID and DSH_HUB_TOKEN (issued on the hub: node server.mjs controller add <id>); DSH_HUB_PROXY is optional (direct by default). Workers run scripts/agent_client.py (init, register, run). See README.md",
   "type": "module",
   "icon": "./icon.svg",
   "main": "index.js",

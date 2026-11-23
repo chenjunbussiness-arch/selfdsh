@@ -6,9 +6,10 @@
 #                       and the tools secret_set / secret_describe / secret_list /
 #                       secret_delete / secret_rename / secret_check / secret_exec /
 #                       secret_http / secret_export / secret_import, plus the
-#                       read-only, login-guarded GET routes /api/secrets/summary and
-#                       /api/secrets/list (metadata, fingerprint, length only)
-#   client-ui-secrets   the read-only "密钥看板" page and its Sidebar row; its host
+#                       login-guarded routes under /api/secrets (reads: metadata,
+#                       fingerprint, length only; writes: vault, DSH credentials,
+#                       agent-hub controller.env — values go in, never come back)
+#   client-ui-secrets   the "密钥与插件" page and its Sidebar row; its host
 #                       half is empty. Needs lib/client.js built (scripts/build.mjs).
 #
 # No tool and no route returns a secret value. See DESIGN.md, docs/DASHBOARD.md.
@@ -41,6 +42,8 @@
 #   redactMinLength      8
 #   lockTimeoutMs        10000
 #   lockStaleMs          30000
+#   hubEnvFile           agent-hub 的连接文件（<DSH home>/agent-hub/controller.env），页面改中枢地址时写它
+#   manageCredentialRefs 页面能设置的额外 DSH 凭据名称（内置 DEEPSEEK_API_KEY / EXA_API_KEY / GITHUB_TOKEN / GITEA_TOKEN；不能是 DSH_ 开头）
 #
 # envFile 示例（/root/.dsh/secrets.env，chmod 600；这是插件自己的文件，DSH 不读它）：
 #   install -m 600 /dev/null /root/.dsh/secrets.env

@@ -76,7 +76,7 @@ export function createScmClient(config, token, fetchImpl = globalThis.fetch) {
             accept: github ? 'application/vnd.github+json' : 'application/json',
             'user-agent': 'dsh-router',
         };
-        const secret = token();
+        const secret = await token();
         if (secret !== undefined)
             headers.authorization = github ? `Bearer ${secret}` : `token ${secret}`;
         if (body !== undefined)

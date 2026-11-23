@@ -14,7 +14,7 @@
   `plugins/dsh-secrets/packages/client-ui-secrets/`（只读密钥看板）、`.deps/`（构建依赖清单）、
   `docs/INDEX.md`、`docs/UI-STYLE.md`、`docs/DSH-HUB-PROTOCOL-v2.md`、`docs/DEPLOY-HUB-PROMPT.md`
 - 运行基线：DSH `0.2.2-rc.5`、Node >= 24.9（DSH 0.2.2-rc.5 本身的要求）、profile `web`
-- 仓库：`https://8.134.170.38:8444/dev/dsh-warroom.git`（私有，mTLS；见 `CLONE.md`）
+- 仓库：`https://<server>:8444/dev/dsh-warroom.git`（私有，mTLS；见 `CLONE.md`）
 
 > 本文件里的路径都以**仓库根目录**为起点。仓库用 `plugins/<插件名>/` 布局；下载包 zip 可能
 > 按插件平铺（`dsh-router-b/`…），对照表见 1.2。
@@ -318,7 +318,7 @@ client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh
 |---|---|
 | 职责 | 存任务、按工作区 / 机器 / 能力路由、租约与重试、产物；给多个控制方和 N 个 worker 服务 |
 | 启动 | `node services/dsh-hub/server.mjs`（Node >= 22，无第三方依赖）；systemd unit 模板 `deploy/dsh-hub.service` |
-| 端口 | 7891（服务器 `8.134.170.38:7891`；7890 是 MYDESK 本机 Clash 代理端口，不要混用） |
+| 端口 | 7891（服务器 `<server>:7891`；7890 是 MYDESK 本机 Clash 代理端口，不要混用） |
 | 配置 / 状态 | `<DSH home>/agent-hub/hub.json`（模板 `hub.example.json`）、`state.json`、`controllers.json`、`artifacts/`；**都不入库** |
 | 令牌 | 只能在 hub 机器上签发：`node server.mjs controller add <id>`（只显示一次） |
 | 本地联调 | `deploy/docker/`：`docker compose up -d --build hub`；生成的 CA 在 `deploy/docker/out/`（已被 `.gitignore` 排除） |
@@ -362,7 +362,7 @@ client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh
 | profile 覆盖层里的路径 | `/root/.dsh/profiles/web/cordis.patch.yml` | `profile/cordis.patch.yml` 已脱敏，但仍含 `/srv/...` 的 Exa 路径 | 按 6 节逐条改 |
 | 加密保险库 | `/root/.dsh/secrets.vault`、`/root/.dsh/secrets.key`、`/etc/dsh-secrets.env` | **没有，也不应该有** | 新机重新生成（见 3.5 与 8.4） |
 | 运行态 | `/root/.dsh/sessions/`、`router/board.json`、`tiers.json`、`egress/config.json`、`vpn/profiles.json`、`vpn/secrets/` | 没有 | 新机自动生成空态；要历史数据单独迁移 |
-| 机器 IP / 证书 | `8.134.170.38`（证书里仍是旧 CN/SAN）、`/etc/nginx/tls/*` | 模板里用 `__SERVER_NAME__` 等占位符；`deploy/nginx-dsh-web.conf` 里还是 `8.134.170.38` | 改成你的域名/IP，并重签/自签证书 |
+| 机器 IP / 证书 | `<server>`（证书里仍是旧 CN/SAN）、`/etc/nginx/tls/*` | 模板里用 `__SERVER_NAME__` 等占位符；`deploy/nginx-dsh-web.conf` 里还是 `<server>` | 改成你的域名/IP，并重签/自签证书 |
 | 工作区路径 | `/srv/workspace`、`/srv/workspace/deepseek-harness`、`/srv/dsh-*` | `profile/package.json`、`plugins/dsh-router-b/cordis.patch.yml`、`safe-build-host.sh`、`tsconfig.json`、secrets 脚本里都有 | 按 6 节替换 |
 | Exa stdio 的路径 | `/srv/workspace/deepseek-harness/vendor/exa-mcp-server` | **已入仓** `vendor/exa-mcp-server/`（19 文件、MIT、3.5.1），含 `dist/stdio.cjs` 与 `LICENSE` | **不用重装**；只把 `profile/cordis.patch.yml:258` 改指到 `<CHECKOUT>/vendor/...`，需要更新时按 2.3 重建 |
 | 浏览器截图工具 | `/opt/shot/venv/bin/python`、`/srv/browser/lanes`、`/srv/browser/identities`、CDP `127.0.0.1:9222` | `scripts/browser`、`scripts/browser.py` 已入仓 | 仅当你要用这套工具才改 shebang / venv / 根目录；**DSH 运行不需要它们** |
@@ -414,12 +414,12 @@ WantedBy=multi-user.target
 | 7 | `plugins/dsh-router-b/packages/host-router/tsconfig.json:17` | `typeRoots` 指向 `/usr/local/pnpm-global/store/.../@types`（带 store hash） | `<你的 node_modules>/@types`（例：`/opt/dsh-tsc/node_modules/@types`） |
 | 8 | `plugins/dsh-router-b/scripts/safe-restart.sh:10` | `BOARD=/root/.dsh/router/board.json` | `BOARD="${DSH_HOME:-$HOME/.dsh}/router/board.json"` |
 | 9 | `plugins/dsh-vpn/cordis.patch.yml:28` | `localProbePort: 42443` | 改成你的 DSH 端口（与 unit `--port`、gate `GATE_UPSTREAM_PORT` 一致） |
-| 10 | `plugins/dsh-router-b/deploy/nginx-dsh-web.conf:8` | `server_name 8.134.170.38;` | `server_name <你的域名或IP>;` |
+| 10 | `plugins/dsh-router-b/deploy/nginx-dsh-web.conf:8` | `server_name <server>;` | `server_name <你的域名或IP>;` |
 | 11 | `plugins/dsh-router-b/deploy/nginx-dsh-web.conf:10-11` | `/etc/nginx/tls/dsh.crt` / `dsh.key` | 你的证书/私钥路径 |
 | 12 | `plugins/dsh-router-b/deploy/E0-install-gate.sh:12,40,50-51,75` | 写 `/etc/systemd/system/dsh-web-gate.service`、`/etc/nginx/sites-available/dsh-web`、`/etc/nginx/tls/dsh.*`、`/etc/nginx/.dsh-auth` | 按你的路径改；或不用这个脚本，手工照 `docs/nginx/dsh-web.conf` 建 |
 | 13 | `plugins/dsh-secrets/scripts/scan-keys.mjs:51` | `const DEFAULT_ROOT = '/srv/workspace'` | 改成你的工作区根（`--root` 也可覆盖，见 `--help`） |
 | 14 | `plugins/dsh-secrets/scripts/ingest-file.mjs:66` | `const DEFAULT_KEYS_DIR = '/srv/workspace/keys'` | 改成你的待导入目录 |
-| 15 | 不在仓库：systemd unit | `--trusted-host 8.134.170.38:8443`、`User=root`、`/var/log/dsh-web.log`、`/usr/local/pnpm-global/...` | 你的 host、运行用户、日志、dsh 路径；见第 5 节模板 |
+| 15 | 不在仓库：systemd unit | `--trusted-host <server>:8443`、`User=root`、`/var/log/dsh-web.log`、`/usr/local/pnpm-global/...` | 你的 host、运行用户、日志、dsh 路径；见第 5 节模板 |
 | 16 | 不在仓库：Gitea 8444 | `/etc/nginx/tls/{gitea.crt,gitea.key,client-ca.crt}`、`ssl_verify_client on` | 由管理员线下提供；`docs/nginx/gitea.conf` 只给结构 |
 | 17 | 不在仓库：`/etc/dsh-secrets.env` | 600 权限，内容只有 `DSH_SECRETS_PASSPHRASE=<新口令>` | 新机自己生成，见 8.4 |
 | 18 | `docs/nginx/*.conf` | `__SERVER_NAME__`、`__TLS_CERT__`、`__TLS_KEY__`、`__CLIENT_CA__`、`__HTPASSWD_FILE__`、`__SITE_ROOT__` | 见 7 节占位符表 |
@@ -444,7 +444,7 @@ WantedBy=multi-user.target
 | `__CLIENT_CA__` | Gitea mTLS 的客户端 CA 证书路径（`ssl_client_certificate`） | `docs/nginx/gitea.conf` | 例：`/etc/nginx/tls/client-ca.crt` |
 | `__HTPASSWD_FILE__` | basic-auth 口令文件路径 | `docs/nginx/dsh-web.conf` | 例：`/etc/nginx/.dsh-auth`（`htpasswd -c` 生成） |
 | `__SITE_ROOT__` | 静态站点根目录 | `docs/nginx/couple-fit.conf` | 你的页面目录 |
-| `<user>` / `<server>` | SSH 账号 / 服务器地址 | `CLONE.md` | 例：`root` / `8.134.170.38` |
+| `<user>` / `<server>` | SSH 账号 / 服务器地址 | `CLONE.md` | 例：`root` / `<server>` |
 | `<CHECKOUT>` / `<WS>` / `<TSC>` | 代码树根 / 工作区根 / TypeScript 路径 | 本文件 | 你的真实路径 |
 | `${credential:NAME}` / `${secret:NAME}` | **运行期**引用，不是占位符 | `profile/cordis.patch.yml`、工具调用 | 不要替换；在 `.credentials.yaml` / vault 里录值 |
 
@@ -500,7 +500,7 @@ DSH 版本必须是 `0.2.2-rc.5`，不要混用其它版本。
 
 ```bash
 mkdir -p "$HOME/src" && cd "$HOME/src"
-git clone https://ops1e5d1a@8.134.170.38:8444/dev/dsh-warroom.git
+git clone https://<gitea-user>@<server>:8444/dev/dsh-warroom.git
 cd dsh-warroom
 git checkout v2026.11.21
 export R="$(pwd)/plugins"
@@ -591,7 +591,7 @@ systemctl daemon-reload
 
 | 必须人工提供的东西 | 从哪来 | 能否从仓库或旧机复制 |
 |---|---|---|
-| Gitea 登录口令（用户名 `ops1e5d1a`） | 服务器 `/root/.gitea-admin.cred`，管理员**线下**给 | 否 |
+| Gitea 登录口令（用户名 `<gitea-user>`） | 服务器 `/root/.gitea-admin.cred`，管理员**线下**给 | 否 |
 | `client.p12` + p12 口令 + `gitea.crt` | 管理员线下给；源目录 `/srv/workspace/.dsh-artifacts/gitea-mtls/` | 否（凭据） |
 | Gitea mTLS 的客户端 CA 私钥 | 只在服务器 `/etc/nginx/tls/` | **绝不**分发 |
 | 8443 的 TLS 证书/私钥 | 自签或 ACME | 可重新生成 |
@@ -613,8 +613,8 @@ chmod 600 /etc/nginx/tls/dsh.key
 openssl x509 -in /etc/nginx/tls/dsh.crt -noout -subject -dates -ext subjectAltName
 ```
 
-> 8444 的 Gitea 证书：当前包里 `gitea.crt` 的 SAN 只有旧 IP `8.163.126.253` 和 `127.0.0.1`，
-> **不含 `8.134.170.38`**。要么管理员重签把新 IP 加进 SAN，要么客户端临时 `-c http.sslVerify=false`
+> 8444 的 Gitea 证书：当前包里 `gitea.crt` 的 SAN 只有旧 IP `<旧地址>` 和 `127.0.0.1`，
+> **不含 `<server>`**。要么管理员重签把新 IP 加进 SAN，要么客户端临时 `-c http.sslVerify=false`
 > 单次 clone。详见 `CLONE.md` 2.5。
 
 ### 8.6 nginx（8443 DSH Web / 8444 Gitea / 可选 8445 / 8450）
@@ -730,7 +730,7 @@ chmod 700 ~/.dsh
   `LICENSE` 与 `dist/stdio.cjs`）和 `scripts/browser`、`scripts/browser.py`（本机浏览器工具）。
   它们不含 `node_modules`，也不含 `/srv/browser` 的 lane/profile 运行态。
 - **不含真实 IP/域名证书**：`docs/nginx/*.conf` 是脱敏模板；`deploy/nginx-dsh-web.conf` 里的
-  `8.134.170.38` 只是源机值，换机要改。
+  `<server>` 只是源机值，换机要改。
 
 ---
 
@@ -765,7 +765,7 @@ git ls-files | grep -E '\.(pem|key|p12|pfx|jks)$' \
 
 ```bash
 # 1) clone + 切 tag（证书见 CLONE.md）
-git clone https://ops1e5d1a@8.134.170.38:8444/dev/dsh-warroom.git && cd dsh-warroom
+git clone https://<gitea-user>@<server>:8444/dev/dsh-warroom.git && cd dsh-warroom
 git checkout v2026.11.21
 export R="$(pwd)/plugins" P="$HOME/.dsh/profiles/web"
 

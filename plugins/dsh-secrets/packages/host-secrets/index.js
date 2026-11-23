@@ -4,9 +4,9 @@
  * Registers the secret_* tools and, when available and enabled, a global
  * `tools/post-execute` listener that redacts known secret values from the
  * text content of every tool result. When the Harness exposes `webServer`, it
- * also mounts the read-only, login-guarded dashboard bridge
- * (`GET /api/secrets/summary`, `GET /api/secrets/list`, see bridge.js), which
- * serves metadata, fingerprints and lengths only. See ../../DESIGN.md and
+ * also mounts the login-guarded dashboard routes: the read-only bridge
+ * (`GET /api/secrets/summary`, `GET /api/secrets/list`, see bridge.js) and the
+ * management routes (manage.js). No route ever returns a secret value. See ../../DESIGN.md and
  * ../../docs/DASHBOARD.md.
  *
  * @module dsh-host-secrets
@@ -14,6 +14,7 @@
 
 import { BRIDGE_BASE, createRoutes, requireLogin } from './bridge.js'
 import { resolveConfig } from './config.js'
+import { createManageRoutes } from './manage.js'
 import { createRedactor } from './redact.js'
 import { createTools } from './tools.js'
 import { RESERVED_ENV_RE, createEnvSource, isDshDotEnv } from './env-file.js'
@@ -85,7 +86,8 @@ export function apply(ctx, rawConfig) {
       names: config.keySource === 'passphrase-env' ? [config.passphraseEnv] : [],
     }),
   })
-  for (const tool of createTools({ vault, config, logger: ctx.logger })) {
+  const tools = createTools({ vault, config, logger: ctx.logger })
+  for (const tool of tools) {
     ctx.effect(() => ctx.tools.register(tool))
   }
   if (config.redactToolOutput && typeof ctx.on === 'function') {
@@ -95,20 +97,23 @@ export function apply(ctx, rawConfig) {
       ctx.logger?.warn?.('dsh-secrets: tools/post-execute is not available; global output redaction is off')
     }
   }
-  mountBridge(ctx, vault)
+  mountBridge(ctx, vault, config, tools)
   ctx.logger?.info?.(`dsh-secrets: vault ${config.vaultPath} (keySource ${config.keySource}`
     + (config.keySource === 'passphrase-env' ? `, passphrase from $${config.passphraseEnv} or ${config.envFile === null ? '(no env file)' : isDshDotEnv(config.envFile, config.dshHome) && RESERVED_ENV_RE.test(config.passphraseEnv) ? `(not ${config.envFile}: DSH's own .env)` : config.envFile}` : `, keyfile ${config.keyfilePath}`)
     + '), 10 tools registered')
 }
 
 /**
- * Mount the read-only dashboard routes on `ctx.webServer` (optional service,
- * same seam and login wrapper as dsh-token-stats). Without `ctx.inject` or a
+ * Mount the dashboard routes on `ctx.webServer` (optional service, same seam
+ * and login wrapper as dsh-token-stats): the read-only bridge (bridge.js) and
+ * the management routes (manage.js). Without `ctx.inject` or a
  * `webServer.register`, the tools keep working and only the page has no data.
  * @param {any} ctx
  * @param {Vault} vault
+ * @param {any} config
+ * @param {any[]} tools
  */
-function mountBridge(ctx, vault) {
+function mountBridge(ctx, vault, config, tools) {
   if (typeof ctx.inject !== 'function') return
   ctx.inject(['webServer'], (webCtx) => {
     const webServer = webCtx.webServer
@@ -118,10 +123,15 @@ function mountBridge(ctx, vault) {
     }
     // Login is checked here: a plugin route outranks the connection's own `/api` check.
     const connection = () => (typeof ctx.get === 'function' ? ctx.get('connection') : undefined)
-    for (const route of createRoutes({ vault, logger: ctx.logger })) {
+    const credentials = () => (typeof ctx.get === 'function' ? ctx.get('credentials') : undefined)
+    const routes = [
+      ...createRoutes({ vault, logger: ctx.logger }),
+      ...createManageRoutes({ vault, tools, config, logger: ctx.logger, credentials }),
+    ]
+    for (const route of routes) {
       const guarded = requireLogin(route, connection)
       webCtx.effect(() => webServer.register(guarded), `dsh-secrets: ${route.path}`)
     }
-    ctx.logger?.info?.(`dsh-secrets: read-only dashboard bridge mounted at ${BRIDGE_BASE}/{summary,list}`)
+    ctx.logger?.info?.(`dsh-secrets: dashboard bridge mounted at ${BRIDGE_BASE} (read: summary, list, credentials, plugins; write: vault, credentials, hub)`)
   })
 }

@@ -471,8 +471,8 @@ test('envFile = <DSH home>/.env with tokenEnv DSH_HUB_TOKEN: the file is never r
 })
 
 test('the guard also matches Windows paths (backslashes, other case) and ~/.dsh without DSH_HOME', async () => {
-  const winHome = 'C:\\Users\\13558\\.dsh'
-  for (const envFile of ['c:\\users\\13558\\.DSH\\.env', 'C:/Users/13558/.dsh/.env', 'C:\\Users\\13558\\.dsh\\agent-hub\\..\\.ENV']) {
+  const winHome = 'C:\\Users\\alice\\.dsh'
+  for (const envFile of ['c:\\users\\alice\\.DSH\\.env', 'C:/Users/alice/.dsh/.env', 'C:\\Users\\alice\\.dsh\\agent-hub\\..\\.ENV']) {
     const fs = fakeFs({ [envFile]: `DSH_HUB_TOKEN=${DOT_ENV_TOKEN}` })
     const { client } = makeClient(() => ok({ agents: [] }), { env: { DSH_HOME: winHome }, fs, envFile, platform: 'win32' })
     assert.equal(client.config.envFileBlocked, true, envFile)
@@ -481,7 +481,7 @@ test('the guard also matches Windows paths (backslashes, other case) and ~/.dsh 
     assert.deepEqual(fs.reads, [], envFile)
   }
   // lower-case dsh_ prefix is reserved too (Windows variable names are case-insensitive)
-  const lower = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: 'C:\\Users\\13558\\.dsh\\.env', tokenEnv: 'dsh_hub_token' }, { env: { DSH_HOME: winHome } }, hermetic())
+  const lower = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: 'C:\\Users\\alice\\.dsh\\.env', tokenEnv: 'dsh_hub_token' }, { env: { DSH_HOME: winHome } }, hermetic())
   assert.equal(lower.envFileBlocked, true)
   // no DSH_HOME: ~/.dsh/.env is DSH's file
   const home = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: '/home/u/.dsh/.env' }, { fs: fakeFs(), env: {}, homedir: () => '/home/u' })
@@ -512,7 +512,7 @@ const CTL_ENV = '/srv/dsh/agent-hub/controller.env'
 const CA_PATH = '/srv/dsh/agent-hub/hub-ca.pem'
 /** A complete MYDESK-style controller.env (bare IP, Clash proxy, CA, token). */
 const ctlFile = (over = {}) => {
-  const values = { DSH_HUB_URL: '8.134.170.38', DSH_HUB_CONTROLLER_ID: CONTROLLER, DSH_HUB_PROXY: 'http://127.0.0.1:7890', DSH_HUB_CAFILE: CA_PATH, DSH_HUB_TOKEN: TOKEN, ...over }
+  const values = { DSH_HUB_URL: '203.0.113.10', DSH_HUB_CONTROLLER_ID: CONTROLLER, DSH_HUB_PROXY: 'http://127.0.0.1:7890', DSH_HUB_CAFILE: CA_PATH, DSH_HUB_TOKEN: TOKEN, ...over }
   return `# dsh-agent-hub controller (test)\n${Object.entries(values).map(([k, v]) => `${k}=${v}`).join('\n')}\n`
 }
 const fromFile = key => `${CTL_ENV} (${CONFIG_ENV_KEYS[key]})`
@@ -521,7 +521,7 @@ test('controller.env alone sets hubUrl, controllerId, proxy and caFile; each sou
   assert.deepEqual(CONFIG_ENV_KEYS, { hubUrl: 'DSH_HUB_URL', controllerId: 'DSH_HUB_CONTROLLER_ID', proxy: 'DSH_HUB_PROXY', caFile: 'DSH_HUB_CAFILE' })
   const c = resolveConfig({ envFile: CTL_ENV }, hermetic({ fs: fakeFs({ [CTL_ENV]: ctlFile() }) }))
   assert.equal(c.ok, true, c.problems.join())
-  assert.equal(c.hubUrl, 'https://8.134.170.38:7891', 'bare IP completed like the worker does')
+  assert.equal(c.hubUrl, 'https://203.0.113.10:7891', 'bare IP completed like the worker does')
   assert.equal(c.controllerId, CONTROLLER)
   assert.deepEqual([c.proxyMode, c.proxy], ['url', 'http://127.0.0.1:7890'])
   assert.equal(c.caFile, CA_PATH)
@@ -534,7 +534,7 @@ test('a client configured only by controller.env sends to the file\'s hub; editi
   const fs = fakeFs({ [CTL_ENV]: ctlFile({ DSH_HUB_PROXY: 'off' }) })
   const { client, calls, logger } = makeClient(() => ok({ agents: [] }), { hubUrl: undefined, controllerId: undefined, envFile: CTL_ENV, env: {}, fs, readCa: async () => 'PEM' })
   await client.listAgents()
-  assert.equal(calls[0].url.href, `https://8.134.170.38:7891/v1/ctl/agents?id=${CONTROLLER}`)
+  assert.equal(calls[0].url.href, `https://203.0.113.10:7891/v1/ctl/agents?id=${CONTROLLER}`)
   assert.equal(calls[0].headers[TOKEN_HEADER], TOKEN)
   assert.equal(calls[0].options.ca, 'PEM')
   fs.files[CTL_ENV] = ctlFile({ DSH_HUB_URL: 'https://hub.example:7891', DSH_HUB_PROXY: 'off', DSH_HUB_CAFILE: '' })
@@ -585,26 +585,26 @@ test('the process environment beats controller.env (and says so); the token stil
 
 test('bare hub addresses are completed like the worker does: https:// and port 7891; a trailing /v1 is dropped', () => {
   const url = hubUrl => resolveConfig({ hubUrl, controllerId: 'dsh-x' }, hermetic())
-  assert.equal(normalizeHubUrl('8.134.170.38'), 'https://8.134.170.38:7891/')
+  assert.equal(normalizeHubUrl('203.0.113.10'), 'https://203.0.113.10:7891/')
   for (const [input, expected] of [
-    ['8.134.170.38', 'https://8.134.170.38:7891'],
-    [' 8.134.170.38 ', 'https://8.134.170.38:7891'],
-    ['8.134.170.38:9443', 'https://8.134.170.38:9443'],
+    ['203.0.113.10', 'https://203.0.113.10:7891'],
+    [' 203.0.113.10 ', 'https://203.0.113.10:7891'],
+    ['203.0.113.10:9443', 'https://203.0.113.10:9443'],
     ['hub.example', 'https://hub.example:7891'],
     ['hub.example:443', 'https://hub.example'],
     ['[::1]', 'https://[::1]:7891'],
     ['https://hub.example', 'https://hub.example'],
-    ['https://8.134.170.38:7891', 'https://8.134.170.38:7891'],
+    ['https://203.0.113.10:7891', 'https://203.0.113.10:7891'],
   ]) {
     const c = url(input)
     assert.equal(c.ok, true, `${input}: ${c.problems}`)
     assert.equal(c.hubUrl, expected, input)
   }
-  const v1 = url('8.134.170.38:7891/v1')
-  assert.equal(v1.hubUrl, 'https://8.134.170.38:7891')
+  const v1 = url('203.0.113.10:7891/v1')
+  assert.equal(v1.hubUrl, 'https://203.0.113.10:7891')
   assert.match(v1.warnings.join(), /ends in \/v1 \(the worker form\)/)
   assert.equal(url('http://127.0.0.1:7891/v1/').hubUrl, 'http://127.0.0.1:7891')
-  assert.match(url('user:pw@8.134.170.38').problems.join(), /must not contain credentials/)
+  assert.match(url('user:pw@203.0.113.10').problems.join(), /must not contain credentials/)
   assert.match(url('not a url').problems.join(), /not a valid URL/)
 })
 

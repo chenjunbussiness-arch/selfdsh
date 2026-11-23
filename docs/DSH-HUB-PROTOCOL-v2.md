@@ -45,6 +45,7 @@ v1 是挂在 DSH web server 里的插件；v2 改成**独立服务 dsh-hub**：�
 - worker 启动时算出 `{name: path}`，**只把名字**报给 hub（注册和心跳都带），路径不出本机。
 - 领到任务后，worker 在本地 `task.json` 里补上 `workspace_path`（本机真实路径），供 agent 使用。
 - 映射里不存在、或路径不存在的工作区，不报给 hub。
+- 同一个文件还可以写这台机器的 worker 设定：`agentId`、`platform`、`role`、`capabilities`、`maxConcurrency`、`pullEverySeconds`。命令行参数和环境变量优先，其次是这里。每台机器一份，不入库（示例：`plugins/dsh-agent-hub/scripts/profile.local-dsh.example.json`）。
 
 ## 4. 路由
 
@@ -58,7 +59,8 @@ hub 派给某 worker 的条件**全部满足**：
 1. `agent` 是这个 worker 的 id，或 `pool:<能力>` 且 worker 有这个能力；
 2. 任务有 `workspace` 时，worker 当前上报的工作区里有它，并且批准时授予过它；
 3. 任务有 `node` 时，和 worker 的 `node` 一致；
-4. `depends_on` 都已 completed；不超过 worker 的 `max_concurrency`。
+4. `depends_on` 都已 completed；不超过 worker 的 `max_concurrency`；
+5. 任务有 `capability` 时，worker 有这个能力；能力写成 `name:N` 时，同一能力最多同时跑 N 个（见第 11 节）。
 
 **控制方隔离**：取消、重试只能由 `created_by` 那个控制方做；查看对所有控制方开放。
 
@@ -232,3 +234,23 @@ worker 客户端在 `task.json` 里写 `effort_resolved`：任务自己的 effor
 
 **建议**：`fast` 适合简单查询、小文档；`balanced` 适合大多数文档、调研和一般代码；`smart` 适合复杂编程和难的推理。
 
+## 11. 多能力、派单 agent、MCP 接入和 DSH 兜底
+
+细节和接口表见 `services/dsh-hub/README.md` 第 5.3、5.4、6、6.2 节，这里只列规则。
+
+**分工**：云端 DSH / 云端 agent 派活（控制方，或角色 `dispatcher` 的 agent）；本地 agent 执行（`worker` / `tester`）；Quick 这类 agent 只干活（`worker`，经 MCP 拉任务）；`observer` 只看。
+
+**一个 agent 干多种活**：`capabilities` 写成 `name` 或 `name:N`，例如本地 DSH `["browser:1", "test:2", "code:2"]`。任务带 `capability` 说明走哪条线；`pool:<能力>` 任务自动带上。总数仍受 `max_concurrency` 限制。
+
+**派单 agent**：`dispatcher` 用自己的 worker 令牌调 `/v1/dispatch`、`/v1/dispatched`、`/v1/cancel`，`created_by` 记为 `agent:<id>`，只能管自己派的任务。
+
+**不开 MCP 的 agent（AWS Quick）**：hub 自己当 MCP 服务器（`/mcp`，Streamable HTTP，只回 JSON）。agent 用 `client_id` = agent id、`client_secret` = worker 令牌在 `/oauth/token` 换 15 分钟的 Bearer，然后用 `next_task` / `get_input` / `report_progress` / `submit_result` / `release_task` 五个工具。按自己的计划定时跑，周期写在 `pull_every_seconds`。
+
+**做不了就交还**：`/v1/release`（MCP 里是 `release_task`）把任务放回队列，不计尝试次数，这个 agent 不会再领到它。
+
+**DSH 兜底**：任务在规定时间内没有合适的 worker 领走，DSH 自己做（hub 记为保留 id `dsh-self`）。
+
+- 等待时间：任务的 `fallback_after_seconds`，否则 600 秒；派给定时拉取的 agent 时取 600 秒和两倍周期中较大者。依赖没完成不计时。
+- 不兜底：`fallback: "none"`；`capability` 在 `fallback.noFallbackCapabilities` 里（默认 `quick`）；代码任务而 DSH 没有这个工作区。
+- 只试一次：DSH 失败或超时（`FALLBACK_TIMEOUT`）任务就失败；要再来用 `retry`。
+- DSH 接手后原 worker 再报这个任务会收到 `abort`。

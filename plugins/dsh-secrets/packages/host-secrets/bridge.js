@@ -88,7 +88,7 @@ export function classifyLoadError(error) {
  * readable). The material is zeroed immediately and never leaves this function.
  * @param {import('./vault.js').Vault} vault
  */
-async function keyConfigured(vault) {
+export async function keyConfigured(vault) {
   try {
     const material = await vault.keyMaterial()
     material.fill(0)

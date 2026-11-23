@@ -178,7 +178,7 @@ lib/ 等产物已存在于工作区，复制整个目录过去就能直接运行
 | DSH | 见 §2 安装根 | `pnpm add -g @deepseek-ai/dsh@0.2.2-rc.5` | 是 | 同左（rc 版可能需要 minimumReleaseAge 豁免，未实测） |
 | /usr/local/bin/dsh | → /usr/local/pnpm-global/bin/dsh | 手工链接 | 是 | `ln -s /usr/local/pnpm-global/bin/dsh /usr/local/bin/dsh` |
 | zod 补丁 | /usr/local/bin/dsh-fix-zod | systemd ExecStartPre | 是 | 拷脚本，`chmod +x` |
-| systemd 单元 | /etc/systemd/system/dsh-web.service | 127.0.0.1:42443，--trusted-host 8.134.170.38:8443 | 是 | 拷文件后 `systemctl daemon-reload && systemctl enable --now dsh-web` |
+| systemd 单元 | /etc/systemd/system/dsh-web.service | 127.0.0.1:42443，--trusted-host <server>:8443 | 是 | 拷文件后 `systemctl daemon-reload && systemctl enable --now dsh-web` |
 | 辅助脚本 | /usr/local/bin/gate、dsh-web-gate.mjs、dsh-web-url、screenshot 链接 | 手工放置 | 是 | 逐个拷贝；`ln -s /srv/workspace/bin/screenshot /usr/local/bin/screenshot` |
 | 跳板链接 | /srv/dsh-router-b、/srv/dsh-egress、/srv/dsh-vpn | → /srv/workspace/deepseek-harness/* | 是 | 见下 |
 | profile 依赖与 bundles | /root/.dsh/profiles/web/package.json | link: + bundles 列表 | 是（或整份拷过去） | 跑 install.mjs |

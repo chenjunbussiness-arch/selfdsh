@@ -119,7 +119,7 @@ DSH 把 profile 数据写在 `$DSH_HOME/vpn`（未设时 `~/.dsh/vpn` → `/root
    # 打包并上传（排除 node_modules、预览产物、tsbuildinfo）
    cd E:\PythonProject\dsh-netops
    tar --exclude=node_modules --exclude=preview/dist --exclude='*.tsbuildinfo' --exclude=tests -czf $env:TEMP\dsh-vpn.tgz vpn
-   scp -i C:\Users\13558\.ssh\ali-zzl-harness.pem $env:TEMP\dsh-vpn.tgz root@8.134.170.38:/tmp/
+   scp -i <你的私钥>.pem $env:TEMP\dsh-vpn.tgz root@<server>:/tmp/
    ```
    ```bash
    mkdir -p /srv/dsh-vpn && tar -xzf /tmp/dsh-vpn.tgz -C /srv/dsh-vpn --strip-components=1
@@ -160,7 +160,7 @@ DSH 把 profile 数据写在 `$DSH_HOME/vpn`（未设时 `~/.dsh/vpn` → `/root
 
 先决条件：已装 openfortivpn，lead 拿到一个测试网关的 host/port/账号（或 token URL）和一个只在内网可达的目标 IP。保持另一条 SSH 会话。
 
-1. 打开 `https://8.134.170.38:8443/`，侧栏有「VPN」，页头**没有**「示例数据」徽标。
+1. 打开 `https://<server>:8443/`，侧栏有「VPN」，页头**没有**「示例数据」徽标。
 2. 未装 openfortivpn 时，状态卡显示「服务器上没有安装 openfortivpn」和安装命令，连接按钮不可点。
 3. 新建 `password` profile，目标填内网目标 IP（先不用主机名）。保存后：密码框清空；`curl -s localhost:42443/api/vpn/profiles`（带 DSH 的 token cookie）的返回里只有 `secretConfigured: true`；`stat -c '%a %n' /root/.dsh/vpn /root/.dsh/vpn/secrets/*` 为 `700` 和 `600`。
 4. 记录基线：`ip route`、`cat /etc/resolv.conf`、`md5sum /etc/resolv.conf`。

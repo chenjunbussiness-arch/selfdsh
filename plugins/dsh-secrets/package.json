@@ -2,7 +2,7 @@
   "name": "dsh-secrets",
   "version": "0.1.0",
   "private": true,
-  "description": "Local encrypted secret vault for DeepSeek Harness: agents can store and use secrets (env injection, HTTP placeholders) but never read them back, plus a read-only, value-free dashboard page. Required: the master passphrase DSH_SECRETS_PASSPHRASE in <DSH home>/secrets.env (not .env), or a keyfile. See README.md",
+  "description": "Local encrypted secret vault for DeepSeek Harness: agents can store and use secrets (env injection, HTTP placeholders) but never read them back, plus a write-only management page (vault, DSH credentials, agent-hub address, plugin needs). Required: the master passphrase DSH_SECRETS_PASSPHRASE in <DSH home>/secrets.env (not .env), or a keyfile. See README.md",
   "type": "module",
   "icon": "./icon.svg",
   "main": "index.js",

@@ -22,7 +22,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { compileAllow, DEFAULT_MAX_RESULT_BYTES, resolveListenHost } from './http.js'
 
 export const DEFAULT_PORT = 7891
-export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes']
+export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'mcp']
 
 /** A configuration problem: the service must not start (exit code 78, EX_CONFIG). */
 export class ConfigError extends Error {}
@@ -75,7 +75,18 @@ export function resolveConfig(raw = {}, { env = {}, dir = '.' } = {}) {
 
   if (raw.trustProxy !== undefined && typeof raw.trustProxy !== 'boolean') throw new ConfigError('hub.json: trustProxy must be true or false')
 
+  const fb = raw.fallback ?? {}
+  if (typeof fb !== 'object' || Array.isArray(fb) || fb === null) throw new ConfigError('hub.json: fallback must be an object')
+  if (fb.enabled !== undefined && typeof fb.enabled !== 'boolean') throw new ConfigError('hub.json: fallback.enabled must be true or false')
+  if (fb.noFallbackCapabilities !== undefined && (!Array.isArray(fb.noFallbackCapabilities) || fb.noFallbackCapabilities.some(c => typeof c !== 'string' || !/^[a-z][a-z0-9-]{0,47}$/.test(c)))) {
+    throw new ConfigError('hub.json: fallback.noFallbackCapabilities must be a list of capability names')
+  }
+  const mcp = raw.mcp ?? {}
+  if (typeof mcp !== 'object' || Array.isArray(mcp) || mcp === null || (mcp.enabled !== undefined && typeof mcp.enabled !== 'boolean')) throw new ConfigError('hub.json: mcp must be {"enabled": true|false}')
+
   const config = {
+    fallback: { enabled: fb.enabled !== false, noFallbackCapabilities: fb.noFallbackCapabilities ?? ['quick'] },
+    mcp: { enabled: mcp.enabled !== false },
     port, host, tls, allow: [...allow], trustProxy: raw.trustProxy === true,
     maxRetries: integer(raw.maxRetries, 'maxRetries', 0, 20, 2),
     offlineAfterMs: integer(raw.offlineAfterMs, 'offlineAfterMs', 1000, 7 * 86400_000, 90_000),

@@ -743,7 +743,7 @@ test('heartbeat, online window, listTasks filters and overview', async (t) => {
   const { hub, clock } = await makeHub(t)
   await provision(hub, 'worker')
   assert.equal((await hub.listAgents())[0].online, false)
-  assert.deepEqual(await hub.heartbeat('worker', { status: 'busy' }), { ok: true, agent_id: 'worker', status: 'online', server_time: iso(T0), workspaces: [], ignored_workspaces: [], abort: [], requeued: [] })
+  assert.deepEqual(await hub.heartbeat('worker', { status: 'busy' }), { ok: true, agent_id: 'worker', status: 'online', server_time: iso(T0), workspaces: [], ignored_workspaces: [], abort: [], requeued: [], reclaimed: [], pull_every_seconds: undefined, offline_after_ms: 90_000 })
   let [agent] = await hub.listAgents()
   assert.equal(agent.online, true)
   assert.equal(agent.reported_status, 'busy')

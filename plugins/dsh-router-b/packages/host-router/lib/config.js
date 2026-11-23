@@ -530,17 +530,13 @@ export function partitionBrief(partition, options) {
         return quickBrief(partition, options);
     const lines = [
         `You are a worker for the "${partition.name}" partition of this workspace.`,
-        `Your working directory is already ${partition.dir}. Treat it as the whole of your scope: do not edit files outside it.`,
+        `Your working directory is ${partition.dir}; it is your whole scope.`,
         '',
-        'Progress checklist (hard requirement; the task board reads it live):',
-        '- Before any other tool call, call `todo_write` with a plan of 3 to 8 concrete steps.',
-        '- Update it with `todo_write` immediately each time a step finishes: mark that step completed and the next one in_progress.',
-        '- Exactly one step is in_progress at any time.',
-        '- Before your final answer, call `todo_write` once more with every step completed.',
+        'Checklist (required; the task board reads it live): first call `todo_write` with 3 to 8 steps, update it as each',
+        'step finishes (one in_progress at a time), and mark all completed before your final answer.',
     ];
-    lines.push('', 'Partition rules (hard requirement):', `- Only create, edit or delete files under ${partition.dir}${partition.include === undefined ? '' : ' that match the member globs below'}.`
-        + ' Reading elsewhere is fine; changing elsewhere is not.', '- If the task cannot be finished without a change outside this partition, or without work another task must', '  do first, do not do that work and do not guess. Call `task_suspend` with your task id'
-        + (options.taskId === undefined ? '' : ` ("${options.taskId}")`) + ', a one-line `reason`,', '  and a self-contained `prerequisite` describing exactly what must be done first (add `partition` when it', '  belongs to another partition). Then end your turn. The router continues this same session with the', '  prerequisite\'s result once it is done; you keep your history and todo list.', '- List every path you changed, relative to the partition root, under `touched:` in your report.');
+    lines.push('', 'Partition rules (required):', `- Change files only under ${partition.dir}${partition.include === undefined ? '' : ' that match the member globs below'}; reading elsewhere is fine.`, '- If finishing needs a change outside this partition or work another task must do first, do not do it or', '  guess: call `task_suspend` with your task id' + (options.taskId === undefined ? '' : ` ("${options.taskId}")`)
+        + ', a one-line `reason` and a self-contained `prerequisite`', '  (add `partition` if it belongs elsewhere), then end. The router resumes this session when it is done.', '- List every path you changed, relative to the partition root, under `touched:` in your report.');
     if (partition.include !== undefined) {
         lines.push(`Member files are selected by: ${partition.include.join(', ')}.`);
     }
@@ -570,13 +566,12 @@ export function partitionBrief(partition, options) {
         if (gitRules.length > 0)
             lines.push('', 'Git rules for this partition:', ...gitRules);
     }
-    lines.push('', 'Server commands: run anything that changes the server (restart or reload a service, edit system files, '
-        + 'delete or move media, change DNS, firewall or users) through `ops_run`, never your own shell, so it is '
-        + 'logged and the dangerous ones wait for the human. Read-only looks (logs, status, disk) may use either.');
+    lines.push('', 'Server commands: anything that changes the server (services, system files, media, DNS, firewall, users) goes '
+        + 'through `ops_run`, never your own shell. Read-only looks may use either.');
     if (options.verify && partition.verify !== undefined && partition.verify.length > 0) {
         lines.push('', 'Acceptance is decided by these commands, run afterwards in your working directory:', ...partition.verify.map(command => `  ${command}`), 'Run them yourself before answering, and report their exact output rather than a summary.');
     }
-    lines.push('', 'DSH itself (hard rule): never write a host plugin\'s `lib/` directly (for example', '`dsh-router-b/packages/host-router/lib`) and never stop or restart DSH. DSH loads `lib/` at boot and', 'rewriting it while it runs can unload the plugin. Build host code with', '`/srv/workspace/deepseek-harness/dsh-router-b/scripts/safe-build-host.sh` (it writes `lib.next/`), and say', 'in your report that a restart is needed; the human runs `scripts/safe-restart.sh`. Client bundles', '(`client-ui-*/lib/client.js`) are safe to rebuild.', '', 'Screenshots: when the task involves a web page or a UI, take screenshots as evidence. The command', '`/srv/workspace/bin/screenshot <url> <out.png> [--full] [--wait ms]` launches a headless browser for one', 'capture and exits (the host has little memory: never keep a browser running). Save every image under', `\`${partition.dir}/.dsh-artifacts/${options.taskId ?? '<task-id>'}/\` (create the directory first),`, 'and list each absolute image path in your report.', '', ...REPORT_INSTRUCTION, '', 'Only report what you actually observed (command output, page text, files you checked).');
+    lines.push('', 'DSH itself (required): never write a host plugin\'s `lib/` and never stop or restart DSH. Build host code with', '`/srv/workspace/deepseek-harness/dsh-router-b/scripts/safe-build-host.sh` (writes `lib.next/`) and say a restart', 'is needed; the human runs `scripts/safe-restart.sh`. Client bundles (`client-ui-*/lib/client.js`) are safe to rebuild.', '', 'Screenshots: for a web page or UI, capture evidence with `/srv/workspace/bin/screenshot <url> <out.png> [--full] [--wait ms]`', `(one capture, then it exits; never keep a browser running). Save under \`${partition.dir}/.dsh-artifacts/${options.taskId ?? '<task-id>'}/\``, 'and list each absolute image path in your report.', '', ...REPORT_INSTRUCTION, '', 'Only report what you actually observed (command output, page text, files you checked).');
     return lines.join('\n');
 }
 /**

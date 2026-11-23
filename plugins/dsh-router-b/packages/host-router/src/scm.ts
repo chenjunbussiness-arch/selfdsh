@@ -134,7 +134,7 @@ const scrub = (text: string): string => text
  */
 export function createScmClient(
   config: ScmConfig,
-  token: () => string | undefined,
+  token: () => string | undefined | Promise<string | undefined>,
   fetchImpl: FetchLike = globalThis.fetch as unknown as FetchLike,
 ): ScmClient {
   const github = config.provider === 'github'
@@ -148,7 +148,7 @@ export function createScmClient(
       accept: github ? 'application/vnd.github+json' : 'application/json',
       'user-agent': 'dsh-router',
     }
-    const secret = token()
+    const secret = await token()
     if (secret !== undefined) headers.authorization = github ? `Bearer ${secret}` : `token ${secret}`
     if (body !== undefined) headers['content-type'] = 'application/json'
     let response

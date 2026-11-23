@@ -109,4 +109,4 @@ export declare const envToken: (config: ScmConfig) => string | undefined;
  * @param token - resolves the token at call time (undefined: anonymous reads only).
  * @param fetchImpl - `fetch`; injectable for tests.
  */
-export declare function createScmClient(config: ScmConfig, token: () => string | undefined, fetchImpl?: FetchLike): ScmClient;
+export declare function createScmClient(config: ScmConfig, token: () => string | undefined | Promise<string | undefined>, fetchImpl?: FetchLike): ScmClient;

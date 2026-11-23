@@ -18,6 +18,7 @@ test('defaults: port 7891, 127.0.0.1 without TLS, no allow list, v1 timings', ()
   assert.deepEqual(config, {
     port: DEFAULT_PORT, host: '127.0.0.1', tls: undefined, allow: [], trustProxy: false,
     maxRetries: 2, offlineAfterMs: 90_000, sweepIntervalMs: 15_000, maxResultBytes: 20 * 1024 * 1024,
+    fallback: { enabled: true, noFallbackCapabilities: ['quick'] }, mcp: { enabled: true },
   })
   assert.equal(DEFAULT_PORT, 7891)
   assert.notEqual(DEFAULT_PORT, 7890, '7890 is the Clash/mihomo proxy port on MYDESK')

@@ -1,6 +1,6 @@
 {
   "name": "dsh-client-ui-secrets",
-  "description": "Read-only secrets dashboard for the DSH Web client: a value-free table of the dsh-secrets vault (name, description, tags, fingerprint, length, update time) with tag filter and keyword search, backed by the dsh-host-secrets GET bridge",
+  "description": "Secrets & plugins page for the DSH Web client: manage the dsh-secrets vault, DSH credentials and the agent-hub address, and see what each selfdsh plugin needs. Values are write-only; no view ever shows one",
   "version": "0.1.0",
   "private": true,
   "type": "module",

@@ -3,7 +3,7 @@
 > **2026-11-23 提示**：本文是旧版说明，以根目录 [CLONE.md](../CLONE.md) 为准；clone 之后怎么装见 [README.md](../README.md)。
 
 适用：macOS / Linux 的 bash。Windows 用户请用 **Git Bash** 执行同样的命令（路径里的 `$HOME` 同样可用）。
-仓库是私有仓，地址 `https://8.134.170.38:8444/dev/dsh-warroom.git`（Gitea `dev/dsh-warroom`），
+仓库是私有仓，地址 `https://<server>:8444/dev/dsh-warroom.git`（Gitea `dev/dsh-warroom`），
 证书是自签的，认证用 **Gitea 用户名 + token**。
 
 按顺序做：**先确认网络通，再解决证书，最后 clone**。下面每一节都可以整段复制。
@@ -25,14 +25,14 @@ command -v openssl curl           # 预期打印两个路径
 
 ```bash
 curl -k -sS -o /dev/null -w '%{http_code}\n' --max-time 10 \
-  'https://8.134.170.38:8444/dev/dsh-warroom.git/info/refs?service=git-upload-pack'
+  'https://<server>:8444/dev/dsh-warroom.git/info/refs?service=git-upload-pack'
 # 预期 401：说明 8444 通了、请求到了 Gitea，只是没带凭据。
 # 超时 / Connection refused：回第 1 条检查安全组和公网 IP。
 ```
 
 ## 2. 证书
 
-服务器用的是自签证书：`subject = issuer = CN=8.134.170.38`，SAN 含 `IP:8.134.170.38` 和 `IP:127.0.0.1`，
+服务器用的是自签证书：`subject = issuer = CN=<server>`，SAN 含 `IP:<server>` 和 `IP:127.0.0.1`，
 有效期至 **2036-11-17**，只支持 TLS 1.2 / 1.3。浏览器和 git 默认都会报
 `SSL certificate problem: self-signed certificate`。两种解法，任选一种。
 
@@ -40,10 +40,10 @@ curl -k -sS -o /dev/null -w '%{http_code}\n' --max-time 10 \
 
 ```bash
 # 写法 1：环境变量，只影响这一条命令
-GIT_SSL_NO_VERIFY=true git clone https://8.134.170.38:8444/dev/dsh-warroom.git
+GIT_SSL_NO_VERIFY=true git clone https://<server>:8444/dev/dsh-warroom.git
 
 # 写法 2：-c 参数，同样只影响这一条命令
-git -c http.sslVerify=false clone https://8.134.170.38:8444/dev/dsh-warroom.git
+git -c http.sslVerify=false clone https://<server>:8444/dev/dsh-warroom.git
 ```
 
 > 不要把 `http.sslVerify=false` 写进全局配置，否则对所有仓库都关掉了证书校验。
@@ -52,26 +52,26 @@ git -c http.sslVerify=false clone https://8.134.170.38:8444/dev/dsh-warroom.git
 
 ```bash
 # 1) 从 8444 导出一份 PEM 证书（服务器证书是自签的，导出的就是它自己的 CA）
-openssl s_client -connect 8.134.170.38:8444 -servername 8.134.170.38 </dev/null 2>/dev/null \
+openssl s_client -connect <server>:8444 -servername <server> </dev/null 2>/dev/null \
   | openssl x509 -outform PEM > "$HOME/gitea-8444.crt"
 
-# 2) 复核：不是空文件，且 subject / issuer 都是 CN = 8.134.170.38
+# 2) 复核：不是空文件，且 subject / issuer 都是 CN = <server>
 ls -l "$HOME/gitea-8444.crt"
 openssl x509 -in "$HOME/gitea-8444.crt" -noout -subject -issuer -dates
 
 # 3) 让 git 只对这个地址使用这份 CA（双引号里的 URL 必须带结尾的 /）
-git config --global http."https://8.134.170.38:8444/".sslCAInfo "$HOME/gitea-8444.crt"
+git config --global http."https://<server>:8444/".sslCAInfo "$HOME/gitea-8444.crt"
 
 # 4) 验证：配置已写入，且 curl 用这份 CA 能完成 TLS 握手（401 只是没带凭据）
-git config --get http."https://8.134.170.38:8444/".sslCAInfo   # 预期打印 crt 路径
+git config --get http."https://<server>:8444/".sslCAInfo   # 预期打印 crt 路径
 curl -sS --cacert "$HOME/gitea-8444.crt" -o /dev/null -w '%{http_code}\n' --max-time 10 \
-  'https://8.134.170.38:8444/dev/dsh-warroom.git/info/refs?service=git-upload-pack'
+  'https://<server>:8444/dev/dsh-warroom.git/info/refs?service=git-upload-pack'
 ```
 
 撤销（换机器、证书轮换或不想再信任时）：
 
 ```bash
-git config --global --unset http."https://8.134.170.38:8444/".sslCAInfo
+git config --global --unset http."https://<server>:8444/".sslCAInfo
 rm -f "$HOME/gitea-8444.crt"
 ```
 
@@ -81,19 +81,19 @@ rm -f "$HOME/gitea-8444.crt"
 
 ```bash
 mkdir -p "$HOME/src" && cd "$HOME/src"       # 换成你想放代码的目录
-git clone https://8.134.170.38:8444/dev/dsh-warroom.git
+git clone https://<server>:8444/dev/dsh-warroom.git
 cd dsh-warroom
 ```
 
 首次会提示两次输入：
 
 ```text
-Username for 'https://8.134.170.38:8444': <你的Gitea用户名>
-Password for 'https://<你的Gitea用户名>@8.134.170.38:8444': <粘贴token>
+Username for 'https://<server>:8444': <你的Gitea用户名>
+Password for 'https://<你的Gitea用户名>@<server>:8444': <粘贴token>
 ```
 
 - 用户名就是 Gitea 账号名；**密码处粘贴管理员单独发给你的 token**（输入时不回显，粘贴后直接回车）。
-- 也可以把用户名写进 URL，这样只输 token：`git clone "https://<你的Gitea用户名>@8.134.170.38:8444/dev/dsh-warroom.git"`。
+- 也可以把用户名写进 URL，这样只输 token：`git clone "https://<你的Gitea用户名>@<server>:8444/dev/dsh-warroom.git"`。
 - 不想每次输，可以启用凭据缓存（可选）：macOS `git config --global credential.helper osxkeychain`；
   Linux `git config --global credential.helper 'cache --timeout=3600'`（`store` 会把 token 明文写进 `~/.git-credentials`，谨慎）。
 - **token 只放在密码提示里，不要写进 URL、脚本或提交到任何文件。**
@@ -179,9 +179,9 @@ grep -n '^### 2\.[5-8]' docs/README-MIGRATE.md
 |---|---|---|
 | `SSL certificate problem: self-signed certificate`（或 `server certificate verification failed`） | git 不信任自签证书 | 回第 2 节：临时加 `-c http.sslVerify=false`，或导出 crt 配 `http.<url>.sslCAInfo` |
 | `Authentication failed` / `401` / `403` | token 过期、粘贴错、或账号对该仓无权限 | 找管理员重发 token；确认用户名是 Gitea 账号名而不是邮箱；确认对 `dev/dsh-warroom` 至少有读权限 |
-| `Repository not found` / `remote: Repository not found` | 组织名 / 仓库名拼错，或私有仓在未通过认证时不可见 | 确认 URL 是 `https://8.134.170.38:8444/dev/dsh-warroom.git`，并在提示时填了用户名 + token |
+| `Repository not found` / `remote: Repository not found` | 组织名 / 仓库名拼错，或私有仓在未通过认证时不可见 | 确认 URL 是 `https://<server>:8444/dev/dsh-warroom.git`，并在提示时填了用户名 + token |
 | `git clone` 卡住不动，或 `Connection refused` / `Operation timed out` | 安全组没放行 TCP 8444，或公网 IP 变了 | 控制台放行 8444 入方向；用第 1 节的 `curl -k` 自检区分网络与证书问题 |
-| 导出的 `gitea-8444.crt` 是空文件 / `unable to load certificate` | 端口或 SNI 不对、或中间设备拦了 8444 | 确认 `-connect 8.134.170.38:8444` 且带 `-servername 8.134.170.38`；先跑第 1 节的 curl |
+| 导出的 `gitea-8444.crt` 是空文件 / `unable to load certificate` | 端口或 SNI 不对、或中间设备拦了 8444 | 确认 `-connect <server>:8444` 且带 `-servername <server>`；先跑第 1 节的 curl |
 
 ## 7. 结论
 

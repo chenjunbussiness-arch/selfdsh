@@ -7,8 +7,9 @@ import { CONTROLLER, HUB_URL, TOKEN, assertNoToken, b64, makeClient } from './he
 const NAMES = [
   'agent_provision', 'agent_revoke', 'agent_list', 'agent_requests', 'agent_approve', 'agent_reject',
   'task_dispatch', 'task_list', 'task_get', 'task_cancel', 'task_retry',
+  'fallback_list', 'fallback_take', 'fallback_submit',
 ]
-const READ_ONLY = new Set(['agent_list', 'agent_requests', 'task_list', 'task_get'])
+const READ_ONLY = new Set(['agent_list', 'agent_requests', 'task_list', 'task_get', 'fallback_list'])
 
 function setup(handler = () => ({ body: {} }), options = {}) {
   const base = makeClient(handler, options)
@@ -36,10 +37,10 @@ async function rejectsWith(run, status, code) {
   return caught
 }
 
-test('createTools returns the 11 DSH control tools with unchanged names', () => {
+test('createTools returns the 14 DSH control tools with unchanged names', () => {
   const { tools } = setup()
   assert.deepEqual(TOOL_NAMES, NAMES)
-  assert.equal(tools.length, 11)
+  assert.equal(tools.length, 14)
   assert.deepEqual(tools.map(tool => tool.name), NAMES)
 })
 
@@ -234,4 +235,40 @@ test('agent_list passes status / last_seen / version through (and adds the role,
   const { call } = setup(() => ({ body: { agents: [agent] } }))
   const out = await call('agent_list')
   assert.deepEqual(out.agents[0], { ...agent, role: 'worker' })
+})
+
+test('fallback tools: list, take (inputs inlined as text), submit (text files as base64)', async () => {
+  const { call, calls } = setup((c) => {
+    if (c.path === '/v1/ctl/fallback') return { body: { tasks: [{ task_id: 't9' }] } }
+    if (c.path === '/v1/ctl/fallback/take') {
+      return { body: { task: { task_id: 't9', instruction: 'Summarise.', inputs: [{ name: 'a.txt', from_task: 't9' }, { name: 'b.md', from_task: 't8' }] } } }
+    }
+    if (c.path === '/v1/ctl/fallback/input') return { raw: `content of ${c.query.get('name')}` }
+    return { body: { ok: true } }
+  })
+  const last = () => calls.at(-1)
+  const q = () => Object.fromEntries(last().query.entries())
+
+  assert.deepEqual(await call('fallback_list', { workspaces: ['ws-a', 'ws-b'] }), { tasks: [{ task_id: 't9' }] })
+  assert.deepEqual(q(), { id: CONTROLLER, workspaces: 'ws-a,ws-b' })
+
+  const taken = await call('fallback_take', { workspaces: ['ws-a'] })
+  const take = calls.find(c => c.path === '/v1/ctl/fallback/take')
+  assert.deepEqual(take.json, { workspaces: ['ws-a'] })
+  assert.equal(taken.task.instruction, 'Summarise.')
+  assert.deepEqual(taken.task.inputs.map(i => i.text), ['content of a.txt', 'content of b.md'])
+  const inputs = calls.filter(c => c.path === '/v1/ctl/fallback/input').map(c => Object.fromEntries(c.query.entries()))
+  assert.deepEqual(inputs, [
+    { id: CONTROLLER, task_id: 't9', name: 'a.txt' },
+    { id: CONTROLLER, task_id: 't9', name: 'b.md', from_task: 't8' },
+  ], 'an input from an earlier task names that task')
+
+  await call('fallback_submit', { task_id: 't9', status: 'completed', summary: 'Done.', files: [{ name: 'out.md', text: 'é' }] })
+  assert.deepEqual([last().path, last().json], ['/v1/ctl/fallback/result', { task_id: 't9', status: 'completed', summary: 'Done.', files: [{ name: 'out.md', base64: b64('é') }] }])
+})
+
+test('fallback_take with nothing due returns task null and reads no input', async () => {
+  const { call, calls } = setup(() => ({ body: { task: null } }))
+  assert.deepEqual(await call('fallback_take'), { task: null })
+  assert.equal(calls.length, 1)
 })

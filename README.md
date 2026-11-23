@@ -58,7 +58,7 @@ dsh-warroom/
         │  → 固定代理节点 → 外网                                 │  （不走代理）
         ▼                                                        ▼
    ┌──────────────────────────────────────────────────────────────────────┐
-   │  dsh-hub   服务器 8.134.170.38:7891（独立进程，dsh-agent/2.0）       │
+   │  dsh-hub   服务器 <server>:7891（独立进程，dsh-agent/2.0）       │
    │  保存任务、路由、租约、重试、产物；配置在 <DSH home>/agent-hub/hub.json │
    └──────────────────────────────────────────────────────────────────────┘
         ▲                         ▲                          ▲
@@ -70,7 +70,7 @@ dsh-warroom/
 
 - **控制方**（DSH）用 `dshc_` 令牌调用 hub 的 `/v1/ctl/*`，负责派任务、审批 worker、查看结果。插件本身不保存任务状态。
 - **worker** 用 `dsha_` 令牌直接连 hub，不经过 DSH。
-- **服务器只接受外网流量**，所以 MYDESK 上的所有请求（dsh-local、worker）都要经 `http://127.0.0.1:7890` 走一个**固定**的代理节点出去。Clash 里给 `8.134.170.38/32` 指定固定节点，不能写 DIRECT。
+- **服务器只接受外网流量**，所以 MYDESK 上的所有请求（dsh-local、worker）都要经 `http://127.0.0.1:7890` 走一个**固定**的代理节点出去。Clash 里给 `<server>/32` 指定固定节点，不能写 DIRECT。
 - 协议细节见 [docs/DSH-HUB-PROTOCOL-v2.md](docs/DSH-HUB-PROTOCOL-v2.md)。
 
 ---
@@ -80,7 +80,7 @@ dsh-warroom/
 ### 3.1 clone
 
 ```bash
-git clone https://8.134.170.38:8444/dev/dsh-warroom.git
+git clone https://<server>:8444/dev/dsh-warroom.git
 cd dsh-warroom
 ```
 
@@ -139,7 +139,7 @@ DSH_HUB_CAFILE=/root/.dsh/agent-hub/hub-ca.pem
 DSH_HUB_TOKEN=dshc_dsh-cloud_xxxxxxxx
 
 # MYDESK 上的本地 DSH（默认直连；直连不通时 DSH_HUB_PROXY=http://127.0.0.1:7890）
-DSH_HUB_URL=https://8.134.170.38:7891
+DSH_HUB_URL=https://<server>:7891
 DSH_HUB_CONTROLLER_ID=dsh-local
 DSH_HUB_PROXY=off
 DSH_HUB_CAFILE=C:/Users/<你>/.dsh/agent-hub/hub-ca.pem

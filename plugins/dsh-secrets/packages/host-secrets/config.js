@@ -15,6 +15,7 @@ const KEYS = new Set([
   'vaultPath', 'keySource', 'passphraseEnv', 'envFile', 'keyfilePath', 'scryptN', 'scryptR', 'scryptP',
   'maxOutputChars', 'execTimeoutMs', 'execMaxTimeoutMs', 'execAllowedCommands', 'httpAllowedHosts',
   'httpTimeoutMs', 'httpFollowRedirects', 'redactToolOutput', 'redactMinLength', 'lockTimeoutMs', 'lockStaleMs',
+  'hubEnvFile', 'manageCredentialRefs',
 ])
 
 function int(raw, key, fallback, min, max) {
@@ -41,6 +42,14 @@ function list(raw, key) {
     throw new Error(`dsh-host-secrets config: ${key} must be an array of non-empty strings or null`)
   }
   return [...raw]
+}
+
+function refs(raw) {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw) || raw.some(item => typeof item !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(item) || item.startsWith('DSH_'))) {
+    throw new Error('dsh-host-secrets config: manageCredentialRefs must be an array of variable names not starting with DSH_')
+  }
+  return [...new Set(raw)]
 }
 
 /**
@@ -90,5 +99,9 @@ export function resolveConfig(raw, env = process.env) {
     redactMinLength: int(config.redactMinLength, 'redactMinLength', 8, 1, 4096),
     lockTimeoutMs: int(config.lockTimeoutMs, 'lockTimeoutMs', 10_000, 10, 600_000),
     lockStaleMs: int(config.lockStaleMs, 'lockStaleMs', 30_000, 100, 3_600_000),
+    /** agent-hub's controller.env, edited by the page's hub section (keep in step with agent-hub's envFile). */
+    hubEnvFile: resolve(str(config.hubEnvFile, 'hubEnvFile', join(home, 'agent-hub', 'controller.env'))),
+    /** Extra credential refs (beyond the built-in four) the page may set; never DSH_* names. */
+    manageCredentialRefs: refs(config.manageCredentialRefs),
   }
 }

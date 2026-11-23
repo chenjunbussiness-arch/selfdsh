@@ -303,6 +303,10 @@ export interface CredentialsServiceLike {
         readonly source?: unknown;
         readonly writable?: unknown;
     }>;
+    /** The stored value (credential store first, then env fallbacks); optional on old hosts. */
+    resolve?(ref: string): Promise<{
+        readonly value?: unknown;
+    } | undefined>;
 }
 /**
  * The sandbox policy service, limited to the one grant this plugin needs.

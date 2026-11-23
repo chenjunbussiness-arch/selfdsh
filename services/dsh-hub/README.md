@@ -80,6 +80,8 @@ curl -s https://127.0.0.1:7891/v1/health            # {"ok":true,"version":"2.0.
 | `offlineAfterMs` | 整数 ≥ 1000 | `90000` | 超过这么久没有心跳、poll 或进度事件，worker 变为 `offline`，sweep 立即重排它持有的任务（见第 6.1 节） | `90000` |
 | `sweepIntervalMs` | 整数 1000..3600000 | `15000` | 清扫间隔：处理过期租约、上游失败、过期的申请 | `15000` |
 | `maxResultBytes` | 整数 65536..1073741824 | `20971520`（20 MiB） | `POST /v1/result` 和 `POST /v1/ctl/dispatch`（输入文件是 inline 上传的）的请求体上限 | `20971520` |
+| `fallback` | 对象 `{enabled, noFallbackCapabilities}` | `{"enabled": true, "noFallbackCapabilities": ["quick"]}` | DSH 兜底（见第 6.2 节）。`enabled: false` 关掉兜底；`noFallbackCapabilities` 里的能力永远不兜底（例如只有 Quick 能做的活） | `{"enabled": true, "noFallbackCapabilities": ["quick", "gpu"]}` |
+| `mcp` | 对象 `{enabled}` | `{"enabled": true}` | 是否开放 `/mcp` 和 `/oauth/token`（见第 5.4 节）。只用 REST 的部署可以关掉 | `{"enabled": false}` |
 
 其他请求体上限是固定的：`enroll`、`enroll/status`、`heartbeat` 16 KiB；`event` 和其他控制方 POST（cancel、retry、approve、reject、revoke、provision）64 KiB。
 
@@ -129,19 +131,20 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 |---|---|---|
 | `POST /v1/enroll?id=` | 无令牌。`{platform, mode, node, workspaces[], capabilities[], max_concurrency, description}`；身份以 query 的 `id` 为准，body 里的 `agent_id` 和 `from` 会被忽略，来源 IP 由 hub 自己记录 | `{request_id, poll_secret, status:"pending"}` |
 | `POST /v1/enroll/status?id=` | 无令牌。`{request_id, poll_secret}`；`id` 必须是申请人本人，否则返回 404（和查不到申请一样） | `{status}`；批准后**第一次**查询会返回 `token` |
-| `POST /v1/heartbeat?id=` | `{status?: "idle"\|"busy", workspaces?: [], running?: [task_id], client_version?}` | `{ok, agent_id, status, server_time, workspaces, ignored_workspaces, abort, requeued}`（对账见第 6.1 节） |
+| `POST /v1/heartbeat?id=` | `{status?: "idle"\|"busy", workspaces?: [], running?: [task_id], client_version?, pull_every_seconds?: 60..86400 \| null}` | `{ok, agent_id, status, server_time, workspaces, ignored_workspaces, abort, requeued, reclaimed, pull_every_seconds, offline_after_ms}`（对账见第 6.1 节） |
 | `GET /v1/poll?id=&max=1&wait=25` | `max` 1..32；`wait` 单位秒（≥0，超过 55 按 55 算） | `{tasks:[{task_id, type, title, instruction, workspace, node, ref, created_by, inputs[{name,from_task}], output, priority, deadline, lease_until, attempt, …}]}` |
 | `POST /v1/event?id=` | `{task_id, progress?, message?}`，同时续租 | `{ok, lease_until}` |
 | `POST /v1/result?id=` | `{task_id, status: completed\|failed\|partial, summary, files[{name,base64,type?,description?}], error?{code,message,retryable}, needs_input?}` | `{ok, task_status}` |
 | `GET /v1/artifact?id=&task_id=&name=[&from_task=]` | 只能下载本任务的输入，或 `depends_on` 里上游任务的产出 | 文件字节（`application/octet-stream`） |
 | `GET /v1/me?id=` | 只读，不算“出现过” | `{agent_id, status, online, last_seen, left_at, version, node, workspaces, reported_workspaces, ignored_workspaces, capabilities, running_tasks, offline_after_ms, server_time, client_ip}` |
 | `POST /v1/leave?id=` | `{reason?}` | `{ok, agent_id, status:"left", requeued, server_time}`；持有的任务立即重排 |
+| `POST /v1/release?id=` | `{task_id, reason?}`：领到了但发现做不了，交还给队列。**不计入尝试次数**，这个 worker 之后不会再领到同一个任务 | `{ok, task_status:"pending"}` |
 
 ### 5.2 控制方
 
 | 方法 路径 | 请求 | 返回 |
 |---|---|---|
-| `POST /v1/ctl/dispatch?id=` | v1 的全部字段，再加 `workspace`（`code` 类型必填）、`node`、`ref`、`require_online`（布尔）；`created_by` 由 hub 填写 | 任务对象（含 `workspace/node/ref/created_by`）；目标不在线时多一个 `warnings: ["agent-offline"]` 或 `["no-online-worker"]` |
+| `POST /v1/ctl/dispatch?id=` | v1 的全部字段，再加 `workspace`（`code` 类型必填）、`node`、`ref`、`capability`、`require_online`（布尔）、`fallback`（默认 `dsh`，或 `none`）、`fallback_after_seconds`；`created_by` 由 hub 填写 | 任务对象（含 `workspace/node/ref/created_by`）；目标不在线时多一个 `warnings: ["agent-offline"]` 或 `["no-online-worker"]` |
 | `GET /v1/ctl/tasks?id=&status=&agent=&workspace=&limit=` | `limit` 1..200，默认 50 | `{generated_at, filter:{status,agent,workspace,limit}, tasks}` |
 | `GET /v1/ctl/task?id=&task_id=` | | `{generated_at, task}`（task 含 instruction、inputs、history、result、context） |
 | `GET /v1/ctl/output?id=&task_id=&name=` | 只能下载 `result.outputs` 里列出的文件 | 文件字节 |
@@ -153,10 +156,47 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 | `POST /v1/ctl/reject?id=` | `{request_id, reason?}` | `{request_id, status}` |
 | `POST /v1/ctl/revoke?id=` | `{agent_id}`，被吊销 worker 正在执行的任务会回到队列 | worker 对象 |
 | `POST /v1/ctl/provision?id=` | `{agent_id, platform, mode, node, workspaces, capabilities, max_concurrency, description}` | `{agent, token, note}`，令牌只返回这一次 |
+| `GET /v1/ctl/fallback?id=[&workspaces=a,b]` | 等待兜底的任务（见第 6.2 节）；传了 `workspaces` 时只列 DSH 自己有这些工作区的代码任务 | `{generated_at, tasks[{…任务, waited_seconds}]}` |
+| `POST /v1/ctl/fallback/take?id=` | `{task_id?, workspaces?}`；不传 `task_id` 就取最急的一个。任务没到时间或不该兜底返回 409 `not-fallback` | `{task}`（含 instruction 和 inputs[{name, from_task}]）；没有可兜底的任务时 `{task:null}` |
+| `POST /v1/ctl/fallback/event?id=` | `{task_id, progress?, message?}`，同时续租 | `{ok, lease_until}` |
+| `POST /v1/ctl/fallback/result?id=` | 和 `/v1/result` 相同的结构 | `{ok, task_status}` |
+| `GET /v1/ctl/fallback/input?id=&task_id=&name=[&from_task=]` | 读兜底任务的输入或上游产出 | 文件字节 |
 | `GET /v1/ctl/overview?id=` | | `{protocol, agents, agent_counts{pending,online,offline,left,revoked}, task_counts, pending_requests}` |
 | `GET /v1/health` | 无令牌（但受 IP 白名单限制） | `{ok:true, version:"2.0.0", client_ip}`；`client_ip` 按 trustProxy 规则取（默认 socket 地址） |
 
 列表和详情接口的外层结构（`generated_at`、`filter`）沿用 v1 面板接口 `/api/agent-hub/admin/*` 的格式，插件可以原样转发给面板。
+
+### 5.3 派单 agent（dispatcher）
+
+角色是 `dispatcher` 的 agent（例如云端的 Claude）用自己的 `dsha_` 令牌派活，接口和控制方一样，只是路径不同，**只能管自己派的任务**：
+
+| 方法 路径 | 请求 | 返回 |
+|---|---|---|
+| `POST /v1/dispatch?id=` | 和 `/v1/ctl/dispatch` 相同；`created_by` 记为 `agent:<id>` | 任务对象 |
+| `GET /v1/dispatched?id=&status=&agent=&workspace=&limit=` | 只列自己派的任务 | `{generated_at, tasks}` |
+| `POST /v1/cancel?id=` | `{task_id, reason?}`；不是自己派的返回 403 `not-creator` | 任务对象 |
+
+不是 dispatcher 的 agent 调用这三个接口返回 403 `not-dispatcher`。
+
+### 5.4 MCP 接入（给 AWS Quick 这类只会调 MCP 的 agent）
+
+有的 agent 自己不开 MCP 给别人调，但可以**作为客户端连一个 MCP 服务器**。hub 在同一个端口上开了一个 MCP 服务器，这类 agent 连上来就能拉自己的任务：
+
+1. 先像普通 worker 一样注册并批准，拿到 `dsha_` 令牌。
+2. 在 agent 那边配置 MCP 服务器：地址 `https://<hub-host>:7891/mcp`，认证选 OAuth client credentials，令牌地址 `https://<hub-host>:7891/oauth/token`，`client_id` 填 agent id，`client_secret` 填 `dsha_` 令牌。
+3. agent 拿到 15 分钟有效的 Bearer（`dshm_…`）调 `/mcp`；吊销这个 agent 后 Bearer 立即失效（401）。
+
+传输是 Streamable HTTP，只返回 JSON，不开 SSE（`GET /mcp` 返回 405）。IP 白名单同样生效。五个工具：
+
+| 工具 | 作用 |
+|---|---|
+| `next_task` | 领下一个属于自己的任务，没有时返回 `{task:null}` |
+| `get_input` | 读任务的输入文件（文本，或二进制的 base64） |
+| `report_progress` | 报进度，同时续租 |
+| `submit_result` | 交结果：`completed`、`failed` 或 `partial`（需要人回答）；文件可以给 `text` 或 `base64` |
+| `release_task` | 做不了，交还给队列（不计尝试次数） |
+
+Quick 这类 agent 一般按自己的计划定时跑一次「调 `next_task`，有活就做完交掉」。定时周期写在注册时的 `pull_every_seconds` 里，hub 按这个周期判断它是否在线，也按它算兜底等待时间。
 
 ## 6. 路由、工作区和心跳
 
@@ -165,7 +205,10 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 1. `agent` 是这个 worker 的 id，或者是 `pool:<能力>` 且这个 worker 有该能力；
 2. 任务带了 `workspace` 时，这个工作区**在批准时授予过**（`workspaces`），并且 worker **当前也在上报**（`reported_workspaces`）；
 3. 任务带了 `node` 时，必须和 worker 的 `node` 相同。没有 `node` 的 worker 永远领不到限定了 node 的任务；
-4. `depends_on` 里的任务都已经 completed，并且这个 worker 正在执行的任务数没有达到 `max_concurrency`。
+4. `depends_on` 里的任务都已经 completed，并且这个 worker 正在执行的任务数没有达到 `max_concurrency`；
+5. 任务带了 `capability` 时，worker 的能力里要有它（worker 一个能力都没声明时不限）；该能力写成 `name:N` 时，这个 worker 同一能力最多同时跑 N 个。
+
+**一台机器干多种活**：能力写成 `name` 或 `name:N`（N 为 1..32），例如本地 DSH 声明 `["browser:1", "test", "code:2"]`：浏览器任务一次只跑一个，测试和写代码可以同时进行，总数仍受 `max_concurrency` 限制。任务的 `capability` 告诉 worker 用哪条线来跑；`pool:<能力>` 任务自动带上这个能力，派给具体 worker 时可以显式传 `capability`。worker 没有这个能力时 `dispatch` 返回 409 `unroutable`。审批只能调低某个能力的上限（`grant-widened`）。`agents` / `requests` 里多一个 `capability_limits`（例如 `{"browser": 1}`），任务对象和领到的任务里多一个 `capability`。
 
 **心跳上报超出授予范围时：截断，而不是拒绝**（协议要求二选一，这里选的是截断）。worker 的工作区列表是从本机 profile 自动算出来的，经常比授予的多，如果整条心跳被拒，worker 会被误判成离线。所以 hub 只保留授予范围内的名字，多出来的名字在返回值的 `ignored_workspaces` 里列出，同时记一条 warn 日志。不传 `workspaces` 时上报集合保持不变；传 `[]` 表示当前没有可用的工作区。名字格式不合法（`/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/`，最多 64 个）返回 400 `bad-workspaces`。
 
@@ -179,10 +222,23 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 
 完整生命周期见协议第 9 节。hub 侧的实现要点：
 
-- `status`：`pending`（已批准、令牌未领）/ `online`（最近一次 heartbeat、poll、event 或 result 在 `offlineAfterMs` 内，默认 90 s）/ `offline` / `left`（调用了 `/v1/leave`，之后没再出现）/ `revoked`。再次 heartbeat 或 poll 就回到 `online`。
+- `status`：`pending`（已批准、令牌未领）/ `online`（最近一次 heartbeat、poll、event 或 result 在 `offlineAfterMs` 内，默认 90 s；声明了 `pull_every_seconds` 的定时 worker 再加上这个周期）/ `offline` / `left`（调用了 `/v1/leave`，之后没再出现）/ `revoked`。再次 heartbeat 或 poll 就回到 `online`。
 - 心跳带 `running` 时对账：`running` 里不再属于它的任务列进 `abort`；hub 记为它持有、它却没报的任务立即重排（`worker-lost`，计一次尝试），租出不到 30 秒的除外（poll 的响应可能还在路上）。不带 `running` 不对账。
+- 认领：任务因为持有者离线、租约过期或失联被重排后，只要还没有别人领走，原持有者在 `running` 里报它（列进 `reclaimed`，不叫停），或直接交进度 / 结果，任务就还给它，不算新的一次尝试。
+- 角色：`worker`（默认）接任何任务，`tester` 只接测试类任务，`dispatcher`、`observer` 不接任务。注册和 provision 时可带 `role`，批准时只能收窄（`role-widened`）；派给不接这类任务的 worker，或整个 pool 没有一个能接，直接 400（`role-not-dispatchable` / `role-not-testable`）。
 - sweep：持有任务的 worker 变成 `offline` / `left` 时立即重排（`worker-offline`），不等租约到期；租约到期的规则不变。
 - dispatch：具体 agent 未注册 404 `agent-not-found`、已申请未批准 409 `agent-not-approved`、已吊销 409 `agent-revoked`；不在线照常入队但返回 `warnings: ["agent-offline"]`，`require_online: true` 时改为 409 `agent-offline`。`pool:` 任务没有任何在线且满足条件的 worker 时返回 `warnings: ["no-online-worker"]`（`require_online` 时 409）。分配仍然只发生在 worker 自己 poll 的时候。
+
+### 6.2 DSH 兜底
+
+没有合适的 worker 在规定时间内领走的任务，由 DSH 自己做（hub 里记为内置的 `dsh-self`，DSH 插件用 `fallback_list` / `fallback_take` / `fallback_submit` 三个工具来做）。
+
+- **等多久**：任务的 `fallback_after_seconds`（60..604800 秒）；没写时默认 600 秒；派给某个定时拉取的 agent 时，取 600 秒和两倍拉取周期里大的那个（Quick 一小时拉一次，就等两小时）。依赖没完成之前不计时。
+- **哪些不兜底**：任务写了 `fallback: "none"`；任务的 `capability` 在 `fallback.noFallbackCapabilities` 里（默认 `quick`）；代码任务而 DSH 没有这个工作区。
+- **只试一次**：DSH 做失败，或者租约到期没交，任务就是 `failed`，`error.code` 为 `FALLBACK_TIMEOUT`（超时时）。要再来一次用 `retry`，会重新排队并清掉兜底记录。
+- DSH 接手后，原来的 worker 再报这个任务会收到 `abort`，交结果会被拒。
+- `overview` 里多一个 `fallback_due`：现在可以兜底的任务数。
+- `dsh-self` 是保留名字，注册和派活都不能用它。
 
 ## 7. 长轮询
 

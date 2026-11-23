@@ -107,8 +107,10 @@ An empty value (DSH_HUB_CAFILE=) counts as not set.
                                               Default: the host name in lower case.
   DSH_PLATFORM           --platform           aws-quick | claude-code | kiro | custom ...
                                               Default: custom.
-  DSH_CAPABILITIES       --capabilities       comma separated, for pool:<capability> tasks.
-                                              Default: none.
+  DSH_CAPABILITIES       --capabilities       comma separated, for pool:<capability> tasks and
+                                              task.capability; name:N caps that kind of work
+                                              at N at once, e.g. browser:1,test,code.
+                                              Default: none (any kind sent to it by id).
   DSH_MAX_CONCURRENCY    --max-concurrency    tasks at once, 1..32 (approval may lower it).
                                               Default: 1.
   DSH_AGENT_TOKEN_FILE   --token-file         worker token file: register writes it (mode 600),
@@ -120,6 +122,13 @@ An empty value (DSH_HUB_CAFILE=) counts as not set.
   DSH_HEARTBEAT_SECONDS  --heartbeat-seconds  heartbeat period of run, 5..3600 seconds; the hub
                                               marks a worker offline after 90 s without a
                                               heartbeat / poll. Default: 30.
+  DSH_ROLE               --role               worker | tester | dispatcher | observer, asked at
+                                              register (approval may narrow it). Default: worker.
+  DSH_PULL_EVERY_SECONDS --pull-every-seconds how often this worker comes back when it is not
+                                              always on (cron / scheduled `bridge --once`),
+                                              60..86400; the hub then waits 90 s + this long
+                                              before it counts the worker offline. Empty = an
+                                              always-on worker (`run`). Default: empty.
   DSH_PATH_MAP           (environment / .env) host path prefixes -> local prefixes, for a worker
                                               in a container reading the HOST profile.json /
                                               dshProfile: "E:/=/host/e;C:/Users/me/.dsh=/host/dsh"
@@ -147,6 +156,12 @@ profile.json keys (all optional; unknown keys are ignored):
                  "agents": [{"name": "quick", "description": "..."}], "note": "..."}
               Default: the built-in runtime of DSH_PLATFORM (aws-quick has one; other
               platforms declare nothing). null = declare nothing.
+  capabilities, maxConcurrency, role, pullEverySeconds, platform, agentId
+              what this machine's worker is, so each machine's own profile.json says it
+              (fallbacks of the DSH_* settings of the same meaning). capabilities is a
+              list ["browser:1", "test", "code"] or an object {"browser": 1, "test": null}.
+              A local DSH that runs browser tasks, tests and code: see
+              scripts/profile.local-dsh.example.json.
   hubUrl, tokenFile, proxy
               lowest-priority fallbacks of DSH_HUB_URL, DSH_AGENT_TOKEN_FILE and
               DSH_HUB_PROXY (proxy false = off), kept for older workspaces.json files.
@@ -187,7 +202,8 @@ ABORT_MARK = "ABORTED.json"
 DEFAULT_HEARTBEAT = 30
 ENV_KEYS = ("DSH_HUB_URL", "DSH_HUB_PROXY", "DSH_HUB_CAFILE", "DSH_AGENT_ID", "DSH_NODE", "DSH_PLATFORM",
             "DSH_CAPABILITIES", "DSH_MAX_CONCURRENCY", "DSH_AGENT_TOKEN_FILE", "DSH_EXCHANGE", "DSH_HEARTBEAT_SECONDS",
-            "DSH_PATH_MAP")
+            "DSH_ROLE", "DSH_PULL_EVERY_SECONDS", "DSH_PATH_MAP")
+ROLES = ("worker", "tester", "dispatcher", "observer")
 PROXY_OFF = ("off", "direct", "none", "false", "no")
 EFFORT_MODES = ("fast", "balanced", "smart")
 EFFORT_THINKING = ("off", "low", "medium", "high")
@@ -327,9 +343,12 @@ class HubClient:
     """Worker side of /v1/*. Token-less calls (enroll) work with token=None."""
 
     def __init__(self, url, token=None, insecure=False, cafile=None, timeout=60, *, agent_id=None,
-                 proxy=None, no_proxy=False, workspaces=(), opener=None, ctx=None, runtime=None):
+                 proxy=None, no_proxy=False, workspaces=(), opener=None, ctx=None, runtime=None,
+                 role=None, pull_every_seconds=None):
         self.url = hub_url(url)
         self.runtime = runtime
+        self.role = role
+        self.pull_every_seconds = pull_every_seconds
         self.token = token
         derived = agent_id_from_token(token)
         if agent_id is None:
@@ -376,6 +395,10 @@ class HubClient:
                 "capabilities": list(capabilities), "max_concurrency": max_concurrency, "description": description}
         if self.runtime is not None:
             body["runtime"] = self.runtime
+        if self.role is not None:
+            body["role"] = self.role
+        if self.pull_every_seconds is not None:
+            body["pull_every_seconds"] = self.pull_every_seconds
         return self._req("POST", "enroll", body, auth=False)
 
     def enroll_status(self, request_id, poll_secret):
@@ -388,6 +411,8 @@ class HubClient:
         body = {"status": status, "workspaces": names, "client_version": CLIENT_VERSION}
         if self.runtime is not None:
             body["runtime"] = self.runtime  # descriptive: the hub keeps the latest one
+        if self.pull_every_seconds is not None:
+            body["pull_every_seconds"] = self.pull_every_seconds  # so the hub does not count us offline between visits
         if running is not None:
             body["running"] = list(running)
         return self._req("POST", "heartbeat", body)
@@ -707,7 +732,8 @@ def _local_path(path, base=None):
 
 class WorkspaceMap:
     def __init__(self, node, config_path, profile, workspaces, sources, dropped, hub_url=None, token_file=None, proxy=None,
-                 file_node=None, legacy=False, exists=False, host_paths=None, runtime=None, has_runtime=False):
+                 file_node=None, legacy=False, exists=False, host_paths=None, runtime=None, has_runtime=False,
+                 machine=None):
         self.node, self.config_path, self.profile = node, config_path, profile
         self.workspaces, self.sources, self.dropped = workspaces, sources, dropped
         # connection settings from profile.json / workspaces.json (None = not set; proxy False = direct)
@@ -717,6 +743,9 @@ class WorkspaceMap:
         self.host_paths = dict(host_paths or {})
         # profile.json "runtime": has_runtime False = key absent (use the platform default)
         self.runtime, self.has_runtime = runtime, has_runtime
+        # what this machine's worker is (capabilities / maxConcurrency / role / pullEverySeconds / platform /
+        # agentId), lowest-priority fallbacks of the DSH_* settings; None = not set in the file
+        self.machine = dict(machine or {})
 
     def names(self):
         """Names safe to report: mapped and still present on disk."""
@@ -729,7 +758,8 @@ class WorkspaceMap:
                 "dropped": self.dropped,
                 "runtime": self.runtime if self.has_runtime else "(platform default)",
                 "host_paths": {n: p for n, p in sorted(self.host_paths.items()) if n in self.workspaces and p != self.workspaces[n]},
-                "file_settings": {"hubUrl": self.hub_url, "tokenFile": self.token_file, "proxy": proxy}}
+                "file_settings": {"hubUrl": self.hub_url, "tokenFile": self.token_file, "proxy": proxy,
+                                  **{k: v for k, v in sorted(self.machine.items()) if v is not None}}}
 
 
 def profile_patch_path(profile):
@@ -926,7 +956,60 @@ def resolve_workspaces(config_path=None, node=None, required=False, log=warn, is
     return WorkspaceMap(node, path, profile or None, workspaces, sources, dropped, hub, token_file, proxy,
                         file_node=file_node, legacy=legacy, exists=exists,
                         host_paths={n: hosts.get(n, p) for n, p in workspaces.items()},
-                        runtime=runtime, has_runtime=has_runtime)
+                        runtime=runtime, has_runtime=has_runtime, machine=machine_settings(config, path))
+
+
+CAPABILITY_RE = re.compile(r"([a-z][a-z0-9-]{0,47})(?::([1-9][0-9]?))?")
+
+
+def parse_capabilities(value, where="DSH_CAPABILITIES"):
+    """Comma separated / list / {name: limit} -> ["browser:1", "test", ...] (name[:N], N 1..32 per capability)."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        items = []
+        for name, limit in value.items():
+            if limit is None or limit is True:
+                items.append(str(name))
+            elif isinstance(limit, int) and not isinstance(limit, bool):
+                items.append(f"{name}:{limit}")
+            else:
+                raise ConfigError(f"{where}: capability {name} must map to a number 1..32 or null")
+    elif isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list):
+        items = value
+    else:
+        raise ConfigError(f"{where}: capabilities must be a list, an object or a comma separated string")
+    out, seen = [], set()
+    for item in items:
+        item = item.strip() if isinstance(item, str) else item
+        if item == "":
+            continue
+        m = CAPABILITY_RE.fullmatch(item) if isinstance(item, str) else None
+        if m is None or (m.group(2) is not None and int(m.group(2)) > 32):
+            raise ConfigError(f"{where}: bad capability {item!r}: lowercase name, optionally name:N with N 1..32")
+        if m.group(1) not in seen:
+            seen.add(m.group(1))
+            out.append(item)
+    if len(out) > 32:
+        raise ConfigError(f"{where}: at most 32 capabilities")
+    return out
+
+
+def machine_settings(config, path):
+    """profile.json keys that describe this machine's worker (each machine keeps its own profile)."""
+    out = {}
+    if "capabilities" in config and config["capabilities"] is not None:
+        out["capabilities"] = parse_capabilities(config["capabilities"], f"{path}: capabilities")
+    for key in ("maxConcurrency", "pullEverySeconds"):
+        v = config.get(key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int)):
+            raise ConfigError(f"{path}: {key} must be a whole number")
+        out[key] = v
+    for key in ("role", "platform", "agentId"):
+        out[key] = _opt_str(config, key, path)
+    return out
 
 
 def check_runtime(rt, where="runtime"):
@@ -1060,21 +1143,29 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
             except ConfigError:
                 raise ConfigError(f"DSH_HUB_PROXY / --proxy must be http://host:port, off or env (from {sources['proxy']})") from None
     st["cafile"] = in_wd(pick("cafile", "DSH_HUB_CAFILE", cli.get("cafile")), "cafile")
-    agent_id = pick("agent_id", "DSH_AGENT_ID", cli.get("agent_id"))
+    agent_id = pick("agent_id", "DSH_AGENT_ID", cli.get("agent_id"), (getattr(wm, "machine", {}) or {}).get("agentId"))
     if agent_id is not None and not AGENT_ID_RE.fullmatch(agent_id):
         raise ConfigError(f"DSH_AGENT_ID / --agent-id must match ^[a-z][a-z0-9-]{{1,47}}$ (from {sources['agent_id']})")
     st["agent_id"] = agent_id
     st["node"] = pick("node", "DSH_NODE", cli.get("node"), wm.file_node, default_node())
-    st["platform"] = pick("platform", "DSH_PLATFORM", cli.get("platform"), None, "custom")
-    caps = pick("capabilities", "DSH_CAPABILITIES", cli.get("capabilities"), None, "")
-    st["capabilities"] = [c.strip() for c in (caps if isinstance(caps, str) else ",".join(caps)).split(",") if c.strip()]
-    st["max_concurrency"] = _int_setting(pick("max_concurrency", "DSH_MAX_CONCURRENCY", cli.get("max_concurrency"), None, 1),
+    m = getattr(wm, "machine", {}) or {}
+    st["platform"] = pick("platform", "DSH_PLATFORM", cli.get("platform"), m.get("platform"), "custom")
+    caps = pick("capabilities", "DSH_CAPABILITIES", cli.get("capabilities"), m.get("capabilities"), "")
+    st["capabilities"] = parse_capabilities(caps, f"capabilities (from {sources['capabilities']})")
+    st["max_concurrency"] = _int_setting(pick("max_concurrency", "DSH_MAX_CONCURRENCY", cli.get("max_concurrency"),
+                                              m.get("maxConcurrency"), 1),
                                          "DSH_MAX_CONCURRENCY", 1, 32)
     st["token_file"] = in_wd(pick("token_file", "DSH_AGENT_TOKEN_FILE", token_file, wm.token_file, "agent.token"), "token_file")
     st["exchange"] = in_wd(pick("exchange", "DSH_EXCHANGE", cli.get("exchange"), None, "exchange"), "exchange")
     st["runtime"] = check_runtime(wm.runtime, f"{wm.config_path}: runtime") if wm.has_runtime else platform_runtime(st["platform"])
     st["heartbeat_seconds"] = _int_setting(pick("heartbeat_seconds", "DSH_HEARTBEAT_SECONDS", cli.get("heartbeat_seconds"), None,
                                                 DEFAULT_HEARTBEAT), "DSH_HEARTBEAT_SECONDS", 5, 3600)
+    role = pick("role", "DSH_ROLE", cli.get("role"), m.get("role"), "worker")
+    if role not in ROLES:
+        raise ConfigError(f"DSH_ROLE / --role must be one of {', '.join(ROLES)} (from {sources['role']})")
+    st["role"] = role
+    every = pick("pull_every_seconds", "DSH_PULL_EVERY_SECONDS", cli.get("pull_every_seconds"), m.get("pullEverySeconds"), None)
+    st["pull_every_seconds"] = None if every is None else _int_setting(every, "DSH_PULL_EVERY_SECONDS", 60, 86400)
     return st
 
 
@@ -1090,6 +1181,7 @@ def settings_summary(st):
             "platform": st["platform"], "capabilities": st["capabilities"], "max_concurrency": st["max_concurrency"],
             "token_file": st["token_file"], "token_file_exists": bool(st["token_file"]) and os.path.isfile(st["token_file"]),
             "exchange": st["exchange"], "heartbeat_seconds": st["heartbeat_seconds"],
+            "role": st.get("role"), "pull_every_seconds": st.get("pull_every_seconds"),
             "runtime": st.get("runtime")}
 
 
@@ -1217,8 +1309,33 @@ class Bridge:
             self.aborted += len(set(done))
         return sorted(set(done))
 
+    def _live(self, box, name):
+        d = os.path.join(self.root, box, name)
+        return (not name.startswith(".") and os.path.isdir(d)
+                and not os.path.exists(os.path.join(d, ABORT_MARK)))
+
+    def _busy(self):
+        """Tasks taking a slot: in inbox / working and not aborted (an aborted copy left in working/
+        must not stop this worker from ever pulling again)."""
+        return sum(1 for box in ("inbox", "working")
+                   for name in os.listdir(os.path.join(self.root, box)) if self._live(box, name))
+
     def _known(self, task_id):
-        return any(os.path.exists(os.path.join(self.root, d, task_id)) for d in EXCHANGE_DIRS)
+        """Already held here. Only archive/ (done or aborted earlier) does not count: the hub leasing
+        the same id again means it wants it worked on again. An aborted copy still in working/ that
+        the hub hands back is un-aborted: its executor may still be on it."""
+        w = os.path.join(self.root, "working", task_id)
+        mark = os.path.join(w, ABORT_MARK)
+        if os.path.isdir(w) and os.path.exists(mark):
+            os.remove(mark)
+            self.log(f"{task_id}: the hub gave it back; no longer marked aborted")
+            return True
+        if any(os.path.exists(os.path.join(self.root, d, task_id)) for d in ("inbox", "working", "outbox", "failed")):
+            return True
+        stale = os.path.join(self.root, "archive", task_id)
+        if os.path.exists(stale):  # keep the earlier copy, deliver this one fresh
+            os.replace(stale, f"{stale}.prev-{int(time.time())}")
+        return False
 
     def _reject_missing(self, task):
         tid, ws = task["task_id"], task.get("workspace")
@@ -1233,8 +1350,7 @@ class Bridge:
         self.rejected += 1
 
     def pull(self):
-        busy = len(os.listdir(os.path.join(self.root, "inbox"))) + len(os.listdir(os.path.join(self.root, "working")))
-        room = max(0, self.max - busy)
+        room = max(0, self.max - self._busy())
         self.full = room == 0
         if room == 0:
             self.heartbeat("busy")
@@ -1266,7 +1382,7 @@ class Bridge:
             write_atomic(os.path.join(stage, "task.json"), json.dumps(t, ensure_ascii=False, indent=2))
             os.replace(stage, os.path.join(self.root, "inbox", tid))
             self.c.progress(tid, 0.0, "delivered to exchange inbox")
-            self.log(f"pulled {tid}: {t.get('title')}" + (f" [{ws}]" if ws else ""))
+            self.log(f"pulled {tid}: {t.get('title')}" + (f" [{ws}]" if ws else "") + (f" <{t['capability']}>" if t.get("capability") else ""))
             delivered += 1
         return delivered
 
@@ -1447,7 +1563,8 @@ def _client(st, token, workspaces, a, agent_id=None):
     if u.scheme == "http" and u.hostname not in LOOPBACK_HOSTS:
         warn("plain http to a non-loopback hub: the token would cross the network in clear text")
     return HubClient(url, token, a.insecure, st["cafile"], a.timeout, agent_id=agent_id or st["agent_id"] or None,
-                     proxy=st["proxy"], no_proxy=st["no_proxy"], workspaces=workspaces, runtime=st.get("runtime"))
+                     proxy=st["proxy"], no_proxy=st["no_proxy"], workspaces=workspaces, runtime=st.get("runtime"),
+                     role=st.get("role"), pull_every_seconds=st.get("pull_every_seconds"))
 
 
 def check_settings(st):
@@ -1698,8 +1815,9 @@ ENV_TEMPLATE = """\
 # Priority: command line > process environment > this file > profile.json > default.
 # Relative paths are relative to this folder. Reference: python agent_client.py --help
 
-# Hub address: host, host:port or URL (default port 7891, path /v1). The warroom hub runs on 8.134.170.38
-DSH_HUB_URL=https://8.134.170.38:7891
+# Hub address: host, host:port or URL (default port 7891, path /v1), e.g. https://hub.example.com:7891.
+# Required. Prefer a domain name: the server IP may change. Never commit the real address.
+DSH_HUB_URL=
 # Way out to the hub: off = direct (default of this template), env = HTTPS_PROXY / system proxy,
 # http://host:port = this HTTP proxy. Only when the direct connection fails: http://127.0.0.1:7890 (Clash/mihomo)
 DSH_HUB_PROXY=off
@@ -1720,6 +1838,11 @@ DSH_AGENT_TOKEN_FILE=agent.token
 DSH_EXCHANGE=E:/dsh-exchange
 # Heartbeat period of `run` in seconds (the hub marks a worker offline after 90 s of silence)
 DSH_HEARTBEAT_SECONDS=30
+# worker | tester | dispatcher | observer (approval may narrow it)
+DSH_ROLE=worker
+# Only for a worker that is NOT always on (cron / scheduled `bridge --once`): how often it runs, 60..86400 s.
+# The hub then waits 90 s + this long before it counts the worker offline. Empty = always on (`run`).
+DSH_PULL_EVERY_SECONDS=
 # Only for a worker in a container that reads the host profile: host prefix=container prefix;...
 # e.g. E:/=/host/e  (empty on the host itself)
 DSH_PATH_MAP=
@@ -1779,7 +1902,7 @@ def cmd_init(worker_dir, node=None, out=print, exchange=False, env=None, exchang
     if exchange:
         init_exchange(worker_dir, env, exchange_dir, out)
     out("next:")
-    out("  1. check .env: DSH_HUB_URL (template: https://8.134.170.38:7891), DSH_AGENT_ID, DSH_NODE, DSH_PLATFORM,")
+    out("  1. check .env: DSH_HUB_URL (your hub, e.g. https://hub.example.com:7891), DSH_AGENT_ID, DSH_NODE, DSH_PLATFORM,")
     out("     DSH_CAPABILITIES, DSH_EXCHANGE; DSH_HUB_PROXY=off (direct); only if check fails: http://127.0.0.1:7890 (Clash)")
     out("  2. edit profile.json: workspaces {name: local path} (names as in router-b), or dshProfile")
     out("  3. python agent_client.py check      (reachable through the proxy? which IP does the hub see?)")
@@ -1860,6 +1983,8 @@ def build_parser():
     e.add_argument("--capabilities", help="comma separated; overrides DSH_CAPABILITIES")
     e.add_argument("--max-concurrency", type=int, help="overrides DSH_MAX_CONCURRENCY (default 1)")
     e.add_argument("--description", default="")
+    e.add_argument("--role", choices=list(ROLES), help="overrides DSH_ROLE (default worker); approval may narrow it")
+    e.add_argument("--pull-every-seconds", type=int, help="overrides DSH_PULL_EVERY_SECONDS (scheduled pullers)")
     e.add_argument("--no-wait", action="store_true", help="ask (or check the pending request) once and exit")
     e.add_argument("--interval", type=int, default=30, help="seconds between approval checks")
     r = add("run", "stay online: heartbeat + long poll, sync tasks with the exchange folder")
@@ -1873,6 +1998,7 @@ def build_parser():
     b = add("bridge", "sync this worker's tasks with the exchange folder (--once for schedulers)")
     b.add_argument("--exchange", help="overrides DSH_EXCHANGE")
     b.add_argument("--once", action="store_true")
+    b.add_argument("--pull-every-seconds", type=int, help="overrides DSH_PULL_EVERY_SECONDS: how often cron runs this (--once)")
     b.add_argument("--interval", type=int, default=60)
     b.add_argument("--max", type=int, default=1)
     b.add_argument("--wait", type=int, default=DEFAULT_WAIT, help=f"long-poll seconds (0..{MAX_WAIT}, default {DEFAULT_WAIT})")
@@ -1893,7 +2019,8 @@ def main(argv=None, env=None):
         wm = resolve_workspaces(a.profile_file, a.node, required=a.profile_file is not None, worker_dir=wd,
                                 path_map=parse_path_map(raw_map))
         cli = {k: getattr(a, k, None) for k in ("cafile", "agent_id", "node", "platform", "capabilities",
-                                                "max_concurrency", "exchange", "heartbeat_seconds")}
+                                                "max_concurrency", "exchange", "heartbeat_seconds",
+                                                "role", "pull_every_seconds")}
         st = resolve_settings(wm, getattr(a, "url", None), getattr(a, "token_file", None), getattr(a, "proxy", None),
                               getattr(a, "no_proxy", False), env=env, dotenv=dotenv, worker_dir=wd, cli=cli)
         wm.node = st["node"]

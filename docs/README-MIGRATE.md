@@ -27,8 +27,8 @@
    vault 文件、vault key、passphrase 都在目标机 `$DSH_HOME` 下首次使用时生成，**不在仓库里**。
 3. **nginx 站点模板**在 `docs/nginx/`（`dsh-web`、`browser-novnc`、`gitea`、`couple-fit`），已脱敏为
    `__SERVER_NAME__` / `__TLS_CERT__` / `__TLS_KEY__` / `__CLIENT_CA__` / `__HTPASSWD_FILE__` / `__SITE_ROOT__`。
-   8444 的 Gitea 是 mTLS，且现有证书 SAN **不含新地址 `8.134.170.38`**，详见 `docs/nginx/README.md`。
-4. **全仓旧地址已替换**：迁移前的 `8.163` 段服务器地址统一改成 `8.134.170.38`
+   8444 的 Gitea 是 mTLS，且现有证书 SAN **不含新地址 `<server>`**，详见 `docs/nginx/README.md`。
+4. **全仓旧地址已替换**：迁移前的旧服务器地址统一改成 `<server>`
    （文档、模板、gate 脚本共 12 个文件 / 57 处；替换后全仓 `grep` 旧地址 0 处）。
    证书文件本身不在仓库里，替换只影响文字与配置副本。
 5. **host-router 的 `src/` 比 `lib/` 新**：`bridge.ts` / `index.ts` / `snapshot.ts` 在 2026-11-20 18:35 改过，
