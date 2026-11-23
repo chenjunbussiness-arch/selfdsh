@@ -107,8 +107,10 @@ An empty value (DSH_HUB_CAFILE=) counts as not set.
                                               Default: the host name in lower case.
   DSH_PLATFORM           --platform           aws-quick | claude-code | kiro | custom ...
                                               Default: custom.
-  DSH_CAPABILITIES       --capabilities       comma separated, for pool:<capability> tasks.
-                                              Default: none.
+  DSH_CAPABILITIES       --capabilities       comma separated, for pool:<capability> tasks and
+                                              task.capability; name:N caps that kind of work
+                                              at N at once, e.g. browser:1,test,code.
+                                              Default: none (any kind sent to it by id).
   DSH_MAX_CONCURRENCY    --max-concurrency    tasks at once, 1..32 (approval may lower it).
                                               Default: 1.
   DSH_AGENT_TOKEN_FILE   --token-file         worker token file: register writes it (mode 600),
@@ -154,6 +156,12 @@ profile.json keys (all optional; unknown keys are ignored):
                  "agents": [{"name": "quick", "description": "..."}], "note": "..."}
               Default: the built-in runtime of DSH_PLATFORM (aws-quick has one; other
               platforms declare nothing). null = declare nothing.
+  capabilities, maxConcurrency, role, pullEverySeconds, platform, agentId
+              what this machine's worker is, so each machine's own profile.json says it
+              (fallbacks of the DSH_* settings of the same meaning). capabilities is a
+              list ["browser:1", "test", "code"] or an object {"browser": 1, "test": null}.
+              A local DSH that runs browser tasks, tests and code: see
+              scripts/profile.local-dsh.example.json.
   hubUrl, tokenFile, proxy
               lowest-priority fallbacks of DSH_HUB_URL, DSH_AGENT_TOKEN_FILE and
               DSH_HUB_PROXY (proxy false = off), kept for older workspaces.json files.
@@ -724,7 +732,8 @@ def _local_path(path, base=None):
 
 class WorkspaceMap:
     def __init__(self, node, config_path, profile, workspaces, sources, dropped, hub_url=None, token_file=None, proxy=None,
-                 file_node=None, legacy=False, exists=False, host_paths=None, runtime=None, has_runtime=False):
+                 file_node=None, legacy=False, exists=False, host_paths=None, runtime=None, has_runtime=False,
+                 machine=None):
         self.node, self.config_path, self.profile = node, config_path, profile
         self.workspaces, self.sources, self.dropped = workspaces, sources, dropped
         # connection settings from profile.json / workspaces.json (None = not set; proxy False = direct)
@@ -734,6 +743,9 @@ class WorkspaceMap:
         self.host_paths = dict(host_paths or {})
         # profile.json "runtime": has_runtime False = key absent (use the platform default)
         self.runtime, self.has_runtime = runtime, has_runtime
+        # what this machine's worker is (capabilities / maxConcurrency / role / pullEverySeconds / platform /
+        # agentId), lowest-priority fallbacks of the DSH_* settings; None = not set in the file
+        self.machine = dict(machine or {})
 
     def names(self):
         """Names safe to report: mapped and still present on disk."""
@@ -746,7 +758,8 @@ class WorkspaceMap:
                 "dropped": self.dropped,
                 "runtime": self.runtime if self.has_runtime else "(platform default)",
                 "host_paths": {n: p for n, p in sorted(self.host_paths.items()) if n in self.workspaces and p != self.workspaces[n]},
-                "file_settings": {"hubUrl": self.hub_url, "tokenFile": self.token_file, "proxy": proxy}}
+                "file_settings": {"hubUrl": self.hub_url, "tokenFile": self.token_file, "proxy": proxy,
+                                  **{k: v for k, v in sorted(self.machine.items()) if v is not None}}}
 
 
 def profile_patch_path(profile):
@@ -943,7 +956,60 @@ def resolve_workspaces(config_path=None, node=None, required=False, log=warn, is
     return WorkspaceMap(node, path, profile or None, workspaces, sources, dropped, hub, token_file, proxy,
                         file_node=file_node, legacy=legacy, exists=exists,
                         host_paths={n: hosts.get(n, p) for n, p in workspaces.items()},
-                        runtime=runtime, has_runtime=has_runtime)
+                        runtime=runtime, has_runtime=has_runtime, machine=machine_settings(config, path))
+
+
+CAPABILITY_RE = re.compile(r"([a-z][a-z0-9-]{0,47})(?::([1-9][0-9]?))?")
+
+
+def parse_capabilities(value, where="DSH_CAPABILITIES"):
+    """Comma separated / list / {name: limit} -> ["browser:1", "test", ...] (name[:N], N 1..32 per capability)."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        items = []
+        for name, limit in value.items():
+            if limit is None or limit is True:
+                items.append(str(name))
+            elif isinstance(limit, int) and not isinstance(limit, bool):
+                items.append(f"{name}:{limit}")
+            else:
+                raise ConfigError(f"{where}: capability {name} must map to a number 1..32 or null")
+    elif isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list):
+        items = value
+    else:
+        raise ConfigError(f"{where}: capabilities must be a list, an object or a comma separated string")
+    out, seen = [], set()
+    for item in items:
+        item = item.strip() if isinstance(item, str) else item
+        if item == "":
+            continue
+        m = CAPABILITY_RE.fullmatch(item) if isinstance(item, str) else None
+        if m is None or (m.group(2) is not None and int(m.group(2)) > 32):
+            raise ConfigError(f"{where}: bad capability {item!r}: lowercase name, optionally name:N with N 1..32")
+        if m.group(1) not in seen:
+            seen.add(m.group(1))
+            out.append(item)
+    if len(out) > 32:
+        raise ConfigError(f"{where}: at most 32 capabilities")
+    return out
+
+
+def machine_settings(config, path):
+    """profile.json keys that describe this machine's worker (each machine keeps its own profile)."""
+    out = {}
+    if "capabilities" in config and config["capabilities"] is not None:
+        out["capabilities"] = parse_capabilities(config["capabilities"], f"{path}: capabilities")
+    for key in ("maxConcurrency", "pullEverySeconds"):
+        v = config.get(key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int)):
+            raise ConfigError(f"{path}: {key} must be a whole number")
+        out[key] = v
+    for key in ("role", "platform", "agentId"):
+        out[key] = _opt_str(config, key, path)
+    return out
 
 
 def check_runtime(rt, where="runtime"):
@@ -1077,26 +1143,28 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
             except ConfigError:
                 raise ConfigError(f"DSH_HUB_PROXY / --proxy must be http://host:port, off or env (from {sources['proxy']})") from None
     st["cafile"] = in_wd(pick("cafile", "DSH_HUB_CAFILE", cli.get("cafile")), "cafile")
-    agent_id = pick("agent_id", "DSH_AGENT_ID", cli.get("agent_id"))
+    agent_id = pick("agent_id", "DSH_AGENT_ID", cli.get("agent_id"), (getattr(wm, "machine", {}) or {}).get("agentId"))
     if agent_id is not None and not AGENT_ID_RE.fullmatch(agent_id):
         raise ConfigError(f"DSH_AGENT_ID / --agent-id must match ^[a-z][a-z0-9-]{{1,47}}$ (from {sources['agent_id']})")
     st["agent_id"] = agent_id
     st["node"] = pick("node", "DSH_NODE", cli.get("node"), wm.file_node, default_node())
-    st["platform"] = pick("platform", "DSH_PLATFORM", cli.get("platform"), None, "custom")
-    caps = pick("capabilities", "DSH_CAPABILITIES", cli.get("capabilities"), None, "")
-    st["capabilities"] = [c.strip() for c in (caps if isinstance(caps, str) else ",".join(caps)).split(",") if c.strip()]
-    st["max_concurrency"] = _int_setting(pick("max_concurrency", "DSH_MAX_CONCURRENCY", cli.get("max_concurrency"), None, 1),
+    m = getattr(wm, "machine", {}) or {}
+    st["platform"] = pick("platform", "DSH_PLATFORM", cli.get("platform"), m.get("platform"), "custom")
+    caps = pick("capabilities", "DSH_CAPABILITIES", cli.get("capabilities"), m.get("capabilities"), "")
+    st["capabilities"] = parse_capabilities(caps, f"capabilities (from {sources['capabilities']})")
+    st["max_concurrency"] = _int_setting(pick("max_concurrency", "DSH_MAX_CONCURRENCY", cli.get("max_concurrency"),
+                                              m.get("maxConcurrency"), 1),
                                          "DSH_MAX_CONCURRENCY", 1, 32)
     st["token_file"] = in_wd(pick("token_file", "DSH_AGENT_TOKEN_FILE", token_file, wm.token_file, "agent.token"), "token_file")
     st["exchange"] = in_wd(pick("exchange", "DSH_EXCHANGE", cli.get("exchange"), None, "exchange"), "exchange")
     st["runtime"] = check_runtime(wm.runtime, f"{wm.config_path}: runtime") if wm.has_runtime else platform_runtime(st["platform"])
     st["heartbeat_seconds"] = _int_setting(pick("heartbeat_seconds", "DSH_HEARTBEAT_SECONDS", cli.get("heartbeat_seconds"), None,
                                                 DEFAULT_HEARTBEAT), "DSH_HEARTBEAT_SECONDS", 5, 3600)
-    role = pick("role", "DSH_ROLE", cli.get("role"), None, "worker")
+    role = pick("role", "DSH_ROLE", cli.get("role"), m.get("role"), "worker")
     if role not in ROLES:
         raise ConfigError(f"DSH_ROLE / --role must be one of {', '.join(ROLES)} (from {sources['role']})")
     st["role"] = role
-    every = pick("pull_every_seconds", "DSH_PULL_EVERY_SECONDS", cli.get("pull_every_seconds"), None, None)
+    every = pick("pull_every_seconds", "DSH_PULL_EVERY_SECONDS", cli.get("pull_every_seconds"), m.get("pullEverySeconds"), None)
     st["pull_every_seconds"] = None if every is None else _int_setting(every, "DSH_PULL_EVERY_SECONDS", 60, 86400)
     return st
 
@@ -1314,7 +1382,7 @@ class Bridge:
             write_atomic(os.path.join(stage, "task.json"), json.dumps(t, ensure_ascii=False, indent=2))
             os.replace(stage, os.path.join(self.root, "inbox", tid))
             self.c.progress(tid, 0.0, "delivered to exchange inbox")
-            self.log(f"pulled {tid}: {t.get('title')}" + (f" [{ws}]" if ws else ""))
+            self.log(f"pulled {tid}: {t.get('title')}" + (f" [{ws}]" if ws else "") + (f" <{t['capability']}>" if t.get("capability") else ""))
             delivered += 1
         return delivered
 

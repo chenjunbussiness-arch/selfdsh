@@ -62,10 +62,11 @@ v1 时 hub 运行在 DSH web server 里；v2 把 hub 拆成**独立服务 dsh-hu
 | 同上 | | `DSH_AGENT_ID` | ✅ | worker 名，`^[a-z][a-z0-9-]{1,47}$` | `quick-mydesk` | `register` 报错 |
 | 同上 | | `DSH_HUB_PROXY` | 可选 | 同上 | `off`（模板默认） | `env`（读 HTTPS_PROXY / 系统代理） |
 | 同上 | | `DSH_EXCHANGE` | 建议 | 交换目录 | `E:/dsh-exchange` | worker 目录下的 `exchange/` |
-| 同上 | | `DSH_PLATFORM` / `DSH_CAPABILITIES` / `DSH_NODE` | 建议 | 平台、能力（给 `pool:<capability>` 抢单用）、机器名 | `aws-quick` / `code,document` / `mydesk` | `custom` / 无 / 主机名 |
+| 同上 | | `DSH_PLATFORM` / `DSH_CAPABILITIES` / `DSH_NODE` | 建议 | 平台、能力（给 `pool:<capability>` 和任务的 `capability` 用；`name:N` 表示这类活最多同时跑 N 个）、机器名 | `aws-quick` / `code,document`（本地 DSH：`browser:1,test,code`） / `mydesk` | `custom` / 无 / 主机名 |
 | 同上 | | `DSH_ROLE` | 可选 | 申请的角色：`worker` 接任何活 / `tester` 只接测试类 / `dispatcher` 只派活不接活 / `observer` 只读；批准时只能收窄 | `worker` | `worker` |
 | 同上 | | `DSH_PULL_EVERY_SECONDS` | 定时运行时必填 | 不常驻、靠 cron / 计划任务跑 `bridge --once` 的 worker 多久来一次（60～86400 秒）。hub 等「90 秒 + 这个周期」没来才判离线，免得干活途中任务被收回 | `900` | 空 = 常驻（`run`），90 秒没来就算离线 |
 | `<DSH home>/worker/profile.json`（模板 `scripts/profile.example.json`） | 每台 worker 机器 | `workspaces` | 派 `code` 任务时必填 | 工作区名 → 本机路径（名字和 router-b 一致） | `{"deepseek-harness": "E:/PythonProject/dsh-warroom"}` | 没映射的工作区任务直接失败 `WORKSPACE_MISSING` |
+| 同上 | 同上 | `capabilities` / `maxConcurrency` / `role` / `pullEverySeconds` / `platform` / `agentId` | 可选 | 这台机器的 worker 是什么、能干哪些活。每台机器的 profile 各写各的，工作区位置也各不相同；`.env` 或环境变量里写了同名的 `DSH_*` 时以它们为准 | `{"browser": 1, "test": 2, "code": 2}`，完整样例 `scripts/profile.local-dsh.example.json` | 不写就用 `.env` / 默认值 |
 
 - `<DSH home>` = 环境变量 `DSH_HOME`，没设就是 `~/.dsh`（Windows：`C:\Users\<你>\.dsh`）。
 - 优先级：controller 端 `cordis.patch.yml` 显式写的 > 进程环境变量 > `controller.env` > 默认；worker 端 命令行 > 进程环境变量 > `worker/.env` > `profile.json` > 默认。

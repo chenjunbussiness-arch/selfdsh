@@ -141,7 +141,7 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 
 | 方法 路径 | 请求 | 返回 |
 |---|---|---|
-| `POST /v1/ctl/dispatch?id=` | v1 的全部字段，再加 `workspace`（`code` 类型必填）、`node`、`ref`、`require_online`（布尔）；`created_by` 由 hub 填写 | 任务对象（含 `workspace/node/ref/created_by`）；目标不在线时多一个 `warnings: ["agent-offline"]` 或 `["no-online-worker"]` |
+| `POST /v1/ctl/dispatch?id=` | v1 的全部字段，再加 `workspace`（`code` 类型必填）、`node`、`ref`、`capability`、`require_online`（布尔）；`created_by` 由 hub 填写 | 任务对象（含 `workspace/node/ref/created_by`）；目标不在线时多一个 `warnings: ["agent-offline"]` 或 `["no-online-worker"]` |
 | `GET /v1/ctl/tasks?id=&status=&agent=&workspace=&limit=` | `limit` 1..200，默认 50 | `{generated_at, filter:{status,agent,workspace,limit}, tasks}` |
 | `GET /v1/ctl/task?id=&task_id=` | | `{generated_at, task}`（task 含 instruction、inputs、history、result、context） |
 | `GET /v1/ctl/output?id=&task_id=&name=` | 只能下载 `result.outputs` 里列出的文件 | 文件字节 |
@@ -165,7 +165,10 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 1. `agent` 是这个 worker 的 id，或者是 `pool:<能力>` 且这个 worker 有该能力；
 2. 任务带了 `workspace` 时，这个工作区**在批准时授予过**（`workspaces`），并且 worker **当前也在上报**（`reported_workspaces`）；
 3. 任务带了 `node` 时，必须和 worker 的 `node` 相同。没有 `node` 的 worker 永远领不到限定了 node 的任务；
-4. `depends_on` 里的任务都已经 completed，并且这个 worker 正在执行的任务数没有达到 `max_concurrency`。
+4. `depends_on` 里的任务都已经 completed，并且这个 worker 正在执行的任务数没有达到 `max_concurrency`；
+5. 任务带了 `capability` 时，worker 的能力里要有它（worker 一个能力都没声明时不限）；该能力写成 `name:N` 时，这个 worker 同一能力最多同时跑 N 个。
+
+**一台机器干多种活**：能力写成 `name` 或 `name:N`（N 为 1..32），例如本地 DSH 声明 `["browser:1", "test", "code:2"]`：浏览器任务一次只跑一个，测试和写代码可以同时进行，总数仍受 `max_concurrency` 限制。任务的 `capability` 告诉 worker 用哪条线来跑；`pool:<能力>` 任务自动带上这个能力，派给具体 worker 时可以显式传 `capability`。worker 没有这个能力时 `dispatch` 返回 409 `unroutable`。审批只能调低某个能力的上限（`grant-widened`）。`agents` / `requests` 里多一个 `capability_limits`（例如 `{"browser": 1}`），任务对象和领到的任务里多一个 `capability`。
 
 **心跳上报超出授予范围时：截断，而不是拒绝**（协议要求二选一，这里选的是截断）。worker 的工作区列表是从本机 profile 自动算出来的，经常比授予的多，如果整条心跳被拒，worker 会被误判成离线。所以 hub 只保留授予范围内的名字，多出来的名字在返回值的 `ignored_workspaces` 里列出，同时记一条 warn 日志。不传 `workspaces` 时上报集合保持不变；传 `[]` 表示当前没有可用的工作区。名字格式不合法（`/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/`，最多 64 个）返回 400 `bad-workspaces`。
 

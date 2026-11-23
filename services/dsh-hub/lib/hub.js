@@ -122,6 +122,31 @@ export function validRef(ref) {
 }
 
 /** Validate an optional list of names; returns a de-duplicated copy. */
+/**
+ * Capabilities: `name` or `name:N`, where N (1..32) caps how many tasks of that
+ * capability the worker runs at once (a local DSH: `browser:1,test,code`).
+ * Returns the names and the per-capability limits.
+ */
+export function parseCapabilities(value) {
+  const caps = value ?? []
+  if (!Array.isArray(caps) || caps.length > 32) throw new HubError(400, 'bad-capabilities', 'capabilities must be a list of at most 32 entries')
+  const names = []
+  const limits = {}
+  for (const entry of caps) {
+    const m = typeof entry === 'string' ? /^([a-z][a-z0-9-]{0,47})(?::([1-9][0-9]?))?$/.exec(entry) : null
+    if (m === null || (m[2] !== undefined && Number(m[2]) > 32)) throw new HubError(400, 'bad-capabilities', 'capabilities must be lowercase names, optionally name:N with N 1..32')
+    if (!names.includes(m[1])) names.push(m[1])
+    if (m[2] !== undefined) limits[m[1]] = Math.min(limits[m[1]] ?? 32, Number(m[2]))
+  }
+  return { names, limits }
+}
+
+/** The capability list again in `name[:N]` form (to re-validate a stored grant). */
+export function capabilityEntries(agent) {
+  const limits = agent?.capabilityLimits ?? {}
+  return (agent?.capabilities ?? []).map(c => (limits[c] === undefined ? c : `${c}:${limits[c]}`))
+}
+
 function nameList(value, re, code, message, max) {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value) || value.length > max || value.some(v => typeof v !== 'string' || !re.test(v))) throw new HubError(400, code, message)
@@ -226,6 +251,11 @@ export function validateRuntime(raw) {
  * Why this runtime cannot honour this effort, or null. No effort -> null. No runtime
  * declared -> only a named agent is a problem (mode / thinking are best effort).
  */
+/** A worker that lists no capabilities takes any kind of task sent to it by id. */
+export function hasCapability(agent, capability) {
+  return capability === undefined || (agent.capabilities ?? []).length === 0 || agent.capabilities.includes(capability)
+}
+
 export function effortProblem(runtime, effort) {
   if (effort === undefined) return null
   if (runtime === undefined) return effort.agent !== undefined ? `declares no agents (asked for agent ${effort.agent})` : null
@@ -444,8 +474,7 @@ export class AgentHub {
   validateAgent(input) {
     const id = input?.agent_id
     if (typeof id !== 'string' || !AGENT_ID_RE.test(id)) throw new HubError(400, 'bad-agent-id', 'agent_id must match /^[a-z][a-z0-9-]{1,47}$/')
-    const caps = input.capabilities ?? []
-    if (!Array.isArray(caps) || caps.length > 32 || caps.some(c => typeof c !== 'string' || !CAP_RE.test(c))) throw new HubError(400, 'bad-capabilities', 'capabilities must be lowercase identifiers')
+    const caps = parseCapabilities(input.capabilities)
     const mode = input.mode ?? 'poll'
     if (mode !== 'poll' && mode !== 'push') throw new HubError(400, 'bad-mode', 'mode must be poll or push')
     const maxConcurrency = input.max_concurrency ?? 1
@@ -457,7 +486,7 @@ export class AgentHub {
     if (role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')} (default ${DEFAULT_ROLE})`)
     const pullEverySeconds = validatePullEvery(input.pull_every_seconds)
     return {
-      id, mode, maxConcurrency, capabilities: [...new Set(caps)], node, workspaces, role, pullEverySeconds,
+      id, mode, maxConcurrency, capabilities: caps.names, capabilityLimits: caps.limits, node, workspaces, role, pullEverySeconds,
       platform: String(input.platform ?? 'custom').slice(0, 64),
       description: String(input.description ?? '').slice(0, 500),
       runtime: validateRuntime(input.runtime),
@@ -470,7 +499,7 @@ export class AgentHub {
     const previous = own(state.agents, v.id)
     state.agents[v.id] = {
       id: v.id, platform: v.platform, mode: v.mode, node: v.node, capabilities: v.capabilities,
-      workspaces: v.workspaces, reportedWorkspaces: reported.filter(w => v.workspaces.includes(w)),
+      capabilityLimits: v.capabilityLimits ?? {}, workspaces: v.workspaces, reportedWorkspaces: reported.filter(w => v.workspaces.includes(w)),
       maxConcurrency: v.maxConcurrency, description: v.description, runtime: v.runtime, tokenHash,
       role: v.role ?? DEFAULT_ROLE, pullEverySeconds: v.pullEverySeconds,
       createdAt: previous?.createdAt ?? nowIso(this.clock()),
@@ -550,7 +579,7 @@ export class AgentHub {
       .sort((a, b) => b.requested_at.localeCompare(a.requested_at))
       .map(r => ({
         request_id: r.request_id, status: r.status, agent_id: r.agent.id, platform: r.agent.platform, mode: r.agent.mode,
-        node: r.agent.node, workspaces: r.agent.workspaces ?? [], capabilities: r.agent.capabilities, max_concurrency: r.agent.maxConcurrency,
+        node: r.agent.node, workspaces: r.agent.workspaces ?? [], capabilities: r.agent.capabilities, capability_limits: r.agent.capabilityLimits ?? {}, max_concurrency: r.agent.maxConcurrency,
         description: r.agent.description, runtime: r.agent.runtime, role: agentRole(r.agent), pull_every_seconds: r.agent.pullEverySeconds, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
       })))
   }
@@ -568,7 +597,7 @@ export class AgentHub {
       const v = this.validateAgent({
         agent_id: asked.id, platform: asked.platform, mode: asked.mode, description: asked.description, node: asked.node,
         runtime: asked.runtime,
-        capabilities: o.capabilities ?? asked.capabilities,
+        capabilities: o.capabilities ?? capabilityEntries(asked),
         workspaces: o.workspaces ?? asked.workspaces,
         max_concurrency: o.max_concurrency ?? asked.maxConcurrency,
         role: o.role ?? askedRole,
@@ -578,6 +607,8 @@ export class AgentHub {
       const widened = roleWidening(askedRole, v.role)
       if (widened !== undefined) throw new HubError(400, widened.code, widened.message)
       if (v.capabilities.some(c => !asked.capabilities.includes(c))) throw new HubError(400, 'grant-widened', 'capabilities can only be narrowed at approval')
+      const askedLimit = c => asked.capabilityLimits?.[c] ?? asked.maxConcurrency
+      if (v.capabilities.some(c => (v.capabilityLimits[c] ?? v.maxConcurrency) > askedLimit(c))) throw new HubError(400, 'grant-widened', 'a capability limit can only be lowered at approval')
       if (v.workspaces.some(w => !(asked.workspaces ?? []).includes(w))) throw new HubError(400, 'grant-widened', 'workspaces can only be narrowed at approval')
       if (v.maxConcurrency > asked.maxConcurrency) throw new HubError(400, 'grant-widened', 'max_concurrency can only be lowered at approval')
       if (own(state.agents, v.id) !== undefined && !own(state.agents, v.id).revoked) throw new HubError(409, 'agent-exists', `agent already registered: ${v.id}`)
@@ -660,7 +691,7 @@ export class AgentHub {
     const status = this.agentStatus(agent)
     return {
       agent_id: agent.id, platform: agent.platform, mode: agent.mode, node: agent.node, capabilities: agent.capabilities,
-      workspaces: agent.workspaces, reported_workspaces: agent.reportedWorkspaces,
+      capability_limits: agent.capabilityLimits ?? {}, workspaces: agent.workspaces, reported_workspaces: agent.reportedWorkspaces,
       max_concurrency: agent.maxConcurrency, description: agent.description, runtime: agent.runtime, revoked: agent.revoked,
       status, online: status === 'online', last_seen: agent.lastSeen, left_at: agent.leftAt, version: agent.clientVersion,
       reported_status: agent.reportedStatus, running_tasks: running, created_at: agent.createdAt,
@@ -718,6 +749,7 @@ export class AgentHub {
   /** Conditions 1-3 (4 = depends_on and room, checked when leasing). */
   routable(task, agent) {
     if (!this.targets(task, agent)) return false
+    if (!hasCapability(agent, task.capability)) return false
     if (!roleAccepts(agentRole(agent), task)) return false // dispatcher / observer never, tester only tests
     if (task.workspace !== undefined && !(agent.workspaces.includes(task.workspace) && agent.reportedWorkspaces.includes(task.workspace))) return false
     if (task.node !== undefined && task.node !== agent.node) return false
@@ -766,6 +798,14 @@ export class AgentHub {
     if (t.require_online !== undefined && typeof t.require_online !== 'boolean') throw new HubError(400, 'bad-task', 'require_online must be true or false')
     const requireOnline = t.require_online === true
     const effort = validateEffort(t.effort)
+    // What kind of work this is (browser / test / code ...), so a worker that does many
+    // things knows which of its lanes runs it and the hub can keep per-lane limits.
+    let capability = t.capability ?? undefined
+    if (capability !== undefined && (typeof capability !== 'string' || !CAP_RE.test(capability))) throw new HubError(400, 'bad-task', 'capability must be a capability name')
+    if (POOL_RE.test(target)) {
+      if (capability !== undefined && capability !== target.slice(5)) throw new HubError(400, 'bad-task', `capability ${capability} does not match ${target}`)
+      capability = target.slice(5)
+    }
 
     return this.mutate(async (state) => {
       await this.liveController(controllerId)
@@ -778,6 +818,7 @@ export class AgentHub {
           throw new HubError(404, 'agent-not-found', `agent not registered: ${target}`)
         }
         if (agent.revoked) throw new HubError(409, 'agent-revoked', `${target} is revoked`)
+        if (!hasCapability(agent, capability)) throw new HubError(409, 'unroutable', `${target} does not offer capability ${capability} (it offers ${agent.capabilities.join(', ')})`)
         const refused = roleRefusal({ type, title: t.title }, agentRole(agent), target)
         if (refused !== undefined) throw new HubError(400, refused.code, refused.message)
         // Fail fast instead of leaving a task no one can ever lease.
@@ -824,7 +865,7 @@ export class AgentHub {
       }
       const task = {
         protocol: PROTOCOL, task_id: id, agent: target, type, title: t.title.trim(), instruction: t.instruction,
-        workspace, node, ref, effort,
+        workspace, node, ref, effort, capability,
         inputs: inputNames, output: t.output ?? {}, priority, deadline: t.deadline, lease_seconds: leaseSeconds,
         parent_task_id: t.parent_task_id, depends_on: deps, context: t.context ?? {},
         created_by: controllerId, created_at: nowIso(this.clock()),
@@ -876,6 +917,9 @@ export class AgentHub {
         if (why !== null) throw new HubError(409, 'unsupported-effort', `${agent} ${why}`)
         const refused = target ? roleRefusal(task, agentRole(target), agent) : undefined
         if (refused !== undefined) throw new HubError(400, refused.code, refused.message)
+        if (target && !hasCapability(target, task.capability)) throw new HubError(409, 'unroutable', `${agent} does not offer capability ${task.capability}`)
+        // A pool target names the capability; moving to another pool moves the lane too.
+        if (POOL_RE.test(agent)) task.capability = agent.slice(5)
         task.agent = agent
       }
       task.status = 'pending'; task.assignedTo = undefined; task.leaseUntil = undefined; task.attempts = 0; task.result = undefined
@@ -906,7 +950,7 @@ export class AgentHub {
   publicTask(task, { full = false } = {}) {
     const out = {
       task_id: task.task_id, agent: task.agent, assigned_to: task.assignedTo, type: task.type, title: task.title,
-      workspace: task.workspace, node: task.node, ref: task.ref, effort: task.effort, created_by: task.created_by,
+      workspace: task.workspace, node: task.node, ref: task.ref, effort: task.effort, capability: task.capability, created_by: task.created_by,
       status: task.status, priority: task.priority, attempts: task.attempts, progress: task.progress, message: task.message,
       created_at: task.created_at, lease_until: task.leaseUntil, depends_on: task.depends_on,
       result: task.result === undefined ? undefined : { status: task.result.status, summary: task.result.summary, outputs: task.result.outputs, error: task.result.error, needs_input: task.result.needs_input },
@@ -1085,14 +1129,24 @@ export class AgentHub {
     return this.mutate((state) => {
       const agent = this.liveAgent(state, agentId)
       this.seen(agent)
-      const running = Object.values(state.tasks).filter(t => t.assignedTo === agentId && isActive(t)).length
-      const room = Math.max(0, Math.min(Number.isInteger(max) ? max : 1, agent.maxConcurrency - running))
-      const candidates = Object.values(state.tasks)
+      const held = Object.values(state.tasks).filter(t => t.assignedTo === agentId && isActive(t))
+      const room = Math.max(0, Math.min(Number.isInteger(max) ? max : 1, agent.maxConcurrency - held.length))
+      // Per-capability lanes: `browser:1` keeps a second browser task pending while one runs.
+      const inLane = {}
+      for (const t of held) if (t.capability !== undefined) inLane[t.capability] = (inLane[t.capability] ?? 0) + 1
+      const limits = agent.capabilityLimits ?? {}
+      const candidates = []
+      for (const t of Object.values(state.tasks)
         .filter(t => t.status === 'pending')
         .filter(t => this.routable(t, agent))
         .filter(t => t.depends_on.every(d => own(state.tasks, d)?.status === 'completed'))
-        .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority] || a.created_at.localeCompare(b.created_at))
-        .slice(0, room)
+        .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority] || a.created_at.localeCompare(b.created_at))) {
+        if (candidates.length >= room) break
+        const lane = t.capability
+        if (lane !== undefined && limits[lane] !== undefined && (inLane[lane] ?? 0) >= limits[lane]) continue
+        if (lane !== undefined) inLane[lane] = (inLane[lane] ?? 0) + 1
+        candidates.push(t)
+      }
       const leased = []
       for (const task of candidates) {
         task.status = 'accepted'
@@ -1105,7 +1159,7 @@ export class AgentHub {
         const upstream = task.depends_on.flatMap(d => (own(state.tasks, d).result?.outputs ?? []).map(o => ({ from_task: d, name: o.name })))
         leased.push({
           protocol: PROTOCOL, task_id: task.task_id, type: task.type, title: task.title, instruction: task.instruction,
-          workspace: task.workspace, node: task.node, ref: task.ref, effort: task.effort, created_by: task.created_by,
+          workspace: task.workspace, node: task.node, ref: task.ref, effort: task.effort, capability: task.capability, created_by: task.created_by,
           inputs: task.inputs.map(name => ({ name, from_task: task.task_id })).concat(upstream),
           output: task.output, priority: task.priority, deadline: task.deadline, lease_until: task.leaseUntil,
           parent_task_id: task.parent_task_id, context: task.context, attempt: task.attempts,

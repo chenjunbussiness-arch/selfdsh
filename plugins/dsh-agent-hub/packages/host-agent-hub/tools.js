@@ -112,7 +112,7 @@ export function createTools({ client }) {
         mode: { type: 'string', enum: ['poll', 'push'], description: 'poll = scheduled pickup (AWS Quick); push = long-running worker.' },
         node: { type: 'string', description: 'Machine name the worker runs on (mydesk / cloud ...), used by task routing (task.node).' },
         workspaces: { ...strList, description: 'Workspace names (router-b partition names) the worker is granted, e.g. ["deepseek-harness"].' },
-        capabilities: { ...strList, description: 'For pool:<capability> routing, e.g. research, document, data, code.' },
+        capabilities: { ...strList, description: 'Kinds of work, name or name:N (at most N at once), e.g. ["browser:1", "test", "code"]. Used by pool:<capability> and task.capability.' },
         max_concurrency: { type: 'integer', minimum: 1, maximum: 32 },
         role: roleParam(`dispatcher | tester | worker | observer. Omit for ${DEFAULT_ROLE}. ${ROLE_HINT}`),
         pull_every_seconds: { type: 'integer', minimum: 60, maximum: 86400, description: 'Only for a worker that is not always on (AWS Quick on a schedule, a cron `bridge --once`): how often it comes back, in seconds. The hub then waits 90 s + this long before it counts the worker offline and requeues its tasks. Omit for an always-on worker.' },
@@ -179,6 +179,7 @@ export function createTools({ client }) {
       required: ['agent', 'title', 'instruction'],
       properties: {
         agent: { type: 'string', description: 'Worker id or pool:<capability>.' },
+        capability: { type: 'string', description: 'Kind of work (browser / test / code ...) for a worker that does several; pool:<capability> sets it. The worker must offer it (409 unroutable).' },
         title: str,
         instruction: str,
         type: { type: 'string', enum: ['research', 'document', 'data', 'code', 'review', 'custom'] },

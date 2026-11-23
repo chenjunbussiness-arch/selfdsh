@@ -91,6 +91,12 @@ function clean(value, max = 4000) {
 const strings = list => (Array.isArray(list) ? list.filter(x => typeof x === 'string').map(x => clean(x, 200)) : [])
 const num = value => (Number.isFinite(value) ? value : undefined)
 const int = value => (Number.isInteger(value) ? value : undefined)
+/** `{ browser: 1 }` kept as is; undefined when there is none (an older hub sends none). */
+const limits = (value) => {
+  if (!plainObject(value)) return undefined
+  const kept = Object.entries(value).filter(([k, v]) => /^[a-z][a-z0-9-]{0,47}$/.test(k) && Number.isInteger(v) && v >= 1 && v <= 32).slice(0, 32)
+  return kept.length === 0 ? undefined : Object.fromEntries(kept)
+}
 const text = (value, max) => (typeof value === 'string' ? clean(value, max) : undefined)
 const oneOf = (value, list) => (list.includes(value) ? value : undefined)
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -117,6 +123,8 @@ export function adminAgent(a) {
     running_tasks: strings(a?.running_tasks), created_at: text(a?.created_at, 64),
     // Additive: scheduled pullers (AWS Quick, cron) say how often they come back.
     pull_every_seconds: int(a?.pull_every_seconds), offline_after_ms: int(a?.offline_after_ms),
+    // Additive: per-capability limits ({ browser: 1 }) of a worker that does several kinds of work.
+    capability_limits: limits(a?.capability_limits),
   }
 }
 
@@ -137,6 +145,7 @@ export function adminTaskRow(t) {
   const outputs = adminOutputs(t?.result)
   return {
     task_id: text(t?.task_id, 96), agent: text(t?.agent, 64), assigned_to: text(t?.assigned_to, 64), type: text(t?.type, 32), title: clean(t?.title, 300),
+    capability: text(t?.capability, 48),
     status: text(t?.status, 32), priority: text(t?.priority, 16), attempts: int(t?.attempts) ?? 0, progress: num(t?.progress), message: clean(t?.message, 500),
     created_at: text(t?.created_at, 64), lease_until: text(t?.lease_until, 64), depends_on: strings(t?.depends_on),
     result: !plainObject(t?.result) ? undefined : {

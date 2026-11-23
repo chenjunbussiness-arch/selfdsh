@@ -860,6 +860,40 @@ class TestScheduleSettings(TempCase):
             ac.resolve_settings(wm, env={"DSH_PULL_EVERY_SECONDS": "10"}, worker_dir=self.path("w"))
 
 
+class TestMachineProfile(TempCase):
+    def test_capabilities_parse_with_limits(self):
+        self.assertEqual(ac.parse_capabilities("browser:1, test,code,test"), ["browser:1", "test", "code"])
+        self.assertEqual(ac.parse_capabilities({"browser": 1, "test": None}), ["browser:1", "test"])
+        self.assertEqual(ac.parse_capabilities(None), [])
+        for bad in ("Browser", "browser:0", "browser:33", {"browser": "x"}, 7):
+            with self.assertRaises(ac.ConfigError):
+                ac.parse_capabilities(bad)
+
+    def test_each_machine_profile_says_what_its_worker_does(self):
+        w = self.path("w", make=True)
+        ws = self.path("repo", make=True)
+        prof = os.path.join(w, "profile.json")
+        with open(prof, "w", encoding="utf-8") as f:
+            json.dump({"node": "mydesk", "agentId": "dsh-mydesk", "platform": "dsh", "workspaces": {"deepseek-harness": ws},
+                       "capabilities": {"browser": 1, "test": None, "code": 2}, "maxConcurrency": 4, "role": "worker",
+                       "pullEverySeconds": 600}, f)
+        wm = ac.resolve_workspaces(prof, None, worker_dir=w)
+        st = ac.resolve_settings(wm, env={}, worker_dir=w)
+        self.assertEqual((st["agent_id"], st["platform"], st["capabilities"], st["max_concurrency"], st["pull_every_seconds"]),
+                         ("dsh-mydesk", "dsh", ["browser:1", "test", "code:2"], 4, 600))
+        self.assertEqual(st["sources"]["capabilities"], "profile")
+        st = ac.resolve_settings(wm, env={"DSH_CAPABILITIES": "code"}, worker_dir=w)
+        self.assertEqual(st["capabilities"], ["code"], "the environment still wins over the profile")
+        with self.assertRaises(ac.ConfigError):
+            ac.resolve_settings(wm, env={"DSH_CAPABILITIES": "Code"}, worker_dir=w)
+
+    def test_local_dsh_example_is_valid(self):
+        example = os.path.join(REPO, "plugins", "dsh-agent-hub", "scripts", "profile.local-dsh.example.json")
+        with open(example, encoding="utf-8") as f:
+            cfg = json.load(f)
+        self.assertEqual(ac.machine_settings(cfg, example)["capabilities"], ["browser:1", "test:2", "code:2"])
+
+
 class TestEnvFile(TempCase):
     def test_parse_rules_match_the_plugin(self):
         text = ("\ufeff# comment\r\nDSH_HUB_URL=https://h:7891\r\nexport DSH_AGENT_ID=\"quick-mydesk\"\n"
