@@ -668,6 +668,13 @@ export function createHubClient(options = {}) {
     revoke: async agentId => asObject(await ctlPost('revoke', { agent_id: agentId })),
     provision: async body => asObject(await ctlPost('provision', body)),
 
+    // --- DSH fallback (this DSH acts as the built-in dsh-self) -------------------
+    fallbackList: async workspaces => asList(await ctlGet('fallback', { workspaces: Array.isArray(workspaces) ? workspaces.join(',') : undefined }), 'tasks'),
+    fallbackTake: async ({ task_id, workspaces }) => asObject(await ctlPost('fallback/take', { task_id, workspaces })),
+    fallbackEvent: async body => asObject(await ctlPost('fallback/event', body)),
+    fallbackResult: async body => asObject(await ctlPost('fallback/result', body)),
+    fallbackInput: (taskId, name, fromTask) => ctlGet('fallback/input', { task_id: taskId, name, from_task: fromTask }, { raw: true }),
+
     /** `GET /v1/ctl/overview` (for the panel). */
     overview: async () => asObject(await ctlGet('overview')),
   }

@@ -70,6 +70,7 @@ async function dispatchRoleRefusal(client, task) {
 export const TOOL_NAMES = [
   'agent_provision', 'agent_revoke', 'agent_list', 'agent_requests', 'agent_approve', 'agent_reject',
   'task_dispatch', 'task_list', 'task_get', 'task_cancel', 'task_retry',
+  'fallback_list', 'fallback_take', 'fallback_submit',
 ]
 
 /**
@@ -268,6 +269,53 @@ export function createTools({ client }) {
     description: 'Put a finished (failed/cancelled/dead/completed) task back in the queue, optionally to another worker or pool (only tasks this DSH dispatched).',
     parameters: { required: ['task_id'], properties: { task_id: str, agent: str } },
     execute: raw => client.retry(raw.task_id, raw.agent),
+  })
+
+  define({
+    name: 'fallback_list',
+    description: 'Tasks no suitable worker took in time, waiting for DSH to do them itself. Pass your workspace names to skip code tasks you cannot do.',
+    parameters: { properties: { workspaces: strList } },
+    isConcurrencySafe: () => true,
+    execute: async raw => ({ tasks: await client.fallbackList(raw.workspaces) }),
+  })
+
+  define({
+    name: 'fallback_take',
+    description: 'Take one fallback task (task_id, or the most urgent). You get its instruction and text inputs; do it with your own tools, then fallback_submit. One try: a failure is final.',
+    parameters: { properties: { task_id: str, workspaces: strList } },
+    async execute(raw) {
+      const out = await client.fallbackTake({ task_id: raw.task_id, workspaces: raw.workspaces })
+      const task = out.task
+      if (task === null || task === undefined) return { task: null }
+      const inputs = []
+      let budget = 60000
+      for (const item of Array.isArray(task.inputs) ? task.inputs : []) {
+        const from = item.from_task === task.task_id ? undefined : item.from_task
+        const bytes = budget > 0 ? await client.fallbackInput(task.task_id, item.name, from) : undefined
+        const text = bytes === undefined ? undefined : bytes.toString('utf8').slice(0, budget)
+        if (text !== undefined) budget -= text.length
+        inputs.push({ ...item, text })
+      }
+      return { task: { ...task, inputs } }
+    },
+  })
+
+  define({
+    name: 'fallback_submit',
+    description: 'Finish a task you took with fallback_take: status completed or failed, a summary, optional text files.',
+    parameters: {
+      required: ['task_id', 'status', 'summary'],
+      properties: {
+        task_id: str,
+        status: { type: 'string', enum: ['completed', 'failed'] },
+        summary: str,
+        files: { type: 'array', items: { type: 'object', properties: { name: str, text: str }, required: ['name', 'text'] } },
+      },
+    },
+    execute: raw => client.fallbackResult({
+      task_id: raw.task_id, status: raw.status, summary: raw.summary,
+      files: (raw.files ?? []).map(f => ({ name: f.name, base64: Buffer.from(String(f.text), 'utf8').toString('base64') })),
+    }),
   })
 
   return tools

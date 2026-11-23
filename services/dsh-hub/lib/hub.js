@@ -75,6 +75,12 @@ export const POOL_RE = /^pool:[a-z][a-z0-9-]{0,47}$/
 export const FILE_NAME_RE = /^[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff _.()-]{0,127}$/
 export const TASK_TYPES = ['research', 'document', 'data', 'code', 'review', 'custom']
 export const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'dead'])
+/** The built-in executor: DSH itself, taking tasks nobody suitable picked up (fallback). */
+export const FALLBACK_AGENT = 'dsh-self'
+/** Default wait before DSH takes a task over: 10 min; a named scheduled puller gets two of its periods. */
+export const FALLBACK_MIN_WAIT_SECONDS = 600
+/** Capabilities DSH never takes over by default (only that agent may touch the data). */
+export const DEFAULT_NO_FALLBACK = ['quick']
 export const MAX_WAIT_SECONDS = 55
 const PRIORITY = { high: 0, normal: 1, low: 2 }
 const MAX_WORKSPACES = 64
@@ -127,6 +133,33 @@ export function validRef(ref) {
  * capability the worker runs at once (a local DSH: `browser:1,test,code`).
  * Returns the names and the per-capability limits.
  */
+/** Validate a result body; returns the checked output file names. */
+function checkResult(b) {
+  if (!['completed', 'failed', 'partial'].includes(b.status)) throw new HubError(400, 'bad-result', 'status must be completed, failed or partial')
+  const files = b.files ?? []
+  if (!Array.isArray(files) || files.length > 50) throw new HubError(400, 'bad-result', 'files must be a list of at most 50')
+  const names = files.map(file => safeFileName(file?.name)) // all names checked before anything is written
+  if (new Set(names).size !== names.length) throw new HubError(400, 'bad-result', 'duplicate output file name')
+  return names
+}
+
+/** A task's workspace is one DSH has (no list given = do not filter). */
+function fallbackWorkspaceOk(task, workspaces) {
+  return task.workspace === undefined || !Array.isArray(workspaces) || workspaces.includes(task.workspace)
+}
+
+/** Path of an input of `task` or of an output of one of its upstream tasks. */
+function inputPath(artifactDir, state, task, fromTask, safe) {
+  const from = fromTask ?? task.task_id
+  if (from === task.task_id) {
+    if (!task.inputs.includes(safe)) throw new HubError(404, 'artifact-not-found', 'not an input of this task')
+    return join(artifactDir, task.task_id, 'inputs', safe)
+  }
+  if (!task.depends_on.includes(from)) throw new HubError(403, 'forbidden', 'from_task is not an upstream of this task')
+  if (!(own(state.tasks, from)?.result?.outputs ?? []).some(o => o.name === safe)) throw new HubError(404, 'artifact-not-found', 'not an output of the upstream task')
+  return join(artifactDir, from, 'outputs', safe)
+}
+
 export function parseCapabilities(value) {
   const caps = value ?? []
   if (!Array.isArray(caps) || caps.length > 32) throw new HubError(400, 'bad-capabilities', 'capabilities must be a list of at most 32 entries')
@@ -296,6 +329,11 @@ export class AgentHub {
     this.requestTtlMs = options.requestTtlMs ?? 24 * 3600 * 1000
     this.maxWaitSeconds = Math.min(options.maxWaitSeconds ?? MAX_WAIT_SECONDS, MAX_WAIT_SECONDS)
     this.maxWaitersPerAgent = options.maxWaitersPerAgent ?? 8
+    const fb = options.fallback ?? {}
+    this.fallback = {
+      enabled: fb.enabled !== false,
+      noFallback: Array.isArray(fb.noFallbackCapabilities) ? fb.noFallbackCapabilities.filter(c => typeof c === 'string') : DEFAULT_NO_FALLBACK,
+    }
     this.logger = options.logger
     this.clock = options.clock ?? Date.now
     this.state = undefined
@@ -474,6 +512,7 @@ export class AgentHub {
   validateAgent(input) {
     const id = input?.agent_id
     if (typeof id !== 'string' || !AGENT_ID_RE.test(id)) throw new HubError(400, 'bad-agent-id', 'agent_id must match /^[a-z][a-z0-9-]{1,47}$/')
+    if (id === FALLBACK_AGENT) throw new HubError(400, 'bad-agent-id', `${FALLBACK_AGENT} is reserved for DSH itself`)
     const caps = parseCapabilities(input.capabilities)
     const mode = input.mode ?? 'poll'
     if (mode !== 'poll' && mode !== 'push') throw new HubError(400, 'bad-mode', 'mode must be poll or push')
@@ -750,6 +789,7 @@ export class AgentHub {
   routable(task, agent) {
     if (!this.targets(task, agent)) return false
     if (!hasCapability(agent, task.capability)) return false
+    if ((task.declined ?? []).includes(agent.id)) return false // it gave this one back (release)
     if (!roleAccepts(agentRole(agent), task)) return false // dispatcher / observer never, tester only tests
     if (task.workspace !== undefined && !(agent.workspaces.includes(task.workspace) && agent.reportedWorkspaces.includes(task.workspace))) return false
     if (task.node !== undefined && task.node !== agent.node) return false
@@ -766,7 +806,7 @@ export class AgentHub {
   // --- tasks (controllers only) -----------------------------------------------
 
   /** A controller creates a task. Inputs are files given inline (text or base64). */
-  dispatch(controllerId, input) {
+  dispatch(controllerId, input, { asAgent } = {}) {
     const t = input ?? {}
     for (const key of ['title', 'instruction']) {
       if (typeof t[key] !== 'string' || t[key].trim() === '') throw new HubError(400, 'bad-task', `${key} is required`)
@@ -800,6 +840,10 @@ export class AgentHub {
     const effort = validateEffort(t.effort)
     // What kind of work this is (browser / test / code ...), so a worker that does many
     // things knows which of its lanes runs it and the hub can keep per-lane limits.
+    const fallback = t.fallback ?? 'dsh'
+    if (fallback !== 'dsh' && fallback !== 'none') throw new HubError(400, 'bad-task', 'fallback must be dsh or none')
+    const fallbackAfter = t.fallback_after_seconds ?? undefined
+    if (fallbackAfter !== undefined && (!Number.isInteger(fallbackAfter) || fallbackAfter < 60 || fallbackAfter > 7 * 86400)) throw new HubError(400, 'bad-task', 'fallback_after_seconds must be 60..604800')
     let capability = t.capability ?? undefined
     if (capability !== undefined && (typeof capability !== 'string' || !CAP_RE.test(capability))) throw new HubError(400, 'bad-task', 'capability must be a capability name')
     if (POOL_RE.test(target)) {
@@ -808,7 +852,8 @@ export class AgentHub {
     }
 
     return this.mutate(async (state) => {
-      await this.liveController(controllerId)
+      const creator = await this.creator(state, controllerId, asAgent)
+      if (target === FALLBACK_AGENT) throw new HubError(400, 'bad-task', `${FALLBACK_AGENT} takes tasks by fallback only; send it to a worker or pool and leave fallback on`)
       const warnings = []
       if (AGENT_ID_RE.test(target)) {
         const agent = own(state.agents, target)
@@ -868,18 +913,44 @@ export class AgentHub {
         workspace, node, ref, effort, capability,
         inputs: inputNames, output: t.output ?? {}, priority, deadline: t.deadline, lease_seconds: leaseSeconds,
         parent_task_id: t.parent_task_id, depends_on: deps, context: t.context ?? {},
-        created_by: controllerId, created_at: nowIso(this.clock()),
+        created_by: creator, created_at: nowIso(this.clock()), pendingSince: nowIso(this.clock()),
+        fallback, fallback_after_seconds: fallbackAfter,
         status: 'pending', attempts: 0, assignedTo: undefined, leaseUntil: undefined,
         progress: undefined, message: undefined, result: undefined, history: [],
       }
-      this.event(task, 'created', `${controllerId} -> ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''}`)
+      this.event(task, 'created', `${creator} -> ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''}`)
       state.tasks[id] = task
       this.wakeFor(state, task)
-      this.log(`dsh-hub: ${controllerId} dispatched ${id} to ${target}${warnings.length ? ` (${warnings.join(', ')})` : ''}`)
+      this.log(`dsh-hub: ${creator} dispatched ${id} to ${target}${warnings.length ? ` (${warnings.join(', ')})` : ''}`)
       const out = this.publicTask(task)
       if (warnings.length > 0) out.warnings = warnings
       return out
     })
+  }
+
+  /**
+   * Who is acting: a live controller (its id), or a live agent with the
+   * dispatcher role (`agent:<id>`). Dispatcher agents see and control only
+   * the tasks they created.
+   */
+  async creator(state, controllerId, asAgent) {
+    if (asAgent === undefined) { await this.liveController(controllerId); return controllerId }
+    const agent = this.liveAgent(state, asAgent)
+    if (agentRole(agent) !== 'dispatcher') throw new HubError(403, 'not-dispatcher', `${asAgent} is a ${agentRole(agent)}; only a dispatcher agent may dispatch`)
+    this.seen(agent)
+    return `agent:${asAgent}`
+  }
+
+  /** A dispatcher agent creates a task with its own worker token (created_by agent:<id>). */
+  agentDispatch(agentId, input) { return this.dispatch(undefined, input, { asAgent: agentId }) }
+
+  /** A dispatcher agent cancels a task it created. */
+  agentCancel(agentId, id, reason) { return this.cancel(undefined, id, reason, { asAgent: agentId }) }
+
+  /** The tasks a dispatcher agent created, newest first. */
+  async agentTasks(agentId, filter = {}) {
+    await this.read(state => this.creator(state, undefined, agentId))
+    return this.listTasks({ ...filter, created_by: `agent:${agentId}` })
   }
 
   /** Only the creator may control a task. */
@@ -889,9 +960,9 @@ export class AgentHub {
     return task
   }
 
-  cancel(controllerId, id, reason) {
+  cancel(controllerId, id, reason, { asAgent } = {}) {
     return this.mutate(async (state) => {
-      await this.liveController(controllerId)
+      controllerId = await this.creator(state, controllerId, asAgent)
       const task = this.mustOwnTask(state, controllerId, id)
       if (TERMINAL.has(task.status)) throw new HubError(409, 'task-finished', `task already ${task.status}`)
       const holder = isActive(task) ? task.assignedTo : undefined
@@ -923,6 +994,7 @@ export class AgentHub {
         task.agent = agent
       }
       task.status = 'pending'; task.assignedTo = undefined; task.leaseUntil = undefined; task.attempts = 0; task.result = undefined
+      task.pendingSince = nowIso(this.clock()); task.fallbackBy = undefined; task.declined = undefined
       this.event(task, 'retried', `${controllerId} -> ${task.agent}`)
       this.wakeFor(state, task)
       return this.publicTask(task)
@@ -933,7 +1005,8 @@ export class AgentHub {
     return this.read(state => Object.values(state.tasks)
       .filter(t => (filter.status === undefined || t.status === filter.status)
         && (filter.agent === undefined || t.agent === filter.agent || t.assignedTo === filter.agent)
-        && (filter.workspace === undefined || t.workspace === filter.workspace))
+        && (filter.workspace === undefined || t.workspace === filter.workspace)
+        && (filter.created_by === undefined || t.created_by === filter.created_by))
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
       .slice(0, filter.limit ?? 50)
       .map(t => this.publicTask(t)))
@@ -953,6 +1026,7 @@ export class AgentHub {
       workspace: task.workspace, node: task.node, ref: task.ref, effort: task.effort, capability: task.capability, created_by: task.created_by,
       status: task.status, priority: task.priority, attempts: task.attempts, progress: task.progress, message: task.message,
       created_at: task.created_at, lease_until: task.leaseUntil, depends_on: task.depends_on,
+      fallback: task.fallback ?? 'dsh', fallback_after_seconds: task.fallback_after_seconds, fallback_by: task.fallbackBy,
       result: task.result === undefined ? undefined : { status: task.result.status, summary: task.result.summary, outputs: task.result.outputs, error: task.result.error, needs_input: task.result.needs_input },
     }
     if (full) { out.instruction = task.instruction; out.inputs = task.inputs; out.output = task.output; out.history = task.history; out.context = task.context }
@@ -971,6 +1045,7 @@ export class AgentHub {
       this.event(task, 'dead', `${why}; retries exhausted`)
     } else {
       task.status = 'pending'
+      task.pendingSince = nowIso(this.clock())
       this.event(task, 'requeued', why)
     }
     task.assignedTo = undefined
@@ -1192,6 +1267,30 @@ export class AgentHub {
     })
   }
 
+  /**
+   * A worker gives a task back it cannot do (`release_task`): it goes back to
+   * the queue for someone else, the attempt does not count, and this worker
+   * is not offered it again (so a named task falls to the DSH fallback).
+   */
+  release(agentId, body = {}) {
+    const b = body ?? {}
+    return this.mutate((state) => {
+      const task = this.owned(state, agentId, b.task_id)
+      task.status = 'pending'
+      task.assignedTo = undefined
+      task.leaseUntil = undefined
+      task.leasedAt = undefined
+      task.attempts = Math.max(0, task.attempts - 1)
+      task.pendingSince = nowIso(this.clock())
+      task.declined = [...new Set([...(task.declined ?? []), agentId])]
+      const reason = typeof b.reason === 'string' && b.reason.trim() !== '' ? b.reason.trim().slice(0, 500) : 'given back'
+      this.event(task, 'released', `${agentId}: ${reason}`)
+      this.wakes.add(agentId)
+      this.wakeFor(state, task)
+      return { ok: true, task_status: task.status }
+    })
+  }
+
   /** The task must be leased by this very worker. */
   owned(state, agentId, taskId, { reclaim = false } = {}) {
     this.seen(this.liveAgent(state, agentId))
@@ -1218,14 +1317,17 @@ export class AgentHub {
   /** Final result. Files are inline (base64) and land under outputs/. */
   submitResult(agentId, body = {}) {
     const b = body ?? {}
-    const status = b.status
-    if (!['completed', 'failed', 'partial'].includes(status)) throw new HubError(400, 'bad-result', 'status must be completed, failed or partial')
-    const files = b.files ?? []
-    if (!Array.isArray(files) || files.length > 50) throw new HubError(400, 'bad-result', 'files must be a list of at most 50')
-    const names = files.map(file => safeFileName(file?.name)) // all names checked before anything is written
-    if (new Set(names).size !== names.length) throw new HubError(400, 'bad-result', 'duplicate output file name')
+    const names = checkResult(b)
     return this.mutate(async (state) => {
       const task = this.owned(state, agentId, b.task_id, { reclaim: true })
+      return this.finish(state, task, b, names, agentId)
+    })
+  }
+
+  /** Store a result (shared by workers and the DSH fallback; the fallback never retries). */
+  async finish(state, task, b, names, agentId, { retry = true } = {}) {
+      const status = b.status
+      const files = b.files ?? []
       const dir = join(this.artifactDir, task.task_id, 'outputs')
       await mkdir(dir, { recursive: true })
       const outputs = []
@@ -1246,7 +1348,7 @@ export class AgentHub {
       task.leaseUntil = undefined
       if (status === 'completed') { task.status = 'completed'; task.progress = 1 }
       else if (status === 'partial') { task.status = 'failed'; task.result.error = task.result.error ?? { code: 'NEEDS_HUMAN', message: task.result.needs_input ?? '', retryable: false } }
-      else if (error?.retryable) { this.requeue(state, task, `retryable failure: ${error.code}`) }
+      else if (error?.retryable && retry) { this.requeue(state, task, `retryable failure: ${error.code}`) }
       else task.status = 'failed'
       if (task.status !== 'pending') this.event(task, task.status, task.result.summary.slice(0, 200))
       this.wakes.add(agentId) // a slot was freed
@@ -1255,7 +1357,129 @@ export class AgentHub {
       }
       this.log(`dsh-hub: ${agentId} finished ${task.task_id}: ${task.status}`)
       return { ok: true, task_status: task.status }
+  }
+
+  // --- DSH fallback (controllers act as the built-in dsh-self) ------------------
+
+  /** Seconds a pending task waits before DSH may take it over. */
+  fallbackWait(state, task) {
+    if (task.fallback_after_seconds !== undefined) return task.fallback_after_seconds
+    const named = AGENT_ID_RE.test(task.agent) ? own(state.agents, task.agent) : undefined
+    const every = named?.pullEverySeconds
+    return every === undefined ? FALLBACK_MIN_WAIT_SECONDS : Math.max(FALLBACK_MIN_WAIT_SECONDS, 2 * every)
+  }
+
+  /** When a pending task becomes due for the fallback (ms), or undefined when it never will. */
+  fallbackDueAt(state, task) {
+    if (!this.fallback.enabled || task.status !== 'pending' || (task.fallback ?? 'dsh') !== 'dsh') return undefined
+    if (task.capability !== undefined && this.fallback.noFallback.includes(task.capability)) return undefined
+    if (task.fallbackBy !== undefined) return undefined // DSH already tried once
+    let ready = Date.parse(task.pendingSince ?? task.created_at)
+    for (const d of task.depends_on) {
+      const dep = own(state.tasks, d)
+      if (dep?.status !== 'completed') return undefined
+      const done = Date.parse(dep.result?.finished_at ?? '')
+      if (Number.isFinite(done) && done > ready) ready = done
+    }
+    return ready + this.fallbackWait(state, task) * 1000
+  }
+
+  /** Tasks DSH may take over now (optionally only those whose workspace DSH has). */
+  listFallback(controllerId, { workspaces } = {}) {
+    return this.mutate(async (state) => {
+      await this.liveController(controllerId)
+      const now = this.clock()
+      return Object.values(state.tasks)
+        .map(task => ({ task, due: this.fallbackDueAt(state, task) }))
+        .filter(({ task, due }) => due !== undefined && due <= now && fallbackWorkspaceOk(task, workspaces))
+        .sort((a, b) => PRIORITY[a.task.priority] - PRIORITY[b.task.priority] || a.task.created_at.localeCompare(b.task.created_at))
+        .map(({ task, due }) => ({ ...this.publicTask(task), waited_seconds: Math.round((now - due) / 1000) + this.fallbackWait(state, task) }))
     })
+  }
+
+  /**
+   * DSH takes a due task over (task_id, or the most urgent due one). It is held
+   * by dsh-self: the original worker gets `abort` if it still reports it and
+   * can no longer submit. One attempt: a failure or an expired lease fails it.
+   */
+  takeFallback(controllerId, { task_id: taskId, workspaces } = {}) {
+    return this.mutate(async (state) => {
+      await this.liveController(controllerId)
+      const now = this.clock()
+      const due = task => { const at = this.fallbackDueAt(state, task); return at !== undefined && at <= now && fallbackWorkspaceOk(task, workspaces) }
+      let task
+      if (taskId !== undefined) {
+        task = this.mustTask(state, taskId)
+        if (!due(task)) {
+          const at = this.fallbackDueAt(state, task)
+          const why = at === undefined ? 'it is not a pending task DSH may take over'
+            : at > now ? `it is not due yet (in ${Math.ceil((at - now) / 1000)} s)` : 'DSH does not have its workspace'
+          throw new HubError(409, 'not-fallback', `${task.task_id}: ${why}`)
+        }
+      } else {
+        task = Object.values(state.tasks).filter(due)
+          .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority] || a.created_at.localeCompare(b.created_at))[0]
+        if (task === undefined) return { task: null }
+      }
+      task.status = 'running'
+      task.assignedTo = FALLBACK_AGENT
+      task.fallbackBy = controllerId
+      task.attempts += 1
+      task.leaseUntil = nowIso(now + task.lease_seconds * 1000)
+      task.leasedAt = nowIso(now)
+      task.lastHolder = undefined
+      this.event(task, 'fallback', `nobody took it in time; DSH (${controllerId}) does it itself`)
+      this.log(`dsh-hub: ${controllerId} took ${task.task_id} over as ${FALLBACK_AGENT}`)
+      const upstream = task.depends_on.flatMap(d => (own(state.tasks, d).result?.outputs ?? []).map(o => ({ from_task: d, name: o.name })))
+      return {
+        task: {
+          ...this.publicTask(task, { full: true }),
+          inputs: task.inputs.map(name => ({ name, from_task: task.task_id })).concat(upstream),
+        },
+      }
+    })
+  }
+
+  /** The fallback task held by DSH (and taken by this controller). */
+  heldByFallback(state, controllerId, taskId) {
+    const task = this.mustTask(state, taskId)
+    if (task.assignedTo !== FALLBACK_AGENT || !isActive(task)) throw new HubError(409, 'task-not-active', `${task.task_id} is not held by ${FALLBACK_AGENT}`)
+    if (task.fallbackBy !== controllerId) throw new HubError(403, 'not-creator', `${task.task_id} was taken over by another controller`)
+    return task
+  }
+
+  fallbackProgress(controllerId, body = {}) {
+    const b = body ?? {}
+    return this.mutate(async (state) => {
+      await this.liveController(controllerId)
+      const task = this.heldByFallback(state, controllerId, b.task_id)
+      if (typeof b.progress === 'number' && b.progress >= 0 && b.progress <= 1) task.progress = b.progress
+      if (typeof b.message === 'string') task.message = b.message.slice(0, 1000)
+      task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000)
+      this.event(task, 'progress', task.message)
+      return { ok: true, lease_until: task.leaseUntil }
+    })
+  }
+
+  fallbackResult(controllerId, body = {}) {
+    const b = body ?? {}
+    const names = checkResult(b)
+    return this.mutate(async (state) => {
+      await this.liveController(controllerId)
+      const task = this.heldByFallback(state, controllerId, b.task_id)
+      return this.finish(state, task, b, names, FALLBACK_AGENT, { retry: false })
+    })
+  }
+
+  /** Bytes of an input / upstream output of a task DSH holds as the fallback. */
+  async fallbackInput(controllerId, { task_id: taskId, from_task: fromTask, name } = {}) {
+    await this.liveController(controllerId)
+    const safe = safeFileName(name)
+    const source = await this.read((state) => {
+      const task = this.heldByFallback(state, controllerId, taskId)
+      return inputPath(this.artifactDir, state, task, fromTask, safe)
+    })
+    return readFile(source)
   }
 
   /** Bytes of an input (or an upstream output) of a task THIS worker holds. */
@@ -1263,14 +1487,7 @@ export class AgentHub {
     const safe = safeFileName(name)
     const source = await this.read((state) => {
       const task = this.owned(state, agentId, taskId)
-      const from = fromTask ?? taskId
-      if (from === taskId) {
-        if (!task.inputs.includes(safe)) throw new HubError(404, 'artifact-not-found', 'not an input of this task')
-        return join(this.artifactDir, taskId, 'inputs', safe)
-      }
-      if (!task.depends_on.includes(from)) throw new HubError(403, 'forbidden', 'from_task is not an upstream of this task')
-      if (!(own(state.tasks, from)?.result?.outputs ?? []).some(o => o.name === safe)) throw new HubError(404, 'artifact-not-found', 'not an output of the upstream task')
-      return join(this.artifactDir, from, 'outputs', safe)
+      return inputPath(this.artifactDir, state, task, fromTask, safe)
     })
     return readFile(source)
   }
@@ -1291,6 +1508,14 @@ export class AgentHub {
       let changed = 0
       const now = this.clock()
       for (const task of Object.values(state.tasks)) {
+        if (isActive(task) && task.assignedTo === FALLBACK_AGENT && task.leaseUntil && Date.parse(task.leaseUntil) < now) {
+          task.status = 'failed'
+          task.leaseUntil = undefined
+          task.result = { status: 'failed', summary: '', outputs: [], error: { code: 'FALLBACK_TIMEOUT', message: 'DSH took it over but did not finish in time', retryable: false }, finished_at: nowIso(now), agent: FALLBACK_AGENT }
+          this.event(task, 'failed', 'fallback lease expired')
+          changed++
+          continue
+        }
         if (isActive(task) && task.leaseUntil && Date.parse(task.leaseUntil) < now) {
           this.requeue(state, task, `lease expired (${task.assignedTo})`)
           changed++
@@ -1329,7 +1554,9 @@ export class AgentHub {
       const pendingRequests = Object.values(state.requests).filter(r => r.status === 'pending').length
       const agents = Object.values(state.agents).map(a => this.publicAgent(a, state))
       const agentCounts = Object.fromEntries(AGENT_STATUSES.map(s => [s, agents.filter(a => a.status === s).length]))
-      return { protocol: PROTOCOL, agents, agent_counts: agentCounts, task_counts: counts, pending_requests: pendingRequests }
+      const now = this.clock()
+      const fallbackDue = Object.values(state.tasks).filter(t => { const at = this.fallbackDueAt(state, t); return at !== undefined && at <= now }).length
+      return { protocol: PROTOCOL, agents, agent_counts: agentCounts, task_counts: counts, pending_requests: pendingRequests, fallback_due: fallbackDue }
     })
   }
 }

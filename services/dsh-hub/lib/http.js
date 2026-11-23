@@ -25,6 +25,7 @@ import { createServer as createHttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 
 import { AGENT_ID_RE, HubError, MAX_WAIT_SECONDS, POOL_RE, TASK_ID_RE, VERSION, WORKSPACE_RE } from './hub.js'
+import { MCP_PATH, McpGateway, TOKEN_PATH } from './mcp.js'
 
 export const API_BASE = '/v1'
 export const TOKEN_HEADER = 'x-dsh-token'
@@ -359,6 +360,17 @@ export const ROUTES = {
   '/v1/poll': { method: 'GET', auth: 'worker', run: runPoll },
   '/v1/event': { method: 'POST', auth: 'worker', body: 'event', run: ({ hub, id, body }) => hub.progress(id, body) },
   '/v1/result': { method: 'POST', auth: 'worker', body: 'result', run: ({ hub, id, body }) => hub.submitResult(id, body) },
+  '/v1/release': { method: 'POST', auth: 'worker', body: 'event', run: ({ hub, id, body }) => hub.release(id, body) },
+  // dispatcher agents (role dispatcher, own worker token): create and follow their own tasks
+  '/v1/dispatch': { method: 'POST', auth: 'worker', body: 'result', run: ({ hub, id, body }) => hub.agentDispatch(id, body) },
+  '/v1/dispatched': {
+    method: 'GET', auth: 'worker',
+    run: async ({ hub, id, query }) => {
+      const filter = parseTaskQuery(query)
+      return { generated_at: now(), tasks: await hub.agentTasks(id, filter) }
+    },
+  },
+  '/v1/cancel': { method: 'POST', auth: 'worker', body: 'event', run: ({ hub, id, body }) => hub.agentCancel(id, requireTaskId(body.task_id), body.reason) },
   '/v1/artifact': {
     method: 'GET', auth: 'worker',
     run: async ({ hub, id, query }) => {
@@ -414,6 +426,31 @@ export const ROUTES = {
     run: async ({ hub, id, body }) => ({ ...(await hub.provisionAgent(id, body)), note: 'Store this token now; it is not shown again.' }),
   },
   '/v1/ctl/overview': { method: 'GET', auth: 'controller', run: ({ hub }) => hub.overview() },
+  // DSH fallback: the controller acts as the built-in dsh-self
+  '/v1/ctl/fallback': {
+    method: 'GET', auth: 'controller',
+    run: async ({ hub, id, query }) => ({ generated_at: now(), tasks: await hub.listFallback(id, { workspaces: workspaceQuery(query) }) }),
+  },
+  '/v1/ctl/fallback/take': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.takeFallback(id, { task_id: body.task_id, workspaces: body.workspaces }) },
+  '/v1/ctl/fallback/event': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.fallbackProgress(id, body) },
+  '/v1/ctl/fallback/result': { method: 'POST', auth: 'controller', body: 'result', run: ({ hub, id, body }) => hub.fallbackResult(id, body) },
+  '/v1/ctl/fallback/input': {
+    method: 'GET', auth: 'controller',
+    run: async ({ hub, id, query }) => {
+      const name = queryOne(query, 'name')
+      const bytes = await hub.fallbackInput(id, { task_id: queryOne(query, 'task_id'), from_task: queryOne(query, 'from_task') || undefined, name })
+      return { bytes, name }
+    },
+  },
+}
+
+/** `?workspaces=a,b` -> list, or undefined (no filter). */
+function workspaceQuery(query) {
+  const raw = queryOne(query, 'workspaces')
+  if (raw === undefined) return undefined
+  const list = raw.split(',').map(s => s.trim()).filter(Boolean)
+  if (list.length > 64 || list.some(w => !WORKSPACE_RE.test(w))) throw new HubError(400, 'bad-query', 'workspaces must be workspace names, comma separated')
+  return list
 }
 
 /** Long poll; tasks leased for a connection that closed meanwhile are handed back. */
@@ -440,9 +477,10 @@ export function matchRoute(method, path) {
  * @param {{ hub: import('./hub.js').AgentHub, logger?: any, allow?: string[], trustProxy?: boolean, maxResultBytes?: number }} options
  * @returns {(req: any, res: any) => Promise<void>}
  */
-export function createHandler({ hub, logger, allow = [], trustProxy = false, maxResultBytes = DEFAULT_MAX_RESULT_BYTES }) {
+export function createHandler({ hub, logger, allow = [], trustProxy = false, maxResultBytes = DEFAULT_MAX_RESULT_BYTES, mcp = true }) {
   const allowList = compileAllow(allow)
   const limits = { small: SMALL_BODY, event: EVENT_BODY, result: maxResultBytes }
+  const gateway = mcp === false ? undefined : (mcp instanceof McpGateway ? mcp : new McpGateway({ hub }))
   return async function handle(req, res) {
     let path = '?'
     let id
@@ -457,6 +495,11 @@ export function createHandler({ hub, logger, allow = [], trustProxy = false, max
       }
       const parsed = parseRequestUrl(req.url)
       path = parsed.path
+      if (gateway !== undefined && (path === MCP_PATH || path === TOKEN_PATH)) {
+        if (parsed.query.has('token') || parsed.query.has('access_token')) throw new HubError(400, 'token-in-query', 'never put a token in the query')
+        await (path === TOKEN_PATH ? handleToken : handleMcp)({ gateway, req, res, limits })
+        return
+      }
       const route = matchRoute(req.method, path)
       if (route.auth === 'none') { sendJson(res, 200, await route.run({ hub, ip })); return }
       if (parsed.query.has('token') || parsed.query.has('x-dsh-token')) throw new HubError(400, 'token-in-query', 'send the token in the X-DSH-Token header, never in the query')
@@ -476,6 +519,12 @@ export function createHandler({ hub, logger, allow = [], trustProxy = false, max
       if (res.headersSent || res.writableEnded || res.destroyed) return
       // A POST answered before its body was read: do not keep the connection.
       const extra = req.method === 'POST' && req.dshBodyRead !== true ? { connection: 'close' } : {}
+      if (error instanceof HubError && error.oauth === true) {
+        try { logger?.warn?.(`dsh-hub: ${error.status} ${error.code} ${req.method} ${path} ip=${ip ?? '-'}`) } catch { /* ignore */ }
+        sendJson(res, error.status, { error: error.code, error_description: error.message }, { ...extra, 'cache-control': 'no-store' })
+        return
+      }
+      if (error instanceof HubError && error.status === 401 && path === MCP_PATH) extra['www-authenticate'] = 'Bearer realm="dsh-hub"'
       if (error instanceof HubError) {
         if (error.status === 401 || error.status === 403) {
           try { logger?.warn?.(`dsh-hub: ${error.status} ${error.code} ${req.method} ${path} id=${id ?? '-'} ip=${ip ?? '-'}`) } catch { /* ignore */ }
@@ -489,6 +538,51 @@ export function createHandler({ hub, logger, allow = [], trustProxy = false, max
       sendJson(res, 500, { error: { code: 'internal', message: 'internal error' } }, extra)
     }
   }
+}
+
+// --- MCP and OAuth ----------------------------------------------------------------------
+
+/** POST /oauth/token: form or JSON body; client id / secret may also come as HTTP Basic. */
+async function handleToken({ gateway, req, res, limits }) {
+  if (req.method !== 'POST') throw new HubError(405, 'method-not-allowed', 'use POST')
+  const essence = String(req.headers?.['content-type'] ?? '').split(';', 1)[0]?.trim().toLowerCase()
+  let body
+  if (essence === 'application/json') body = await readJson(req, limits.small)
+  else if (essence === 'application/x-www-form-urlencoded') {
+    const raw = typeof req.on === 'function' && typeof req.resume === 'function' ? await collectStream(req, limits.small) : await collectIterable(req, limits.small)
+    req.dshBodyRead = true
+    body = Object.fromEntries(new URLSearchParams(raw.toString('utf8')))
+  } else throw new HubError(415, 'unsupported-media-type', 'content-type must be application/x-www-form-urlencoded or application/json')
+  const basic = /^Basic\s+(\S+)$/i.exec(String(req.headers?.authorization ?? ''))
+  if (basic !== null) {
+    const decoded = Buffer.from(basic[1], 'base64').toString('utf8')
+    const at = decoded.indexOf(':')
+    if (at > 0) { body.client_id = decodeURIComponent(decoded.slice(0, at)); body.client_secret = decodeURIComponent(decoded.slice(at + 1)) }
+  }
+  sendJson(res, 200, await gateway.issueToken(body), { 'cache-control': 'no-store', pragma: 'no-cache' })
+}
+
+/** POST /mcp: one JSON-RPC message or a batch; notifications only -> 202. GET (SSE) is not offered. */
+async function handleMcp({ gateway, req, res, limits }) {
+  if (req.method !== 'POST') throw new HubError(405, 'method-not-allowed', 'use POST (this server sends no SSE stream)')
+  const agentId = gateway.agentFor(req.headers?.authorization)
+  const essence = String(req.headers?.['content-type'] ?? '').split(';', 1)[0]?.trim().toLowerCase()
+  if (essence !== 'application/json') throw new HubError(415, 'unsupported-media-type', 'content-type must be application/json')
+  const raw = typeof req.on === 'function' && typeof req.resume === 'function' ? await collectStream(req, limits.result) : await collectIterable(req, limits.result)
+  req.dshBodyRead = true
+  let message
+  try { message = JSON.parse(raw.toString('utf8')) } catch {
+    sendJson(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } })
+    return
+  }
+  const batch = Array.isArray(message)
+  const answers = []
+  for (const m of batch ? message.slice(0, 50) : [message]) {
+    const answer = await gateway.handle(m, agentId)
+    if (answer !== undefined) answers.push(answer)
+  }
+  if (answers.length === 0) { res.writeHead(202, { ...BASE_HEADERS }); res.end(); return }
+  sendJson(res, 200, batch ? answers : answers[0])
 }
 
 // --- server -------------------------------------------------------------------------------
@@ -514,7 +608,7 @@ export function resolveListenHost({ host, tls } = {}) {
 export function createHubServer({ hub, logger, config, tlsMaterial }) {
   const host = resolveListenHost(config)
   if (config.tls && !tlsMaterial) throw new HubError(500, 'tls-missing', 'tls is configured but no certificate material was loaded')
-  const handler = createHandler({ hub, logger, allow: config.allow, trustProxy: config.trustProxy === true, maxResultBytes: config.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES })
+  const handler = createHandler({ hub, logger, allow: config.allow, trustProxy: config.trustProxy === true, maxResultBytes: config.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES, mcp: config.mcp?.enabled !== false })
   const server = config.tls
     ? createHttpsServer({ cert: tlsMaterial.cert, key: tlsMaterial.key, minVersion: 'TLSv1.2' }, handler)
     : createHttpServer(handler)
