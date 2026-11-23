@@ -2,7 +2,7 @@
   "name": "dsh-host-secrets",
   "version": "0.1.0",
   "private": true,
-  "description": "Host half of dsh-secrets: encrypted local vault, the secret_* tools (write and use, never read) and the read-only, login-guarded dashboard bridge /api/secrets/{summary,list}",
+  "description": "Host half of dsh-secrets: encrypted local vault, the secret_* tools (write and use, never read) and the login-guarded page routes under /api/secrets (value-free reads, write-only management)",
   "type": "module",
   "main": "index.js",
   "exports": {

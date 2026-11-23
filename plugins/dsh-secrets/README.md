@@ -4,11 +4,16 @@
 
 一个放在本机的**加密密钥库**（AES-256-GCM）。模型可以把 API key、token、证书等存进去，也可以“用”它们——注入成命令的环境变量，或在 HTTP 请求里用占位符代入——但**任何工具都读不回明文**。
 
-另带一个只读的「密钥看板」页面，只显示名称、描述、标签、指纹、长度、更新时间等**元数据**，永远不显示值。
+另带一个「密钥与插件」管理页：在页面上新建、换值、编辑、改名、删除密钥，设置 DSH 自己的凭据（模型 API key、GitHub / Gitea token），修改 agent 中枢地址，并查看每个 selfdsh 插件缺什么配置。值**只能写入，不能读出**：页面和接口永远不显示值。
 
 ## 装好后在哪里看到
 
-- **左侧栏多一行「密钥」**（英文界面为 “Secrets”），点开主区域的「密钥看板」页：保险库状态（已解锁 / 尚未创建 / 已锁定 / 无法读取）、主密钥来源是否就绪、密钥总数、可按标签筛选和关键字搜索的表格。**页面上没有“显示值”或“复制值”按钮**，接口里本来就没有值。
+- **左侧栏多一行「密钥」**（英文界面为 “Secrets”），点开主区域的「密钥与插件」页，顶部三个分页：
+  - **保险库**：保险库状态、主密钥是否就绪、可按标签筛选和搜索的表格；「新建密钥」，每行可以换值、编辑描述和标签、改名、删除。
+  - **DSH 凭据**：DSH 自己凭据库（`<DSH home>/.credentials.yaml`）里的 `DEEPSEEK_API_KEY`、`EXA_API_KEY`、`GITHUB_TOKEN`、`GITEA_TOKEN`，显示是否已配置、来自哪里，可设置或清除，立即生效。要多管几个名称，配置 `manageCredentialRefs`。
+  - **插件**：当前 profile 装了哪些 selfdsh 插件，每个插件需要什么、缺几项。agent-hub 卡片里可以直接改中枢 URL、控制端 token 和代理（写进 `<DSH home>/agent-hub/controller.env`，agent-hub 下次请求就用新值，不用重启），服务器地址变了在这里改就行。
+  
+  **页面上没有“显示值”或“复制值”按钮**，接口里本来就没有值；DSH 凭据库会给出值的前后几位（masked），这里也丢掉不传。
 - **对模型开放的 10 个工具**：
 
   | 工具 | 作用 |
@@ -23,7 +28,7 @@
   | `secret_export` / `secret_import` | 加密导出 / 导入（迁移到新机器用） |
 
 - 默认还会给**所有工具的文本输出**做一次打码：只要出现库里已有的密钥值（≥ 8 个字符），就替换掉。
-- 宿主侧只读接口：`GET /api/secrets/summary`、`GET /api/secrets/list`（需要已登录 Web，只返回元数据）。
+- 宿主侧接口（都要已登录 Web）：读 `GET /api/secrets/{summary,list,credentials,plugins}`，写 `POST /api/secrets/{vault,credentials,hub}/*`。写请求必须是 JSON、带 `x-dsh-secrets: 1` 请求头，跨站来源一律拒绝。详见 [docs/DASHBOARD.md](docs/DASHBOARD.md)。
 
 ## 必须配置
 
@@ -131,6 +136,6 @@ node scripts/install.mjs --profile /root/.dsh/profiles/web
 ## 更多文档
 
 - [docs/USAGE.md](docs/USAGE.md)：使用手册（安装、口令、每个工具、批量导入、导出迁移、忘记口令会怎样、命名建议）。
-- [docs/DASHBOARD.md](docs/DASHBOARD.md)：只读看板的接口与界面。
+- [docs/DASHBOARD.md](docs/DASHBOARD.md)：管理页的接口与界面。
 - [DESIGN.md](DESIGN.md)：设计（威胁模型、文件格式、密钥派生、打码）。
 - [docs/READINESS.md](docs/READINESS.md)：上线就绪评估，含已知的文档与实现偏差。

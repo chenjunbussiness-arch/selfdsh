@@ -1,4 +1,4 @@
-# dsh-secrets 只读密钥看板
+# dsh-secrets 密钥与插件管理页
 
 > 一句话：**看得到有哪些密钥、它们的元数据和指纹，看不到任何一个值。**
 > 值只能通过 `secret_*` 工具使用（`secret_exec` 注入环境变量、`secret_http` 的 `${secret:NAME}`
@@ -10,10 +10,12 @@
 | 部分 | 位置 | 作用 |
 | --- | --- | --- |
 | 宿主侧接口 | `packages/host-secrets/bridge.js` | 两个只读 GET 路由，注册在 `ctx.webServer` 上，带登录校验 |
+| 管理接口 | `packages/host-secrets/manage.js` | 写保险库、DSH 凭据、agent-hub 连接文件；读凭据状态和插件清单（见第 7 节） |
 | 挂载 | `packages/host-secrets/index.js` → `mountBridge()` | `ctx.inject(['webServer'], …)`；没有 `webServer` 时只是不挂接口，10 个工具照常工作 |
 | 浏览器侧页面 | `packages/client-ui-secrets/` | `main` 面板 `secrets/page` + 侧栏 `sidebar.panellist` 一行“密钥” |
 | 补丁层 | `cordis.patch.yml` | 新增 `client-ui-secrets` 一行（`dsh-client-ui-secrets`） |
 | 测试 | `packages/host-secrets/tests/bridge.test.mjs` | 登录、无明文、筛选、vault 不存在 / 已锁定、只读 |
+| 测试 | `packages/host-secrets/tests/manage.test.mjs` | 写入、跨站拒绝、锁定 409、凭据不回值、中枢文件 0600、插件清单 |
 
 页面选用 **整页（main 面板 + 侧栏入口）**，与 dsh-vpn 的写法一致，而不是 token-stats 的侧栏底部卡片：
 表格加筛选、搜索需要宽度，且密钥看板不是需要一直挂在眼前的信息。
@@ -186,7 +188,7 @@ node scripts/install.mjs --profile /root/.dsh/profiles/web
 装完重启 profile 所属服务（何时重启由运维决定），日志里应出现：
 
 ```
-dsh-secrets: read-only dashboard bridge mounted at /api/secrets/{summary,list}
+dsh-secrets: dashboard bridge mounted at /api/secrets (read: summary, list, credentials, plugins; write: vault, credentials, hub)
 dsh-secrets: vault /root/.dsh/secrets.vault (keySource passphrase-env), 10 tools registered
 ```
 
@@ -204,4 +206,31 @@ curl -i https://<host>/api/secrets/summary
   指纹是 `sha256` 前 8 位：对 API key / token 这类高熵值无风险，但极短、低熵的值（如 4 位 PIN）
   理论上可被枚举，与 USAGE.md §7 的说明一致。
 - 搜索只匹配名称和描述；用值去搜索得不到任何结果，页面不能被当作“猜值”的预言机（测试覆盖）。
-- 接口是只读的：不提供删除、改名、写入；这些仍然只能由智能体通过 `secret_*` 工具完成。
+- 写接口复用 `secret_*` 工具本身（同样的校验、锁和日志），只收值、不回值。
+- 写请求必须 `content-type: application/json`、带 `x-dsh-secrets: 1`，浏览器带了 `Origin` 时必须和本机 Host 一致；请求体上限 64 KiB。普通网页表单发不出这个请求头，所以别的网站不能借你的登录态改密钥。
+- DSH 凭据只能写 `DEEPSEEK_API_KEY`、`EXA_API_KEY`、`GITHUB_TOKEN`、`GITEA_TOKEN` 和配置 `manageCredentialRefs` 里列的名称（不能是 `DSH_` 开头）。
+- 中枢设置只能写 `DSH_HUB_URL`、`DSH_HUB_TOKEN`、`DSH_HUB_PROXY`；URL 不能带用户名密码；文件以 0600 原子写入，其他行原样保留。
+
+## 7. 管理接口（manage.js）
+
+| 方法 | 路径 | 请求体 | 说明 |
+|---|---|---|---|
+| POST | `/api/secrets/vault/set` | `{name, value, description?, tags?}` | 新建或换值（= `secret_set`） |
+| POST | `/api/secrets/vault/describe` | `{name, description?, tags?}` | 改描述、标签 |
+| POST | `/api/secrets/vault/rename` | `{from, to, overwrite?}` | 改名 |
+| POST | `/api/secrets/vault/delete` | `{name}` | 删除 |
+| GET | `/api/secrets/credentials` | | 受管凭据是否已配置、来源 |
+| POST | `/api/secrets/credentials/set` | `{ref, value}` | 写进 DSH 凭据库 |
+| POST | `/api/secrets/credentials/unset` | `{ref}` | 从凭据库清除 |
+| GET | `/api/secrets/plugins` | | 当前 profile、各插件需要的配置和中枢设置 |
+| POST | `/api/secrets/hub/set` | `{name, value}` | 写 agent-hub 的 controller.env |
+| POST | `/api/secrets/hub/unset` | `{name}` | 删掉其中一行 |
+
+保险库已锁定时写接口返回 409 `vault-locked`；没有挂载凭据库的 DSH 写凭据返回 503。
+
+新增配置项（都可省略）：
+
+- `hubEnvFile`：agent-hub 的连接文件，默认 `<DSH home>/agent-hub/controller.env`，要和 agent-hub 的 `envFile` 一致。
+- `manageCredentialRefs`：除内置四个外，页面还能设置的凭据名称列表。
+
+router-b 读 `GITHUB_TOKEN` / `GITEA_TOKEN` 时先看进程环境变量，没有再查 DSH 凭据库，所以在页面里保存的 token 不用重启就能用。

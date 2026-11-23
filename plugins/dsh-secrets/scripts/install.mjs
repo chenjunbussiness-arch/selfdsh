@@ -144,5 +144,5 @@ if (!uninstall) {
   const built = ['packages/client-ui-secrets/lib/client.js', 'packages/client-ui-secrets/lib/index.js']
     .filter(file => !existsSync(join(BUNDLE, file)))
   if (built.length > 0) console.warn(`warning: not built yet: ${built.join(', ')} (run \`node scripts/build.mjs\`; the secret_* tools work without it, only the dashboard page is missing)`)
-  console.log('\nNext: restart the service that owns this profile (the operator decides when), then check the log for\n  "dsh-secrets: vault <path> (keySource ...), 10 tools registered" and\n  "dsh-secrets: read-only dashboard bridge mounted at /api/secrets/{summary,list}". Set DSH_SECRETS_PASSPHRASE in the service environment first.')
+  console.log('\nNext: restart the service that owns this profile (the operator decides when), then check the log for\n  "dsh-secrets: vault <path> (keySource ...), 10 tools registered" and\n  "dsh-secrets: dashboard bridge mounted at /api/secrets (...)". Set DSH_SECRETS_PASSPHRASE in the service environment first.')
 }

@@ -66,3 +66,76 @@ export interface Filter {
   tag?: string
   query?: string
 }
+
+// --- management routes (packages/host-secrets/manage.js) -----------------------
+
+/** One managed reference in DSH's credential store: presence only, never a value. */
+export interface CredentialItem {
+  ref: string
+  configured: boolean
+  /** `file` (credential store), `env`, `user-env`, `project-env`, `unknown` or null. */
+  source: string | null
+  writable: boolean
+}
+
+/** `GET /api/secrets/credentials`. */
+export interface CredentialsDocument {
+  generatedAt: string
+  /** Whether this DSH mounts a credential store at all. */
+  available: boolean
+  items: CredentialItem[]
+}
+
+/** One agent-hub controller.env key. `value` only for non-secret keys. */
+export interface HubItem {
+  key: string
+  secret: boolean
+  required: boolean
+  configured: boolean
+  source: 'env' | 'file' | null
+  /** Set in both the process environment and the file: the environment wins. */
+  shadowed: boolean
+  value?: string | null
+}
+
+/** agent-hub connection file status. */
+export interface HubStatus {
+  file: string
+  exists: boolean
+  error?: string
+  items: HubItem[]
+}
+
+/** What one plugin needs. */
+export interface PluginNeed {
+  key: string
+  kind: 'credential' | 'hub' | 'vault-key'
+  required: boolean
+  configured: boolean
+  source: string | null
+}
+
+/** One selfdsh plugin. */
+export interface PluginInfo {
+  id: string
+  installed: boolean
+  profiles: string[]
+  needs: PluginNeed[]
+}
+
+/** `GET /api/secrets/plugins`. */
+export interface PluginsDocument {
+  generatedAt: string
+  profiles: { name: string; running: boolean }[]
+  credentialStore: boolean
+  hub: HubStatus
+  plugins: PluginInfo[]
+}
+
+/** Result of a vault write: value-free. */
+export interface VaultWriteResult {
+  name?: string
+  fingerprint?: string
+  length?: number
+  created?: boolean
+}
