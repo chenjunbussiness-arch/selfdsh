@@ -5,7 +5,7 @@
     "deepseek-harness": "E:/PythonProject/dsh-warroom",
     "rca-ab-test": null
   },
-  "hubUrl": "hub.example.com",
+  "hubUrl": "8.134.170.38",
   "tokenFile": "~/.dsh/worker/quick-mydesk.token",
   "proxy": "http://127.0.0.1:7890"
 }

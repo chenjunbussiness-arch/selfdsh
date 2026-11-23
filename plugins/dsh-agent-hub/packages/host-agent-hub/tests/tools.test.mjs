@@ -126,7 +126,7 @@ test('each tool is one /v1/ctl call with the right method, query and body', asyn
   await call('task_retry', { task_id: 't1', agent: 'quick-mydesk' })
   assert.deepEqual([last().path, last().json], ['/v1/ctl/retry', { task_id: 't1', agent: 'quick-mydesk' }])
 
-  assert.deepEqual(await call('agent_list'), { agents: [{ agent_id: 'quick-mydesk' }] })
+  assert.deepEqual(await call('agent_list'), { agents: [{ agent_id: 'quick-mydesk', role: 'worker' }] }, 'role is always reported (worker when the hub sends none)')
   assert.deepEqual(await call('agent_requests'), { requests: [{ request_id: 'req_1' }] })
   assert.deepEqual(q(), { id: CONTROLLER, status: 'pending' }, 'agent_requests defaults to pending')
   await call('agent_requests', { status: 'all' })
@@ -152,7 +152,8 @@ test('task_dispatch type "code" needs a workspace (checked before calling the hu
   await rejectsWith(() => call('task_dispatch', { agent: 'pool:code', title: 't', instruction: 'i', type: 'code', workspace: '  ' }), 400, 'bad-task')
   assert.equal(calls.length, 0)
   await call('task_dispatch', { agent: 'pool:research', title: 't', instruction: 'i', type: 'research' })
-  assert.equal(calls.length, 1, 'other types may omit workspace')
+  // 1 = the role lookup (GET /v1/ctl/agents), 2 = the dispatch itself.
+  assert.deepEqual(calls.map(c => `${c.method} ${c.path}`), ['GET /v1/ctl/agents', 'POST /v1/ctl/dispatch'], 'other types may omit workspace')
 })
 
 test('errors are clear: [code] message, status kept, nothing sent without a token', async () => {
@@ -187,6 +188,29 @@ test('the controller token never appears in tool outputs or errors', async () =>
   assertNoToken(e.message, e.stack)
 })
 
+test('task_dispatch effort goes to the hub (checked there) and, for older hubs, into context.effort', async () => {
+  const { call, calls, byName } = setup()
+  // Every dispatch is one role lookup (GET /v1/ctl/agents) + the POST itself.
+  const posts = () => calls.filter(c => c.method === 'POST')
+  const props = name => byName.get(name).parameters.properties
+  assert.deepEqual(props('task_dispatch').effort.properties.mode.enum, ['fast', 'balanced', 'smart'])
+  assert.deepEqual(props('task_dispatch').effort.properties.thinking.enum, ['off', 'low', 'medium', 'high'])
+  assert.equal(props('task_dispatch').effort.properties.agent.type, 'string')
+  await call('task_dispatch', { agent: 'quick-mydesk', title: 't', instruction: 'i', effort: { mode: 'smart', thinking: 'high', agent: 'quick' } })
+  assert.deepEqual(posts()[0].json, {
+    agent: 'quick-mydesk', title: 't', instruction: 'i',
+    effort: { mode: 'smart', thinking: 'high', agent: 'quick' },
+    context: { effort: { mode: 'smart', thinking: 'high', agent: 'quick' } },
+  })
+  await call('task_dispatch', { agent: 'quick-mydesk', title: 't', instruction: 'i', context: { project: 'x' }, effort: { mode: 'fast' } })
+  assert.deepEqual(posts()[1].json.context, { project: 'x', effort: { mode: 'fast' } })
+  assert.deepEqual(posts()[1].json.effort, { mode: 'fast' })
+  await call('task_dispatch', { agent: 'quick-mydesk', title: 't', instruction: 'i' })
+  assert.equal('context' in posts()[2].json, false, 'no context added without effort')
+  await rejectsWith(() => call('task_dispatch', { agent: 'quick-mydesk', title: 't', instruction: 'i', effort: { mode: 'fast', thinking: 'high' } }), 400, 'bad-task')
+  assert.equal(posts().length, 3)
+})
+
 // --- presence (hub v2: status / warnings / require_online) ------------------------------
 
 test('task_dispatch forwards require_online and hands the hub warnings back unchanged', async () => {
@@ -194,19 +218,20 @@ test('task_dispatch forwards require_online and hands the hub warnings back unch
     if (c.json?.require_online === true) return { status: 409, body: { error: { code: 'agent-offline', message: 'quick-mydesk is offline (last seen 2026-11-22T10:00:00.000Z)' } } }
     return { body: { task_id: 't1', status: 'pending', agent: 'quick-mydesk', warnings: ['agent-offline'] } }
   })
+  const posts = () => calls.filter(c => c.method === 'POST')
   const queued = await call('task_dispatch', { agent: 'quick-mydesk', title: 't', instruction: 'i' })
   assert.deepEqual(queued.warnings, ['agent-offline'])
   assert.equal(queued.status, 'pending')
-  assert.equal('require_online' in calls[0].json, false, 'not sent when not given')
+  assert.equal('require_online' in posts()[0].json, false, 'not sent when not given')
   await rejectsWith(() => call('task_dispatch', { agent: 'quick-mydesk', title: 't', instruction: 'i', require_online: true }), 409, 'agent-offline')
-  assert.equal(calls[1].json.require_online, true)
+  assert.equal(posts()[1].json.require_online, true)
   const { call: call2 } = setup(() => ({ body: { task_id: 't2', status: 'pending' } }))
   assert.equal((await call2('task_dispatch', { agent: 'pool:code', title: 't', instruction: 'i' })).warnings, undefined, 'no warnings key without warnings')
 })
 
-test('agent_list passes status / last_seen / version through', async () => {
+test('agent_list passes status / last_seen / version through (and adds the role, worker by default)', async () => {
   const agent = { agent_id: 'quick-mydesk', status: 'left', online: false, last_seen: '2026-11-22T10:00:00.000Z', left_at: '2026-11-22T10:01:00.000Z', version: 'agent_client/2.1.0' }
   const { call } = setup(() => ({ body: { agents: [agent] } }))
   const out = await call('agent_list')
-  assert.deepEqual(out.agents[0], agent)
+  assert.deepEqual(out.agents[0], { ...agent, role: 'worker' })
 })

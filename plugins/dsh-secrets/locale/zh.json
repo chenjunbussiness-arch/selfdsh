@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "密钥保险库",
-    "description": "本机加密密钥保险库：智能体能写入、能使用（环境变量注入、HTTP 占位符），但任何工具都读不回明文；附带只读密钥看板（名称、描述、标签、指纹、长度、更新时间）。",
-    "detail": "docs/USAGE.md"
+    "description": "本机加密密钥库：模型能存入和使用密钥（环境变量注入、HTTP 占位符），但任何工具都读不回明文；附只读「密钥」看板。必须配置：主口令 DSH_SECRETS_PASSPHRASE，写在 <DSH home>/secrets.env（不是 <DSH home>/.env），或改用 keyfile。",
+    "detail": "README.md"
   }
 }

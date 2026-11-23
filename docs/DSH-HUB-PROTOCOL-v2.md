@@ -177,10 +177,58 @@ agents 列表和 overview 里每个 worker 还有 `last_seen`、`left_at`、`ver
 
 **分配规则**：
 
-1. 只在 worker 自己 poll 时分配（天然只给在线的 worker），路由条件见第 4 节；
+1. 只在 worker 自己 poll 时分配（天然只给在线的 worker），路由条件见第 4 节，另外任务带 `effort` 时 worker 必须支持（第 10 节）；
 2. dispatch 指定具体 agent：未注册 → 404 `agent-not-found`；已申请未批准 → 409 `agent-not-approved`；已吊销 → 409 `agent-revoked`；离线（含 left、未领令牌）→ 仍入队，返回 `warnings: ["agent-offline"]`；带 `require_online: true` 时离线直接 409 `agent-offline`，不入队；
 3. dispatch 到 `pool:<能力>`：当前没有任何在线且满足能力 / workspace / node 条件的 worker → 仍入队，返回 `warnings: ["no-online-worker"]`；带 `require_online: true` 时 409 `no-online-worker`；
 4. 持有任务的 worker 超过 `offlineAfterMs` 没有 heartbeat / poll / event，或主动 leave：sweep（每 `sweepIntervalMs`，默认 15 s）/ leave 当时立即重排它的任务，不等租约到期，记一次尝试；超过 `maxRetries` 的任务变 `dead`。
 
 **超时默认值**：`offlineAfterMs` 90 s；心跳周期 30 s（客户端 `DSH_HEARTBEAT_SECONDS`，5..3600）；长轮询 `wait` 25 s（上限 55 s，客户端超时 wait + 15 s）；启动时心跳失败按 5 s → 10 → 20 → 40 → 60 s 退避重试；对账宽限 30 s；租约默认 3600 s（进度事件续租）。
+
+## 10. 执行参数（runtime）与任务强度（effort）
+
+目标：DSH 统一管理多个平台的 agent，派任务时不仅选 worker，还能选**档位、思考强度和具体的 agent**。
+
+### 10.1 worker 声明 `runtime`
+
+worker 在 `POST /v1/enroll` 和每次 `POST /v1/heartbeat` 的 body 里带 `runtime`（可选）。它只是描述，不是授权：心跳可以随时更新，批准时不需要收窄；`null` 表示清空，不带这个键表示不变。
+
+```json
+"runtime": {
+  "modes":    ["fast", "balanced", "smart"],
+  "thinking": ["off", "low", "medium", "high"],
+  "default":  { "mode": "balanced", "thinking": "low" },
+  "defaults": { "code": { "mode": "smart", "thinking": "medium" } },
+  "agents":   [{ "name": "quick", "description": "AWS Quick 默认 agent" }],
+  "note":     "定时计划每 15 分钟接单"
+}
+```
+
+| 键 | 含义 | 校验 |
+|---|---|---|
+| `modes` | 能用的档位 | `fast` / `balanced` / `smart` 的子集；空 = 不限制 |
+| `thinking` | 能用的思考强度 | `off` / `low` / `medium` / `high` 的子集；空 = 不限制 |
+| `default` | 任务没写 effort 时用的强度 | 必须在 modes / thinking / agents 范围内 |
+| `defaults` | 按任务类型的默认强度 | 键是任务类型（`code`、`document`……） |
+| `agents` | 这个平台上可以点名的 agent（AWS Quick 的某个 agent、Claude Code 的子 agent……） | `name` 匹配 `^[a-z][a-z0-9-]{0,47}$`，最多 32 个，`description` ≤ 200 字 |
+| `note` | 说明 | ≤ 300 字 |
+
+格式错误返回 400 `bad-runtime`。`agent_requests`、`agent_list`（`/v1/ctl/requests`、`/v1/ctl/agents`）和 `GET /v1/me` 都会带上 `runtime`，DSH 据此决定派给谁、用多大强度。
+
+worker 客户端：`runtime` 写在 `profile.json`；不写时用平台内置的（`aws-quick` 有内置值，其他平台不声明）；写 `null` 表示不声明。
+
+### 10.2 任务带 `effort`
+
+`task_dispatch` / `POST /v1/ctl/dispatch` 可以带 `effort: { mode, thinking, agent }`，三项都可选：
+
+- `mode: "fast"` 时 `thinking` 只能省略或 `off`，否则 400 `bad-task`；
+- 派给**具体 worker**：worker 声明了 runtime 但不支持 → 409 `unsupported-effort`（message 写明它支持什么）；worker 没声明 runtime → 照常入队，返回 `warnings: ["effort-not-declared"]`（worker 可能忽略 effort）；点名 `agent` 但 worker 没声明 agents → 409；
+- 派给 **`pool:<能力>`**：只交给支持这个 effort 的 worker（路由条件第 5 条）；当前没有在线的支持者 → `warnings: ["no-online-worker"]`；
+- `task_retry` 改派给别的 worker 时同样检查，不支持 → 409 `unsupported-effort`；
+- `effort` 出现在任务详情和 worker 领到的任务里。DSH 插件同时把它复制一份到 `context.effort`，这样旧版 hub 也能把它带给 worker（旧版 hub 不做检查）。
+
+### 10.3 worker 执行
+
+worker 客户端在 `task.json` 里写 `effort_resolved`：任务自己的 effort；没有就用 runtime 的 `defaults[任务类型]`，再没有就用 `default`；`source` 为 `task` / `default` / `none`。agent 按它选择档位执行，点名的 `agent` 对应平台上的具体 agent。
+
+**建议**：`fast` 适合简单查询、小文档；`balanced` 适合大多数文档、调研和一般代码；`smart` 适合复杂编程和难的推理。
 

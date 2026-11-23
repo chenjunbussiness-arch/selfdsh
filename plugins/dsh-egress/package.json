@@ -2,7 +2,7 @@
   "name": "dsh-egress",
   "version": "0.1.0",
   "private": true,
-  "description": "Egress manager bundle for DeepSeek Harness: choose which proxy (http, https, socks5 or direct) each model endpoint leaves the server through, fail-closed, from a panel in the Web client",
+  "description": "Egress manager for DeepSeek Harness: choose which proxy (http, https, socks5 or direct) each model endpoint leaves the server through, fail-closed, from the Egress panel in the Web client. No configuration required: everything goes direct until an exit is added and bound. See README.md",
   "type": "module",
   "icon": "./icon.svg",
   "main": "index.js",
@@ -19,7 +19,8 @@
     "icon.svg",
     "locale",
     "docs",
-    "packages"
+    "packages",
+    "README.md"
   ],
   "license": "MIT",
   "engines": {

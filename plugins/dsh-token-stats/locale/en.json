@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Token usage",
-    "description": "Sidebar token statistics: today's total and per-model split, expandable to the last 7/30 days of daily totals; read-only over the local ~/.dsh session logs with an incremental cache.",
+    "description": "A sidebar card with today's token total and per-model split, expandable to the last 7/30 days of daily totals; read-only over the local session logs. No configuration required.",
     "detail": "README.md"
   }
 }

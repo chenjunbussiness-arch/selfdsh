@@ -33,6 +33,7 @@
  */
 
 import { CONFIG_CODES, HubError, ID_RE, POOL_RE, TASK_ID_RE } from './hub-client.js'
+import { DEFAULT_ROLE, ROLES } from './roles.js'
 
 export const BRIDGE_BASE = '/api/agent-hub'
 export const ADMIN_BASE = `${BRIDGE_BASE}/admin`
@@ -109,6 +110,8 @@ export function adminAgent(a) {
   return {
     agent_id: text(a?.agent_id ?? a?.id, 64), platform: text(a?.platform, 200), mode: oneOf(a?.mode, ['poll', 'push']), capabilities: strings(a?.capabilities),
     max_concurrency: int(a?.max_concurrency), description: text(a?.description, 1000), revoked: a?.revoked === true,
+    // Additive: a hub (or an agent record) without a role is a worker.
+    role: oneOf(a?.role, ROLES) ?? DEFAULT_ROLE,
     online: a?.online === true, last_seen: text(a?.last_seen, 64), reported_status: oneOf(a?.reported_status, ['idle', 'busy']),
     status: oneOf(a?.status, ['pending', 'online', 'offline', 'left', 'revoked']), version: text(a?.version, 64), left_at: text(a?.left_at, 64),
     running_tasks: strings(a?.running_tasks), created_at: text(a?.created_at, 64),
@@ -167,6 +170,7 @@ export function adminRequest(r) {
   return {
     request_id: text(r?.request_id, 96), status: text(r?.status, 32), agent_id: text(r?.agent_id ?? r?.id, 64), platform: text(r?.platform, 200), mode: oneOf(r?.mode, ['poll', 'push']),
     capabilities: strings(r?.capabilities), max_concurrency: int(r?.max_concurrency), description: text(r?.description, 1000),
+    role: oneOf(r?.role, ROLES) ?? DEFAULT_ROLE,
     from: text(r?.from, 100), requested_at: text(r?.requested_at, 64), decided_at: text(r?.decided_at, 64), reason: text(r?.reason, 500),
   }
 }

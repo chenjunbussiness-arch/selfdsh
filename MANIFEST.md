@@ -1,16 +1,18 @@
-# MANIFEST.md · dsh-warroom 发布清单（tag v2026.11.21）
+# MANIFEST.md · dsh-warroom 发布清单（2026-11-23 更新；上一个发布 tag 为 v2026.11.21）
 
-这次推的是**一套跑在 DeepSeek Harness（DSH）上的「作战室」定制**：5 个自研插件
-（分区路由 / Token 统计 / 出口代理 / VPN / 加密保险库）+ 一份 `web` profile 覆盖层 +
+这次推的是**一套跑在 DeepSeek Harness（DSH）上的「作战室」定制**：6 个自研插件
+（分区路由 / Token 统计 / 出口代理 / VPN / 加密保险库 / Agent 调度）+ 独立调度服务 `services/dsh-hub` +
+一份 `web` profile 覆盖层 +
 迁移文档 + 脱敏的 nginx / systemd 模板 + 随仓库分发的 Exa stdio MCP（`vendor/`）+
 浏览器截图工具（`scripts/browser*`）。仓库**不含**任何密钥、口令、证书、`sessions/`、
 `vault`、`node_modules/` 与 DSH 本体。
 
-- 发布基准：tag `v2026.11.21`（`main` 分支）
-- 当前索引规模：**396 个文件 / 约 7.26 MB**（不含 `.git`；加上根目录 `CLONE.md`、`MANIFEST.md`
-  两份文档后为 **398**）
-- 398 的构成：**347 基线 + 49 新增**（`dsh-secrets` 22、`vendor/exa-mcp-server` 19、nginx 模板 5、
-  `scripts/browser` + `scripts/browser.py` 2、`docs/MANIFEST.md` 1）+ 根目录 2
+- 上一个发布 tag：`v2026.11.21`（当时 398 个文件）；本文件的数字按 **2026-11-23 的 `main` 工作树**重新统计
+- 当前规模：**552 个文件 / 约 9.80 MB**（不含 `.git`，并按 `.gitignore` 排除 `node_modules/`、`lib.next/`、
+  `*.bak-*`、`.ui-backup/`、`__pycache__/` 等；做法是按根目录与各子目录的 `.gitignore` 规则遍历工作树计数。发布后可用 `git ls-files | wc -l` 复核）
+- 与 v2026.11.21 相比新增：`plugins/dsh-agent-hub/`、`services/dsh-hub/`（含 `deploy/docker/` 本地联调）、
+  `plugins/dsh-secrets/packages/client-ui-secrets/`（只读密钥看板）、`.deps/`（构建依赖清单）、
+  `docs/INDEX.md`、`docs/UI-STYLE.md`、`docs/DSH-HUB-PROTOCOL-v2.md`、`docs/DEPLOY-HUB-PROMPT.md`
 - 运行基线：DSH `0.2.2-rc.5`、Node >= 24.9（DSH 0.2.2-rc.5 本身的要求）、profile `web`
 - 仓库：`https://8.134.170.38:8444/dev/dsh-warroom.git`（私有，mTLS；见 `CLONE.md`）
 
@@ -25,23 +27,24 @@
 
 | 目录 / 文件 | 用途 | 关键入口文件 | 文件数 |
 |---|---|---|---|
-| `README.md` | 仓库总览、安装最短路径、已知限制 | `README.md` | 1 |
-| `.gitignore` | 排除 `node_modules/`、`lib.next/`、`*.bak-*`、密钥/证书、`.dsh-artifacts/`；对 `vendor/exa-mcp-server/dist/` 例外放行 | — | 1 |
-| `plugins/dsh-router-b/` | 分区路由 + 作战室三栏界面 | `index.js`、`cordis.patch.yml`、`packages/host-router/lib/index.js`、`packages/client-ui-router/lib/client.js` | 155 |
-| `plugins/dsh-token-stats/` | 侧栏 Token 用量统计 | `index.js`、`packages/host-token-stats/index.js`、`packages/client-ui-token-stats/lib/client.js` | 25 |
-| `plugins/dsh-egress/` | 模型端点出口代理面板（fail-closed） | `index.js`、`packages/host-egress/lib/index.js`、`packages/client-ui-egress/lib/client.js` | 77 |
-| `plugins/dsh-vpn/` | openfortivpn 管理 + 看门狗 + VPN 页面 | `index.js`、`packages/host-vpn/lib/index.js`、`packages/client-ui-vpn/lib/client.js` | 76 |
-| `plugins/dsh-secrets/` | 本地加密保险库（**本次新增**） | `index.js`、`cordis.patch.yml`、`packages/host-secrets/vault.js` | 22 |
+| `README.md` | 仓库总览、6 个插件一览、「从零开始」、架构图 | `README.md` | 1 |
+| `.gitignore` | 排除 `node_modules/`、构建中间态、`*.bak-*`、`.ui-backup/`、密钥/证书/`*.env`/令牌、`.dsh-artifacts/`；放行 `*.env.example` 与 `vendor/exa-mcp-server/dist/` | — | 1 |
+| `plugins/dsh-router-b/` | 分区路由 + 作战室三栏界面 | `index.js`、`cordis.patch.yml`、`packages/host-router/lib/index.js`、`packages/client-ui-router/lib/client.js` | 197 |
+| `plugins/dsh-token-stats/` | 侧栏 Token 用量统计 | `index.js`、`packages/host-token-stats/index.js`、`packages/client-ui-token-stats/lib/client.js` | 26 |
+| `plugins/dsh-egress/` | 模型端点出口代理面板（fail-closed） | `index.js`、`packages/host-egress/lib/index.js`、`packages/client-ui-egress/lib/client.js` | 83 |
+| `plugins/dsh-vpn/` | openfortivpn 管理 + 看门狗 + VPN 页面 | `index.js`、`packages/host-vpn/lib/index.js`、`packages/client-ui-vpn/lib/client.js` | 80 |
+| `plugins/dsh-secrets/` | 本地加密保险库 + 只读密钥看板（client-ui-secrets 15 个文件） | `index.js`、`cordis.patch.yml`、`packages/host-secrets/vault.js`、`packages/client-ui-secrets/lib/client.js` | 48 |
+| `plugins/dsh-agent-hub/` | **新增**：DSH 作为 dsh-hub 控制方（host 15、client 16）+ worker 客户端 `scripts/agent_client.py` | `index.js`、`packages/host-agent-hub/index.js`、`packages/client-ui-agent-hub/lib/client.js`、`scripts/agent_client.py` | 44 |
+| `services/dsh-hub/` | **新增**：独立调度服务（端口 7891，`dsh-agent/2.0`）；`deploy/docker/` 本地联调 9 个文件 | `server.mjs`、`lib/hub.js`、`hub.example.json`、`deploy/dsh-hub.service` | 24 |
 | `profile/` | `web` profile 覆盖层（脱敏副本，路径仍需改） | `package.json`、`cordis.patch.yml`、`cordis.yml`、`pnpm-workspace.yaml` | 4 |
-| `docs/` | 迁移 / 审计 / clone / nginx 模板 / 发布内容清单 | `README-MIGRATE.md`、`CLONE-ON-WORKSTATION.md`、`W1`–`W6`、`MANIFEST.md`、`nginx/` | 14 |
-| `docs/nginx/` | 4 个站点的**脱敏** nginx 模板 + 占位符说明 | `README.md`、`dsh-web.conf`、`gitea.conf`、`browser-novnc.conf`、`couple-fit.conf` | 5（含在 14 内） |
+| `docs/` | 文档总目录、部署、协议、UI 规范、迁移审计、nginx 模板（`nginx/` 5 个，含在本行内） | `INDEX.md`、`README-MIGRATE.md`、`DSH-HUB-PROTOCOL-v2.md`、`DEPLOY-HUB-PROMPT.md`、`UI-STYLE.md`、`W1`–`W6` | 18 |
 | `vendor/exa-mcp-server/` | 第三方 Exa stdio MCP（**已入仓**，MIT，3.5.1） | `dist/stdio.cjs`、`package.json`、`LICENSE`、`mcp.json` | 19 |
 | `scripts/` | 本机浏览器截图 / Chromium lane 工具（非 DSH 运行必需） | `browser`（bash 包装）、`browser.py`（Playwright/CDP） | 2 |
+| `.deps/` | **新增**：构建 client 用的公共依赖清单（esbuild、typescript、@types/react）；`node_modules/` 不入库 | `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml` | 3 |
 | `CLONE.md` / `MANIFEST.md` | 在 Windows / WSL 上 clone；本清单（根目录） | 本文件 | 2 |
 
-合计：1 + 1 + 155 + 25 + 77 + 76 + 22 + 4 + 14 + 19 + 2 + 2 = **398**
-（`docs/nginx/` 的 5 个、`docs/MANIFEST.md` 1 个已包含在 `docs/` 的 14 个里；
-`scripts/browser` 与 `scripts/browser.py` 已计入 `scripts/` 的 2 个，均不重复计。）
+合计：1 + 1 + 197 + 26 + 83 + 80 + 48 + 44 + 24 + 4 + 18 + 19 + 2 + 3 + 2 = **552**
+（括号里的子目录文件数已含在所在行内，不重复计。统计时间 2026-11-23。）
 
 各插件目录内部结构一致：
 
@@ -51,11 +54,12 @@ plugins/<插件名>/
 ├── cordis.patch.yml      # bundle 挂载层：插入 host / client 两个插件
 ├── package.json          # name / main / dsh.bundle.patch / files 白名单
 ├── icon.svg              # 侧栏/详情页图标
-├── locale/{en,zh}.json   # 文案（secrets 无 locale）
+├── locale/{en,zh}.json   # 插件管理里显示的标题 / 描述 / 详细说明（meta.title / description / detail）
 ├── packages/
 │   ├── host-<x>/         # 宿主侧（Node），多数有 src/ + lib/ 构建产物
 │   └── client-ui-<x>/    # 浏览器侧（TSX），lib/client.js 是构建产物
 ├── scripts/              # install.mjs、build.mjs、（router 另有 safe-build/safe-restart）
+├── README.md             # 插件说明（第一次安装看这个）
 └── docs/                 # 该插件的详细文档（router/egress/vpn/secrets 有）
 ```
 
@@ -67,14 +71,16 @@ plugins/<插件名>/
 | `plugins/dsh-token-stats/` | `dsh-token-stats/` 或 `token-stats/` | 同上 |
 | `plugins/dsh-egress/` | `dsh-egress/` 或 `egress/` | 同上 |
 | `plugins/dsh-vpn/` | `dsh-vpn/` 或 `vpn/` | 同上 |
-| `plugins/dsh-secrets/` | `dsh-secrets/` | 本次新增 |
-| `vendor/exa-mcp-server/` | `vendor/exa-mcp-server/` | 本次新增；必须保留 `dist/stdio.cjs` |
-| `scripts/` | `scripts/` | 本次新增；`browser` + `browser.py` 成对保留 |
+| `plugins/dsh-secrets/` | `dsh-secrets/` | v2026.11.21 新增 |
+| `plugins/dsh-agent-hub/` | `dsh-agent-hub/` | 2026-11-23 新增 |
+| `services/dsh-hub/` | `services/dsh-hub/` | 2026-11-23 新增；独立服务，不挂进 profile |
+| `vendor/exa-mcp-server/` | `vendor/exa-mcp-server/` | v2026.11.21 新增；必须保留 `dist/stdio.cjs` |
+| `scripts/` | `scripts/` | v2026.11.21 新增；`browser` + `browser.py` 成对保留 |
 | `profile/`、`docs/` | 同名 | 不变 |
 
 无论解压成哪种前缀，**目录的 basename 必须改回 `dsh-router-b`、`dsh-token-stats`、
-`dsh-egress`、`dsh-vpn`、`dsh-secrets`**，因为 `profile/package.json` 的 `link:` 和
-`node_modules/` 软链都按这五个名字找包。本文后续命令统一用：
+`dsh-egress`、`dsh-vpn`、`dsh-secrets`、`dsh-agent-hub`**，因为 `profile/package.json` 的 `link:` 和
+`node_modules/` 软链都按这六个名字找包。本文后续命令统一用：
 
 ```bash
 export R="$(pwd)/plugins"     # 仓库根目录下执行；平铺包则改成 export R="$(pwd)"
@@ -84,10 +90,10 @@ export R="$(pwd)/plugins"     # 仓库根目录下执行；平铺包则改成 ex
 
 ## 2. 插件全覆盖对照表
 
-数据来源：服务器上真实生效的 `/root/.dsh/profiles/web/package.json`（14 条 `dependencies`、
-7 条 `bundles`），与仓库 `profile/package.json` 逐条核对。
+数据来源：服务器上真实生效的 `/root/.dsh/profiles/web/package.json`（当时 14 条 `dependencies`、
+7 条 `bundles`；2026-11-23 仓库副本已扩到 18 条 / 8 条，见下表新增行），与仓库 `profile/package.json` 逐条核对。
 
-### 2.1 14 个 `link:` 包
+### 2.1 18 个 `link:` 包
 
 | 包名 | 类型 | 是否入仓 | 仓库内路径 | 入口 / main |
 |---|---|---|---|---|
@@ -105,8 +111,12 @@ export R="$(pwd)/plugins"     # 仓库根目录下执行；平铺包则改成 ex
 | `dsh-client-ui-token-stats` | 自研 client | 是 | `plugins/dsh-token-stats/packages/client-ui-token-stats` | `lib/index.js`，`./client → lib/client.js` |
 | `dsh-secrets` | 自研 bundle（新增） | 是 | `plugins/dsh-secrets` | `index.js` |
 | `dsh-host-secrets` | 自研 host（新增） | 是 | `plugins/dsh-secrets/packages/host-secrets` | `index.js`（纯 JS，无 lib） |
+| `dsh-client-ui-secrets` | 自研 client（2026-11-23 新增） | 是 | `plugins/dsh-secrets/packages/client-ui-secrets` | `lib/index.js`，`./client → lib/client.js` |
+| `dsh-agent-hub` | 自研 bundle（2026-11-23 新增） | 是 | `plugins/dsh-agent-hub` | `index.js` |
+| `dsh-host-agent-hub` | 自研 host（2026-11-23 新增） | 是 | `plugins/dsh-agent-hub/packages/host-agent-hub` | `index.js`（纯 JS，无 lib） |
+| `dsh-client-ui-agent-hub` | 自研 client（2026-11-23 新增） | 是 | `plugins/dsh-agent-hub/packages/client-ui-agent-hub` | `lib/index.js`，`./client → lib/client.js` |
 
-### 2.2 `dsh.profile.bundles` 顺序（7 项，顺序即加载顺序）
+### 2.2 `dsh.profile.bundles` 顺序（8 项，顺序即加载顺序）
 
 | # | bundle | 来源 | 作用 |
 |---|---|---|---|
@@ -116,7 +126,8 @@ export R="$(pwd)/plugins"     # 仓库根目录下执行；平铺包则改成 ex
 | 4 | `dsh-egress` | 自研 | 出口代理面板 |
 | 5 | `dsh-vpn` | 自研 | VPN 面板 |
 | 6 | `dsh-token-stats` | 自研 | Token 用量面板 |
-| 7 | `dsh-secrets` | 自研（新增） | 加密保险库 |
+| 7 | `dsh-secrets` | 自研（新增） | 加密保险库 + 只读密钥看板 |
+| 8 | `dsh-agent-hub` | 自研（2026-11-23 新增） | dsh-hub 控制方 + Agent 调度页 |
 
 官方包**不入仓**：由 `dsh` 安装包（`@deepseek-ai/dsh@0.2.2-rc.5`）自带，profile 只写 bundle 名。
 client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh-client-ui-layout`、
@@ -148,7 +159,7 @@ client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh
 
 ### 3.0 先记住三条规则
 
-1. **5 个 bundle 全部是 profile `link:` 源码直挂**，DSH 启动时直接读仓库目录；**不要**在仓根或
+1. **6 个 bundle 全部是 profile `link:` 源码直挂**，DSH 启动时直接读仓库目录；**不要**在仓根或
    profile 目录跑 `pnpm install`（会重写整棵依赖树，源机曾把一个包删空）。
 2. `lib/` 是**已构建好的运行产物，随仓库入库**。`main` / `exports` 直接指向 `lib/`，
    **运行期不会编译 `src/`**。只改配置/文档不用构建。
@@ -227,7 +238,7 @@ client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh
 | `plugins/dsh-secrets/packages/host-secrets/placeholders.js` | `${secret:NAME}` 占位符展开（`secret_http` / `secret_exec` 用） |
 | `plugins/dsh-secrets/packages/host-secrets/redact.js` | 工具输出里已知密钥值的最长优先替换脱敏 |
 | `plugins/dsh-secrets/packages/host-secrets/tests/*.test.mjs` | 5 个测试文件（vault / tools / redact / integration / helpers） |
-| `plugins/dsh-secrets/scripts/install.mjs` | 唯一的安装器：写 `dependencies` 两条 link、保证 `bundles` 有 `dsh-secrets`、建两个软链；`--dry-run` / `--uninstall` / `--profile` |
+| `plugins/dsh-secrets/scripts/install.mjs` | 唯一的安装器：写 `dependencies` 三条 link（bundle / host / client）、保证 `bundles` 有 `dsh-secrets`、建三个软链；`--dry-run` / `--uninstall` / `--profile` |
 | `plugins/dsh-secrets/scripts/ingest-file.mjs` | 批量把文件写进 vault（**不经过会话**，值不进日志） |
 | `plugins/dsh-secrets/scripts/ingest-file.selftest.mjs` | ingest 的自测；不碰真实 vault |
 | `plugins/dsh-secrets/scripts/scan-keys.mjs` | 只读扫描“哪里有密钥文件”并生成清单，**不读 vault、不输出值** |
@@ -239,7 +250,8 @@ client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh
 
 #### 构建与加载
 
-- **没有 `lib/`，没有构建步骤**：host 侧是纯 JS，profile `link:` 直挂。
+- host 侧**没有 `lib/`、没有构建步骤**（纯 JS，profile `link:` 直挂）；只读密钥看板 `packages/client-ui-secrets`
+  的 `lib/client.js` 是构建产物，改了 client 源码后跑 `node scripts/build.mjs`。
 - 安装：`node "$R/dsh-secrets/scripts/install.mjs" --profile "$HOME/.dsh/profiles/web"`。
 - 改完 host 代码 / `cordis.patch.yml`：**必须重启** DSH（不是 HMR）。
 - 自测：`cd "$R/dsh-secrets" && node --test packages/host-secrets/tests/*.test.mjs`。
@@ -276,11 +288,42 @@ client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh
 | `docs/CLONE-ON-WORKSTATION.md` | 在自家电脑 clone 的旧版说明（**里面的 IP 是旧的**，以 `CLONE.md` 为准） | 仅作背景 |
 | `docs/W1`–`W6` | 运行时配置、系统依赖、插件机制、仓库内容、数据源路径、合成手册（审计报告） | 查细节 / 排错 |
 | `docs/nginx/` | 4 个站点模板：`dsh-web.conf`(8443)、`gitea.conf`(8444 mTLS)、`browser-novnc.conf`(8445)、`couple-fit.conf`(8450) | 复制到 `/etc/nginx/sites-available/`，替换 `__...__` 占位符后再 `nginx -t` |
+| `docs/INDEX.md` | 所有文档的目录（先读 / 部署 / 协议与设计 / 迁移审计历史） | 找文档先看它 |
+| `docs/DSH-HUB-PROTOCOL-v2.md` | dsh-hub 协议 `dsh-agent/2.0`：角色、令牌、接口、工作区路由、网络与代理 | 改 hub / 控制方 / worker 前必读 |
+| `docs/DEPLOY-HUB-PROMPT.md` | 交给服务器上云端 DSH 的部署提示词（两轮，以重启 dsh-web 为界） | 整段复制给云端 DSH |
+| `docs/UI-STYLE.md` | 所有 client-ui 插件共用的 UI 规范 | 改界面前看 |
+| `.deps/` | 构建 client 的公共依赖清单 | `cd .deps && pnpm install`，再 `export DSH_CLIENT_MODULES=$(pwd)/node_modules` |
 | `vendor/exa-mcp-server/` | 第三方 Exa stdio MCP 3.5.1（MIT，19 文件，含 `dist/stdio.cjs`） | 已入库，**不需要再 npm 安装**；只在 `profile/cordis.patch.yml` 里改路径、按需启用 |
-| `profile/package.json` | 14 条 `link:` + 7 个 bundles（源机绝对路径） | **不要直接复制**；按 8.3 用 `install.mjs` 重建 |
+| `profile/package.json` | 18 条 `link:` + 8 个 bundles（源机绝对路径） | **不要直接复制**；按 8.3 用 `install.mjs` 重建 |
 | `profile/cordis.patch.yml` | 唯一真正生效的覆盖层：品牌、provider/模型、分区 root、Exa MCP、主题等 | 复制到 `~/.dsh/profiles/web/` 后按 6 节改路径 |
 | `profile/cordis.yml` | 内容就是 `[]`（纯注释占位） | 原样复制 |
 | `profile/pnpm-workspace.yaml` | `packages: [.]`、`nodeLinker: hoisted`、`autoInstallPeers: false` | 原样复制；**不要**因此去跑 `pnpm install` |
+
+### 3.7 `dsh-agent-hub`（dsh-hub 控制方 + Agent 调度页，2026-11-23 新增）
+
+| 项 | 内容 |
+|---|---|
+| 职责 | 让 DSH 作为 dsh-hub 的控制方：11 个工具（`agent_*` / `task_*`）调用 hub 的 `/v1/ctl/*`；面板只读接口 `/api/agent-hub/admin/*`；插件本身不存任务状态 |
+| host 包 | `packages/host-agent-hub`，`main = index.js`（纯 JS，无 lib；`hub.js` 是 v1 参考实现，已不加载） |
+| client 包 | `packages/client-ui-agent-hub`，`./client → lib/client.js`；嵌在 router-b 任务板里的「Agent」页签 |
+| 构建 | 只在改 client 源码时：`node packages/client-ui-agent-hub/scripts/build-client.mjs` |
+| 安装 | `node "$R/dsh-agent-hub/scripts/install.mjs" --profile "$P"`（写 3 条 link、加 bundle、建 3 个软链） |
+| 必须配置 | `<DSH home>/agent-hub/controller.env`：`DSH_HUB_URL`、`DSH_HUB_CONTROLLER_ID`、`DSH_HUB_TOKEN`，按需 `DSH_HUB_PROXY`、`DSH_HUB_CAFILE`。**不能写进 `<DSH home>/.env`** |
+| worker 端 | `scripts/agent_client.py`（Python 3，无第三方依赖）；配置 `<DSH home>/worker/.env` + `profile.json`，模板 `scripts/worker.env.example`、`profile.example.json` |
+| 说明 | `plugins/dsh-agent-hub/README.md` |
+
+### 3.8 `services/dsh-hub`（独立调度服务，2026-11-23 新增）
+
+| 项 | 内容 |
+|---|---|
+| 职责 | 存任务、按工作区 / 机器 / 能力路由、租约与重试、产物；给多个控制方和 N 个 worker 服务 |
+| 启动 | `node services/dsh-hub/server.mjs`（Node >= 22，无第三方依赖）；systemd unit 模板 `deploy/dsh-hub.service` |
+| 端口 | 7891（服务器 `8.134.170.38:7891`；7890 是 MYDESK 本机 Clash 代理端口，不要混用） |
+| 配置 / 状态 | `<DSH home>/agent-hub/hub.json`（模板 `hub.example.json`）、`state.json`、`controllers.json`、`artifacts/`；**都不入库** |
+| 令牌 | 只能在 hub 机器上签发：`node server.mjs controller add <id>`（只显示一次） |
+| 本地联调 | `deploy/docker/`：`docker compose up -d --build hub`；生成的 CA 在 `deploy/docker/out/`（已被 `.gitignore` 排除） |
+| 测试 | `node --test services/dsh-hub/tests/*.test.mjs` |
+| 说明 | `services/dsh-hub/README.md`、`deploy/docker/README.md`、`docs/DSH-HUB-PROTOCOL-v2.md` |
 
 ---
 
@@ -292,7 +335,9 @@ client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh
 | `dsh-token-stats` | 同上 | `client-ui-token-stats/lib/client.js`；host 是纯 JS | `node scripts/build.mjs` | 直接改 JS（无 lib） | host：是；client：刷新 |
 | `dsh-egress` | 同上 | `host-egress/lib/*.js`、`client-ui-egress/lib/client.js` | `node scripts/build.mjs` | `node scripts/build.mjs` 后重启 | 是（host 改动） |
 | `dsh-vpn` | 同上 | `host-vpn/lib/*.js`、`client-ui-vpn/lib/client.js` | `node scripts/build.mjs` | 同上 | 是（host 改动） |
-| `dsh-secrets` | 同上 | 无 lib（纯 JS） | — | 直接改 JS | 是 |
+| `dsh-secrets` | 同上 | host 无 lib（纯 JS）；`client-ui-secrets/lib/client.js` | `node scripts/build.mjs` | 直接改 JS | host：是；client：刷新 |
+| `dsh-agent-hub` | 同上 | host 无 lib（纯 JS）；`client-ui-agent-hub/lib/client.js` | `node packages/client-ui-agent-hub/scripts/build-client.mjs` | 直接改 JS | host：是；client：刷新 |
+| `services/dsh-hub` | 独立进程（systemd） | `server.mjs` + `lib/*.js`（纯 JS） | — | 直接改 JS | `systemctl restart dsh-hub` |
 
 补充：
 
@@ -313,7 +358,7 @@ client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh
 | systemd drop-in | `/etc/systemd/system/dsh-web.service.d/10-secrets.conf`（`EnvironmentFile=/etc/dsh-secrets.env`） | 没有 | `systemctl edit dsh-web.service` 写入 |
 | Gitea 站点（mTLS） | `/etc/nginx/sites-available/gitea` + `/etc/nginx/tls/{gitea.crt,gitea.key,client-ca.crt}` | `docs/nginx/gitea.conf` **脱敏模板**；证书/私钥/客户端 CA **完全不在仓库** | 模板替换占位符；证书由管理员线下给 |
 | DSH Web 站点 | `/etc/nginx/sites-available/dsh-web` + `/etc/nginx/tls/dsh.crt` 与 `dsh.key` + `/etc/nginx/.dsh-auth` | `docs/nginx/dsh-web.conf`、`plugins/dsh-router-b/deploy/nginx-dsh-web.conf` | 模板替换；TLS 证书可自签/ACME；basic auth 用 `htpasswd` 重建 |
-| profile 绝对路径 | `/root/.dsh/profiles/web/package.json` 的 14 条 `link:` 与 `node_modules/` 14 条软链 | `profile/package.json` 是**源机路径的副本** | 按 8.3 重跑 `install.mjs`，不要复制 |
+| profile 绝对路径 | `/root/.dsh/profiles/web/package.json` 的 18 条 `link:` 与 `node_modules/` 18 条软链 | `profile/package.json` 是**源机路径的副本** | 按 8.3 重跑 `install.mjs`，不要复制 |
 | profile 覆盖层里的路径 | `/root/.dsh/profiles/web/cordis.patch.yml` | `profile/cordis.patch.yml` 已脱敏，但仍含 `/srv/...` 的 Exa 路径 | 按 6 节逐条改 |
 | 加密保险库 | `/root/.dsh/secrets.vault`、`/root/.dsh/secrets.key`、`/etc/dsh-secrets.env` | **没有，也不应该有** | 新机重新生成（见 3.5 与 8.4） |
 | 运行态 | `/root/.dsh/sessions/`、`router/board.json`、`tiers.json`、`egress/config.json`、`vpn/profiles.json`、`vpn/secrets/` | 没有 | 新机自动生成空态；要历史数据单独迁移 |
@@ -321,6 +366,7 @@ client 侧还会在运行期注入官方 `@deepseek-ai/dsh-client-locale`、`dsh
 | 工作区路径 | `/srv/workspace`、`/srv/workspace/deepseek-harness`、`/srv/dsh-*` | `profile/package.json`、`plugins/dsh-router-b/cordis.patch.yml`、`safe-build-host.sh`、`tsconfig.json`、secrets 脚本里都有 | 按 6 节替换 |
 | Exa stdio 的路径 | `/srv/workspace/deepseek-harness/vendor/exa-mcp-server` | **已入仓** `vendor/exa-mcp-server/`（19 文件、MIT、3.5.1），含 `dist/stdio.cjs` 与 `LICENSE` | **不用重装**；只把 `profile/cordis.patch.yml:258` 改指到 `<CHECKOUT>/vendor/...`，需要更新时按 2.3 重建 |
 | 浏览器截图工具 | `/opt/shot/venv/bin/python`、`/srv/browser/lanes`、`/srv/browser/identities`、CDP `127.0.0.1:9222` | `scripts/browser`、`scripts/browser.py` 已入仓 | 仅当你要用这套工具才改 shebang / venv / 根目录；**DSH 运行不需要它们** |
+| dsh-hub 配置 / 状态 / 令牌 | `/root/.dsh/agent-hub/{hub.json,state.json,controllers.json,controller.env}`、TLS 私钥；各 worker 机器的 `<DSH home>/worker/{.env,profile.json,agent.token}` | 只有模板：`services/dsh-hub/hub.example.json`、`plugins/dsh-agent-hub/scripts/worker.env.example`、`profile.example.json` | 新机重新生成；令牌在 hub 上重新签发 |
 | DSH 本体 | `@deepseek-ai/dsh@0.2.2-rc.5` | 不含 | 按 8.1 安装 |
 
 systemd 最小模板（放 `/etc/systemd/system/dsh-web.service`，按需改）：
@@ -359,7 +405,7 @@ WantedBy=multi-user.target
 
 | # | 文件:行 | 仓库中的值（本机） | 用户机器上应改成 |
 |---|---|---|---|
-| 1 | `profile/package.json:5-18` | `"link:/srv/dsh-router-b"` 等 14 条 | 不手改；用 8.3 的 `install.mjs` 逐插件重写为指向 `<CHECKOUT>/plugins/<包>` |
+| 1 | `profile/package.json:5-22` | `"link:/srv/dsh-router-b"` 等 18 条 | 不手改；用 8.3 的 `install.mjs` 逐插件重写为指向 `<CHECKOUT>/plugins/<包>` |
 | 2 | `plugins/dsh-router-b/cordis.patch.yml:40` | `root: /srv/workspace/rca-ab-test` | `root: <WS>/rca-ab-test`（目录必须存在，或删掉该分区） |
 | 3 | `plugins/dsh-router-b/cordis.patch.yml:68` | `root: "/srv/workspace/google tend"` | `root: "<WS>/google tend"`（**保留双引号**，路径有空格） |
 | 4 | `plugins/dsh-router-b/cordis.patch.yml:90` | `root: /srv/workspace/deepseek-harness` | `root: <CHECKOUT>`（你的代码树根） |
@@ -461,9 +507,9 @@ export R="$(pwd)/plugins"
 ```
 
 证书 / mTLS / Windows / WSL 的细节全在 `CLONE.md`。若用 zip，解压后把目录名改回 1.2 的
-五个名字，并令 `R` 指向包含它们的目录。
+六个名字，并令 `R` 指向包含它们的目录。
 
-### 8.3 建 profile 并注册 5 个 bundle
+### 8.3 建 profile 并注册 6 个 bundle
 
 ```bash
 export P="$HOME/.dsh/profiles/web"
@@ -483,7 +529,7 @@ cat > "$P/package.json" <<'EOF'
 EOF
 
 # 先全部 dry-run 看动作
-for s in dsh-router-b dsh-egress dsh-vpn dsh-token-stats dsh-secrets; do
+for s in dsh-router-b dsh-egress dsh-vpn dsh-token-stats dsh-secrets dsh-agent-hub; do
   node "$R/$s/scripts/install.mjs" --profile "$P" --dry-run
 done
 
@@ -493,9 +539,10 @@ node "$R/dsh-egress/scripts/install.mjs"      --profile "$P"
 node "$R/dsh-vpn/scripts/install.mjs"         --profile "$P"
 node "$R/dsh-token-stats/scripts/install.mjs" --profile "$P"
 node "$R/dsh-secrets/scripts/install.mjs"     --profile "$P"
+node "$R/dsh-agent-hub/scripts/install.mjs"   --profile "$P"
 ```
 
-校验（期望 14 条依赖、7 个 bundles、14 条软链）：
+校验（期望 18 条依赖、8 个 bundles、18 条软链）：
 
 ```bash
 node -e "const p=require('$P/package.json'); console.log(Object.keys(p.dependencies).length); console.log(p.dsh.profile.bundles.join(','))"
@@ -505,10 +552,15 @@ grep -n -A2 'ui-brand-official' "$P/cordis.patch.yml"   # 期望 disabled: true
 
 - **不要**复制仓库里的 `profile/package.json`（其中是源机绝对路径）。
 - **不要**在 `$P` 或仓根跑 `pnpm install`。
+- agent-hub 的 hub 地址、控制方 id、令牌写在 `<DSH home>/agent-hub/controller.env`（见根目录 `README.md` 3.4）；
+  **任何 `DSH_` 开头的变量都不能写进 `<DSH home>/.env`**，否则 DSH 拒绝启动。
 - `--disable-brand` 必须加：否则官方品牌占着 `sidebar.brand.mark` 单座，router 的 client
   注册会报 `single slot ... already has a registration`。
 
 ### 8.4 生成 dsh-secrets 的口令 / vault（必须新生成）
+
+> 2026-11-22 起推荐把口令写在 `<DSH home>/secrets.env`（chmod 600，对应 `profile/cordis.patch.yml` 里
+> `host-secrets.envFile: /root/.dsh/secrets.env`），改完不用重启；下面的 systemd EnvironmentFile 写法仍然可用。
 
 ```bash
 # 1) 生成新口令，写入 600 的 EnvironmentFile（不打印到终端）
@@ -615,9 +667,9 @@ systemctl is-active dsh-web.service nginx
 ### 8.8 启动后验证
 
 ```bash
-# 1) 7 个 bundle 都合成进来（5 个自研应各占一段）
+# 1) 8 个 bundle 都合成进来（6 个自研应各占一段）
 dsh --profile web --dump-config | grep -n '^# == dsh-'
-# 期望看到 dsh-router-b / dsh-egress / dsh-vpn / dsh-token-stats / dsh-secrets
+# 期望看到 dsh-router-b / dsh-egress / dsh-vpn / dsh-token-stats / dsh-secrets / dsh-agent-hub
 
 # 2) 服务与端口
 systemctl is-active dsh-web.service nginx
@@ -645,8 +697,8 @@ rm -f "$J"
 tail -n 100 /var/log/dsh-web.log | grep -iE 'error|cannot|single slot' || echo 'no errors'
 ```
 
-GUI 里应能看到：Router、Egress、VPN、Token 四个面板 + secrets 工具（插件管理器里 5 个 bundle
-共 9 个子插件都 enabled：router/egress/vpn/token 各 host+client，secrets 只有 host）。浏览器入口是 `https://<你的域名或IP>:8443/`。
+GUI 里应能看到：Router、Egress、VPN、Token、密钥看板，以及任务板上的「Agent」页签（插件管理器里 6 个 bundle
+共 12 个子插件都 enabled：6 个插件各 host + client）。浏览器入口是 `https://<你的域名或IP>:8443/`。
 
 ### 8.9 收尾
 
@@ -670,7 +722,7 @@ chmod 700 ~/.dsh
   的说明；`.env*`、`*.token`、`*.pem`、`*.key`、`credentials*`（源码 `credentials.ts` 除外）
   都在 `.gitignore` 里。
 - **不含 `secrets.vault` / `secrets.key` / `/etc/dsh-secrets.env`**：这三样是本地生成物。
-- **不含 `node_modules/`**：profile 的 14 条软链由 `install.mjs` 重建；client 构建依赖用
+- **不含 `node_modules/`**：profile 的 18 条软链由 `install.mjs` 重建；client 构建依赖用
   `npm ci` 重装。
 - **不含 `~/.dsh` 运行态**：`sessions/`、`board.json`、`tiers.json`、egress / vpn 凭据都不在仓库。
 - **不含 DSH 安装包本体**，也不含 `node_modules/`、`lib.next/`、`lib.prev/`、`*.bak-*`、`.dsh-artifacts/`。
@@ -696,7 +748,7 @@ test -f docs/MANIFEST.md && echo docs-manifest-OK
 test -f vendor/exa-mcp-server/dist/stdio.cjs && echo exa-vendor-OK
 test -x scripts/browser && echo browser-OK
 
-# 2) 文件数与 tag 一致（应为 398）
+# 2) 文件数（v2026.11.21 为 398；2026-11-23 工作树为 552，以要发布的 tag 实际为准）
 git ls-files | wc -l
 git rev-parse v2026.11.21^{commit}       # 与 HEAD 相同
 
@@ -719,7 +771,7 @@ export R="$(pwd)/plugins" P="$HOME/.dsh/profiles/web"
 
 # 2) profile 三件套 + 空 package.json（8.3 的 heredoc）
 # 3) 按顺序 install
-for s in dsh-router-b dsh-egress dsh-vpn dsh-token-stats dsh-secrets; do
+for s in dsh-router-b dsh-egress dsh-vpn dsh-token-stats dsh-secrets dsh-agent-hub; do
   node "$R/$s/scripts/install.mjs" --profile "$P"
 done
 # 4) 生成 passphrase / 证书 / nginx / systemd（8.4–8.7）

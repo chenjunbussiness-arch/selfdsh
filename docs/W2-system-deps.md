@@ -1,5 +1,7 @@
 # W2 · 系统侧依赖与网络入口 —— DSH Web 作战室移植审计
 
+> **2026-11-23 提示**：本文写于 agent-hub / dsh-hub 加入之前（当时只有 4～5 个插件），部分数字和步骤已过时。仓库现状与安装步骤以根目录 [README.md](../README.md) 为准，全部文档目录见 [INDEX.md](INDEX.md)。
+
 > 审计范围：仅「操作系统层面为了跑起 DSH Web GUI 额外做过的改动」。
 > 审计方式：全程只读（`systemctl status/cat/show`、`ss`、`ls`、`cat`、`nginx -T`、`curl -I`），
 > 未 restart / enable / disable 任何服务，未改动 unit、nginx 配置，未 reload nginx，未 kill 进程。

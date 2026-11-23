@@ -1148,6 +1148,13 @@ function badgeOf(def) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return void 0;
   return Math.floor(value);
 }
+function flagOf(def) {
+  if (typeof def.flag !== "function") return void 0;
+  const value = guard(def.flag, void 0);
+  if (typeof value !== "string") return void 0;
+  const text = value.trim();
+  return text === "" ? void 0 : text.slice(0, 200);
+}
 function createRegistry() {
   const slots = /* @__PURE__ */ new Map();
   const listeners = /* @__PURE__ */ new Set();
@@ -1198,11 +1205,12 @@ function createRegistry() {
         order: Number.isFinite(slot.def.order) ? slot.def.order : 0,
         label: guard(() => String(slot.def.label()), slot.def.id),
         badge: badgeOf(slot.def),
+        flag: flagOf(slot.def),
         Component: slot.def.Component
       }));
       const same = next.length === snapshot.length && next.every((view, index) => {
         const old = snapshot[index];
-        return old !== void 0 && old.id === view.id && old.order === view.order && old.label === view.label && old.badge === view.badge && old.Component === view.Component;
+        return old !== void 0 && old.id === view.id && old.order === view.order && old.label === view.label && old.badge === view.badge && old.flag === view.flag && old.Component === view.Component;
       });
       if (!same) snapshot = Object.freeze(next.map((view) => Object.freeze(view)));
       return snapshot;
@@ -1401,7 +1409,8 @@ var zh = {
   "agents.offline.hint": "\u79BB\u7EBF {offline} \xB7 \u5DF2\u4E0B\u7EBF {left}",
   "history.worker-lost": "worker \u5931\u8054\uFF0C\u4EFB\u52A1\u5DF2\u91CD\u6392",
   "history.worker-offline": "worker \u79BB\u7EBF\uFF0C\u4EFB\u52A1\u5DF2\u91CD\u6392",
-  "history.agent-offline": "\u6D3E\u53D1\u65F6 agent \u4E0D\u5728\u7EBF"
+  "history.agent-offline": "\u6D3E\u53D1\u65F6 agent \u4E0D\u5728\u7EBF",
+  "board.flag.stranded": "{n} \u4E2A\u79BB\u7EBF agent \u8FD8\u5360\u7740 {tasks} \u4E2A\u4EFB\u52A1\uFF08\u6389\u7EBF\u540E\u4F1A\u81EA\u52A8\u91CD\u6392\uFF09"
 };
 var en = {
   "page.title": "Agent hub",
@@ -1544,7 +1553,8 @@ var en = {
   "agents.offline.hint": "offline {offline} \xB7 left {left}",
   "history.worker-lost": "worker lost; task requeued",
   "history.worker-offline": "worker offline; task requeued",
-  "history.agent-offline": "agent was offline at dispatch"
+  "history.agent-offline": "agent was offline at dispatch",
+  "board.flag.stranded": "{n} offline agent(s) still hold {tasks} task(s) (they are requeued automatically)"
 };
 var DICTIONARIES = { zh: { ...zh }, en: { ...en } };
 
@@ -1871,20 +1881,35 @@ function apply(ctx) {
   const t = ctx.locale.bind(NS);
   const registry = boardTabs();
   let pending;
+  let stranded;
   let reportedAt = 0;
   const report = (overview) => {
     reportedAt = Date.now();
     const count = overview.pending_requests;
-    const next = typeof count === "number" && Number.isFinite(count) && count > 0 ? count : void 0;
-    if (next === pending) return;
-    pending = next;
-    registry.notify();
+    const nextPending = typeof count === "number" && Number.isFinite(count) && count > 0 ? count : void 0;
+    let agents = 0;
+    let tasks = 0;
+    for (const agent of Array.isArray(overview.agents) ? overview.agents : []) {
+      const status = agentStatus(agent);
+      const held = Array.isArray(agent.running_tasks) ? agent.running_tasks.length : 0;
+      if ((status === "offline" || status === "left") && held > 0) {
+        agents += 1;
+        tasks += held;
+      }
+    }
+    const nextStranded = agents > 0 ? { agents, tasks } : void 0;
+    const changed = nextPending !== pending || nextStranded?.agents !== stranded?.agents || nextStranded?.tasks !== stranded?.tasks;
+    pending = nextPending;
+    stranded = nextStranded;
+    if (changed) registry.notify();
   };
+  const flag = () => pending === void 0 && stranded !== void 0 ? t("board.flag.stranded", { n: stranded.agents, tasks: stranded.tasks }) : void 0;
   ctx.effect(() => registry.register({
     id: BOARD_TAB_ID,
     order: BOARD_TAB_ORDER,
     label: () => t("board.tab"),
     badge: () => pending,
+    flag,
     Component: createAgentHubBoardTab(t, report)
   }), "client-ui-agent-hub: board tab");
   ctx.effect(() => {

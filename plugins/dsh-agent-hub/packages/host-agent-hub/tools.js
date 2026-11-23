@@ -16,11 +16,56 @@
  */
 
 import { HubError } from './hub-client.js'
+import { DEFAULT_ROLE, ROLES, agentRole, roleRefusal } from './roles.js'
 
 const objectSchema = { type: 'object' }
 const renderJson = (_args, value) => [{ type: 'text', text: JSON.stringify(value, undefined, 2) }]
 const str = { type: 'string' }
 const strList = { type: 'array', items: str }
+const roleParam = description => ({ type: 'string', enum: [...ROLES], description })
+
+const ROLE_HINT = `${ROLES.join(' | ')}; default ${DEFAULT_ROLE} (any task). tester takes test tasks only (type custom/review, or a 冒烟/测试/smoke/test title); dispatcher and observer never take tasks (task_dispatch refuses them with role-not-dispatchable).`
+
+/**
+ * Roles the hub reported for its agents, for the task_dispatch pre-check.
+ * Best effort ON PURPOSE: an older hub that sends no roles (or a failed lookup)
+ * answers "unknown" and the task goes to the hub, whose dispatch() owns the
+ * authoritative gate (hub.js checkTargetRole). Never throws.
+ */
+async function roleIndex(client) {
+  try {
+    const agents = await client.listAgents()
+    return {
+      ok: true,
+      agents: (Array.isArray(agents) ? agents : [])
+        .filter(agent => typeof agent?.agent_id === 'string')
+        .map(agent => ({ agent_id: agent.agent_id, role: agentRole(agent), capabilities: Array.isArray(agent.capabilities) ? agent.capabilities : [] })),
+    }
+  } catch {
+    return { ok: false, agents: [] }
+  }
+}
+
+/**
+ * Why the target role refuses this task (`role-not-dispatchable` /
+ * `role-not-testable`), or `undefined` when it accepts it or nothing is known.
+ * A `pool:` is refused only when every member with that capability refuses it.
+ */
+async function dispatchRoleRefusal(client, task) {
+  if (typeof task.agent !== 'string') return undefined
+  const index = await roleIndex(client)
+  if (!index.ok) return undefined
+  const probe = { type: task.type ?? 'custom', title: String(task.title ?? '') }
+  if (task.agent.startsWith('pool:')) {
+    const capability = task.agent.slice(5)
+    const members = index.agents.filter(agent => agent.capabilities.includes(capability))
+    if (members.length === 0) return undefined
+    const refusals = members.map(agent => roleRefusal(probe, agent.role, task.agent))
+    return refusals.every(refusal => refusal !== undefined) ? refusals[0] : undefined
+  }
+  const agent = index.agents.find(entry => entry.agent_id === task.agent)
+  return agent === undefined ? undefined : roleRefusal(probe, agent.role, task.agent)
+}
 
 export const TOOL_NAMES = [
   'agent_provision', 'agent_revoke', 'agent_list', 'agent_requests', 'agent_approve', 'agent_reject',
@@ -69,6 +114,7 @@ export function createTools({ client }) {
         workspaces: { ...strList, description: 'Workspace names (router-b partition names) the worker is granted, e.g. ["deepseek-harness"].' },
         capabilities: { ...strList, description: 'For pool:<capability> routing, e.g. research, document, data, code.' },
         max_concurrency: { type: 'integer', minimum: 1, maximum: 32 },
+        role: roleParam(`dispatcher | tester | worker | observer. Omit for ${DEFAULT_ROLE}. ${ROLE_HINT}`),
         description: str,
       },
     },
@@ -87,15 +133,15 @@ export function createTools({ client }) {
 
   define({
     name: 'agent_list',
-    description: 'List the workers known to the hub: status (pending = approved but token not collected, online = heartbeat / poll within 90 s, offline, left = said goodbye, revoked), last_seen, client version, node, workspaces, capabilities and running tasks.',
+    description: 'List the workers known to the hub: status (pending = approved but token not collected, online = heartbeat / poll within 90 s, offline, left = said goodbye, revoked), last_seen, client version, node, workspaces, capabilities, role (worker when the hub does not send one), running tasks and `runtime`: what each worker can be asked to run (modes fast/balanced/smart, thinking levels, its default effort per task type, and the named agents of its platform). Read it before task_dispatch to choose the worker and its effort.',
     parameters: { properties: {} },
     isConcurrencySafe: () => true,
-    execute: async () => ({ agents: await client.listAgents() }),
+    execute: async () => ({ agents: (await client.listAgents()).map(agent => ({ ...agent, role: agentRole(agent) })) }),
   })
 
   define({
     name: 'agent_requests',
-    description: 'List enrollment requests from workers asking to join (default: pending). Review platform, node, workspaces, capabilities and source address before approving.',
+    description: 'List enrollment requests from workers asking to join (default: pending). Review platform, node, workspaces, capabilities, runtime (modes / thinking / agents it offers) and source address before approving.',
     parameters: { properties: { status: { type: 'string', enum: ['pending', 'approved', 'rejected', 'expired', 'all'] } } },
     isConcurrencySafe: () => true,
     execute: async raw => ({ requests: await client.listRequests(raw.status ?? 'pending') }),
@@ -103,7 +149,7 @@ export function createTools({ client }) {
 
   define({
     name: 'agent_approve',
-    description: 'Approve an enrollment request. Optionally NARROW its capabilities, workspaces or max_concurrency (the hub refuses widening). The worker collects its token itself; DSH never sees it.',
+    description: 'Approve an enrollment request. Optionally NARROW its capabilities, workspaces, role or max_concurrency (the hub refuses widening: 400 grant-widened / role-widened). The worker collects its token itself; DSH never sees it.',
     parameters: {
       required: ['request_id'],
       properties: {
@@ -111,6 +157,7 @@ export function createTools({ client }) {
         capabilities: strList,
         workspaces: { ...strList, description: 'Subset of the requested workspace names to grant.' },
         max_concurrency: { type: 'integer', minimum: 1, maximum: 32 },
+        role: roleParam(`NARROW the requested role only (a worker request may be approved as tester, not the other way round); widening answers 400 role-widened. Omit to keep what the agent asked for (default ${DEFAULT_ROLE}).`),
       },
     },
     execute: raw => client.approve(raw),
@@ -125,7 +172,7 @@ export function createTools({ client }) {
 
   define({
     name: 'task_dispatch',
-    description: 'Dispatch a task to one worker ("quick-mydesk") or to any worker with a capability ("pool:research"). Workers only get tasks when they poll, so a task for an offline worker waits in the queue: the answer then has warnings (agent-offline / no-online-worker); pass require_online: true to refuse instead. The instruction must be self-contained. `workspace` is a workspace NAME (never a path; required for type "code"); `node` pins a machine; `ref` is the git branch/commit the worker checks out first. Inputs are small files given inline. Use depends_on to chain tasks: upstream outputs become inputs of the next task.',
+    description: 'Dispatch a task to one worker ("quick-mydesk") or to any worker with a capability ("pool:research"). Workers only get tasks when they poll, so a task for an offline worker waits in the queue: the answer then has warnings (agent-offline / no-online-worker); pass require_online: true to refuse instead. The instruction must be self-contained. `workspace` is a workspace NAME (never a path; required for type "code"); `node` pins a machine; `ref` is the git branch/commit the worker checks out first. `effort` picks how the worker runs it: mode fast (quick lookups, small documents), balanced (most documents, research, ordinary code) or smart (hard programming / reasoning), a thinking level, and optionally one of the worker\'s named agents; only values listed in the worker\'s runtime (agent_list) are accepted (409 unsupported-effort), and a pool only hands the task to workers that support them. Omit effort to use the worker\'s own default for the task type. Role gate (agent_list shows each role): a dispatcher or observer target is refused (400 role-not-dispatchable), a tester target takes test tasks only (type custom/review or a 冒烟/测试/smoke/test title, else 400 role-not-testable), worker takes anything, and pool: only routes to worker / tester agents. Inputs are small files given inline. Use depends_on to chain tasks: upstream outputs become inputs of the next task.',
     parameters: {
       required: ['agent', 'title', 'instruction'],
       properties: {
@@ -145,6 +192,16 @@ export function createTools({ client }) {
         depends_on: strList,
         parent_task_id: str,
         context: { type: 'object' },
+        effort: {
+          type: 'object',
+          additionalProperties: false,
+          description: 'Optional: how the worker runs the task. Must fit the worker\'s runtime (agent_list). Omitted: the worker\'s runtime default for this task type (AWS Quick: code -> smart/medium, everything else -> balanced/low).',
+          properties: {
+            mode: { type: 'string', enum: ['fast', 'balanced', 'smart'], description: 'fast = quick lookups / small documents; balanced = most documents, research, ordinary code; smart = hard programming and reasoning.' },
+            thinking: { type: 'string', enum: ['off', 'low', 'medium', 'high'], description: 'Only for balanced / smart; fast has no thinking.' },
+            agent: { type: 'string', description: 'Optional: one of the named agents in the worker\'s runtime.agents (e.g. a specific AWS Quick agent). Omit for the worker\'s default agent.' },
+          },
+        },
         require_online: { type: 'boolean', description: 'Refuse (409 agent-offline / no-online-worker) instead of queueing when no suitable worker is online right now. Default false: the task is queued and the answer carries warnings ["agent-offline"] or ["no-online-worker"].' },
       },
     },
@@ -152,7 +209,24 @@ export function createTools({ client }) {
       if (raw.type === 'code' && (typeof raw.workspace !== 'string' || raw.workspace.trim() === '')) {
         throw new HubError(400, 'bad-task', 'workspace is required for type "code" (a workspace name, not a path)')
       }
-      return client.dispatch(raw)
+      const task = { ...raw }
+      const effort = raw.effort
+      if (effort !== undefined) {
+        if (effort === null || typeof effort !== 'object' || Array.isArray(effort)) throw new HubError(400, 'bad-task', 'effort must be an object { mode, thinking, agent }')
+        if (effort.mode === 'fast' && effort.thinking !== undefined && effort.thinking !== 'off') {
+          throw new HubError(400, 'bad-task', 'effort.thinking needs mode balanced or smart (fast has no thinking)')
+        }
+        // Top-level `effort` is checked and routed by the hub (>= runtime support); the copy in
+        // context.effort reaches the worker through an older hub that drops unknown task fields.
+        const context = task.context && typeof task.context === 'object' && !Array.isArray(task.context) ? task.context : {}
+        task.effort = { ...effort }
+        task.context = { ...context, effort: { ...effort } }
+      }
+      // Role gate (roles.js): a dispatcher / observer never takes a task, a tester only
+      // test tasks, a pool only the tasks one of its worker / tester members accepts.
+      const refusal = await dispatchRoleRefusal(client, task)
+      if (refusal !== undefined) throw new HubError(400, refusal.code, refusal.message)
+      return client.dispatch(task)
     },
   })
 

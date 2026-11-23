@@ -12,6 +12,7 @@
  *   - key: `[A-Za-z_][A-Za-z0-9_]*`, whitespace around `=` and the value is trimmed;
  *   - a value wrapped in matching '...' or "..." is taken literally (no escapes);
  *   - an unquoted value ends at the first ` #` (whitespace + `#` starts a comment);
+ *     `KEY=   # comment` is an EMPTY value (= not set), not the text `# comment`;
  *   - text after a closing quote is ignored only if it is a comment;
  *   - malformed lines are skipped; the LAST definition of a key wins;
  *   - a UTF-8 BOM and CRLF line endings are accepted.
@@ -53,6 +54,8 @@ export function parseEnvFile(text) {
       const rest = value.slice(end + 1).trim()
       if (rest !== '' && !rest.startsWith('#')) continue
       value = value.slice(1, end)
+    } else if (value.startsWith('#')) {
+      value = '' // `KEY=   # comment`: empty value, the rest is a comment
     } else {
       const hash = value.search(/\s#/)
       if (hash >= 0) value = value.slice(0, hash).trimEnd()

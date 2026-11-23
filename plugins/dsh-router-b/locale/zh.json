@@ -1,7 +1,7 @@
 {
   "meta": {
-    "title": "分区路由 · Partition Router",
-    "description": "把需求按文件分区路由给 worker，并在右侧栏看板里区分「worker 自报」与「验收通过」。",
-    "detail": "docs/DETAIL.zh.md"
+    "title": "分区路由 · 作战室 · 任务板",
+    "description": "在作战室对话里说需求，按工作区（分区）自动派给 worker，右侧任务板区分「worker 自报」与「验收通过」。必须配置：在 cordis.patch.yml 的 host-router 下写至少一个 partitions 工作区，root 是本机绝对路径（换机器要改）。",
+    "detail": "README.md"
   }
 }

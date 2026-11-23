@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CONFIG_CODES, DEFAULT_TIMEOUT_MS, HubError, PROTOCOL, TOKEN_ENV, TOKEN_HEADER, comparablePath, createHubClient, defaultEnvFile, isDshCredentialsFile, redact, resolveConfig } from '../hub-client.js'
-import { CONTROLLER, HUB_URL, TOKEN, assertNoToken, expectHubError, fakeFs, fakeHub, fakeLogger, makeClient } from './helpers.mjs'
+import { CONFIG_CODES, DEFAULT_TIMEOUT_MS, HubError, PROTOCOL, TOKEN_ENV, TOKEN_HEADER, CONFIG_ENV_KEYS, comparablePath, createHubClient, defaultEnvFile, isDshCredentialsFile, normalizeHubUrl, redact, resolveConfig } from '../hub-client.js'
+import { CONTROLLER, HUB_URL, TOKEN, assertNoToken, expectHubError, fakeFs, fakeHub, fakeLogger, hermetic, makeClient } from './helpers.mjs'
 
 const ok = body => ({ body })
 /** `?a=1&b=2` of a recorded call as ordered pairs. */
@@ -18,7 +18,7 @@ test('constants of the v2 contract', () => {
 // --- config --------------------------------------------------------------------
 
 test('resolveConfig: valid https config, base path and trailing slash', () => {
-  const c = resolveConfig({ hubUrl: 'https://hub.example:7891/', controllerId: 'dsh-cloud' })
+  const c = resolveConfig({ hubUrl: 'https://hub.example:7891/', controllerId: 'dsh-cloud' }, hermetic())
   assert.equal(c.ok, true)
   assert.deepEqual(c.problems, [])
   assert.equal(c.hubUrl, 'https://hub.example:7891')
@@ -26,7 +26,7 @@ test('resolveConfig: valid https config, base path and trailing slash', () => {
   assert.equal(c.secure, true)
   assert.equal(c.timeoutMs, DEFAULT_TIMEOUT_MS)
   assert.equal(c.caFile, undefined)
-  const p = resolveConfig({ hubUrl: 'https://proxy.example/hub/', controllerId: 'dsh-cloud', caFile: ' /etc/dsh/hub-ca.pem ', timeoutMs: 5000 })
+  const p = resolveConfig({ hubUrl: 'https://proxy.example/hub/', controllerId: 'dsh-cloud', caFile: ' /etc/dsh/hub-ca.pem ', timeoutMs: 5000 }, hermetic())
   assert.equal(p.ok, true)
   assert.equal(p.hubUrl, 'https://proxy.example/hub')
   assert.equal(p.basePath, '/hub')
@@ -36,9 +36,9 @@ test('resolveConfig: valid https config, base path and trailing slash', () => {
 
 test('resolveConfig: plain http only for loopback', () => {
   for (const url of ['http://127.0.0.1:7891', 'http://localhost:7891', 'http://[::1]:7891']) {
-    assert.equal(resolveConfig({ hubUrl: url, controllerId: 'dsh-local' }).ok, true, url)
+    assert.equal(resolveConfig({ hubUrl: url, controllerId: 'dsh-local' }, hermetic()).ok, true, url)
   }
-  const remote = resolveConfig({ hubUrl: 'http://203.0.113.5:7891', controllerId: 'dsh-local' })
+  const remote = resolveConfig({ hubUrl: 'http://203.0.113.5:7891', controllerId: 'dsh-local' }, hermetic())
   assert.equal(remote.ok, false)
   assert.match(remote.problems.join(), /must use https/)
 })
@@ -55,13 +55,13 @@ test('resolveConfig: every problem is reported, nothing throws', () => {
     [{ hubUrl: 'http://127.0.0.1:7891', controllerId: 'dsh-x', caFile: '/ca.pem' }, /caFile only applies/],
   ]
   for (const [config, re] of cases) {
-    const c = resolveConfig(config)
+    const c = resolveConfig(config, hermetic())
     assert.equal(c.ok, false, JSON.stringify(config))
     assert.match(c.problems.join(' | '), re)
   }
   // a bad timeout is a warning only: default is used, config stays usable
   for (const timeoutMs of [0, 999, 120001, 1.5, '5000']) {
-    const c = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', timeoutMs })
+    const c = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', timeoutMs }, hermetic())
     assert.equal(c.ok, true)
     assert.equal(c.timeoutMs, DEFAULT_TIMEOUT_MS)
     assert.deepEqual(c.problems, [])
@@ -69,7 +69,7 @@ test('resolveConfig: every problem is reported, nothing throws', () => {
   }
   // same for a bad tokenEnv
   for (const tokenEnv of ['', 'has space', '1ABC', 42]) {
-    const c = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', tokenEnv })
+    const c = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', tokenEnv }, hermetic())
     assert.equal(c.ok, true)
     assert.equal(c.tokenEnv, 'DSH_HUB_TOKEN')
     assert.match(c.warnings.join(), /tokenEnv must be a variable name/)
@@ -79,14 +79,14 @@ test('resolveConfig: every problem is reported, nothing throws', () => {
 test('resolveConfig: tokenEnv and envFile defaults (<DSH home>/agent-hub/controller.env)', () => {
   const join = (...p) => p.join('/').replace(/\\/g, '/')
   const norm = x => x.replace(/\\/g, '/')
-  const d = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x' }, { env: {}, homedir: () => '/home/u' })
+  const d = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x' }, { fs: fakeFs(), env: {}, homedir: () => '/home/u' })
   assert.equal(d.tokenEnv, 'DSH_HUB_TOKEN')
   assert.equal(norm(d.envFile), join('/home/u', '.dsh', 'agent-hub', 'controller.env'))
   assert.equal(d.envFileBlocked, false)
   assert.deepEqual(d.warnings, [], 'the default file is not DSH\'s .env: no warning')
-  const h = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x' }, { env: { DSH_HOME: '/srv/dsh' }, homedir: () => '/home/u' })
+  const h = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x' }, { fs: fakeFs(), env: { DSH_HOME: '/srv/dsh' }, homedir: () => '/home/u' })
   assert.equal(norm(h.envFile), '/srv/dsh/agent-hub/controller.env')
-  const c = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', tokenEnv: 'HUB_TOKEN_CLOUD', envFile: ' /etc/dsh/hub.env ' }, { env: { DSH_HOME: '/srv/dsh' } })
+  const c = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', tokenEnv: 'HUB_TOKEN_CLOUD', envFile: ' /etc/dsh/hub.env ' }, { env: { DSH_HOME: '/srv/dsh' } }, hermetic())
   assert.equal(c.tokenEnv, 'HUB_TOKEN_CLOUD')
   assert.equal(c.envFile, '/etc/dsh/hub.env')
   assert.deepEqual(c.warnings, [])
@@ -274,7 +274,7 @@ test('socket timeout, overall timeout and a throwing transport are hub-unreachab
 
   const hub = fakeHub(() => ok({}))
   hub.throwSync = true
-  const client = createHubClient({ hubUrl: HUB_URL, controllerId: CONTROLLER, env: { DSH_HUB_TOKEN: TOKEN }, request: hub.request })
+  const client = createHubClient({ hubUrl: HUB_URL, controllerId: CONTROLLER, env: { DSH_HUB_TOKEN: TOKEN }, request: hub.request, fs: fakeFs() })
   assert.match((await expectHubError(() => client.listAgents(), 503, 'hub-unreachable')).message, /request\(\) exploded/)
 })
 
@@ -308,7 +308,7 @@ test('a token of another controller (or a worker token) is refused locally: hub-
 
 test('unconfigured client: every call is 503 hub-not-configured, nothing is sent', async () => {
   const hub = fakeHub(() => ok({}))
-  const client = createHubClient({ env: { DSH_HUB_TOKEN: TOKEN }, request: hub.request })
+  const client = createHubClient({ env: { DSH_HUB_TOKEN: TOKEN }, request: hub.request, fs: fakeFs(), homedir: () => '/home/u' })
   assert.equal(client.config.ok, false)
   for (const run of [() => client.listAgents(), () => client.dispatch({}), () => client.health()]) {
     const error = await expectHubError(run, 503, 'hub-not-configured')
@@ -355,8 +355,7 @@ test('token priority: process env wins, the .env file is the fallback, the file 
   const { client, calls } = makeClient(() => ok({ agents: [] }), { env, fs })
   assert.equal(client.tokenSource(), 'env')
   await client.listAgents()
-  assert.equal(calls.at(-1).headers['X-DSH-Token'], TOKEN)
-  assert.deepEqual(fs.reads, [], 'env hit: the file is not even read')
+  assert.equal(calls.at(-1).headers['X-DSH-Token'], TOKEN, 'env hit: the file value is not used for the token')
 
   delete env.DSH_HUB_TOKEN
   assert.equal(client.tokenSource(), 'envFile')
@@ -421,7 +420,8 @@ test('a group/other-readable .env warns once (POSIX), is still used, and no valu
   assert.equal(calls.length, 2, 'a loose file is still used')
   const warns = logger.lines.filter(l => l.startsWith('warn '))
   assert.equal(warns.length, 1, 'warned once')
-  assert.match(warns[0], /readable by group or others \(mode 644\); run: chmod 600 \/srv\/dsh\/agent-hub\/controller\.env/)
+  // Either separator: the message names the path as node:path built it on this platform.
+  assert.match(warns[0], /readable by group or others \(mode 644\); run: chmod 600 [\/\\]srv[\/\\]dsh[\/\\]agent-hub[\/\\]controller\.env/)
   for (const line of [...logger.lines, error.message]) assert.ok(!line.includes(FILE_TOKEN) && !line.includes('FromTheDotEnv'), line)
 
   const win = makeClient(() => ok({ agents: [] }), { env: { DSH_HOME: '/srv/dsh' }, fs, logger: fakeLogger(), platform: 'win32' })
@@ -458,7 +458,7 @@ test('envFile = <DSH home>/.env with tokenEnv DSH_HUB_TOKEN: the file is never r
   assert.equal(client.tokenSource(), undefined, 'value from DSH\'s .env is not adopted')
   const error = await expectHubError(() => client.listAgents(), 503, 'hub-token-missing')
   assert.match(error.message, /not read for DSH_\* names/)
-  assert.match(error.message, /agent-hub\/controller\.env/)
+  assert.match(error.message, /agent-hub[\/\\]controller\.env/)
   assert.deepEqual(fs.reads, [], 'readFileSync was never called on DSH\'s .env')
   assert.equal(calls.length, 0)
   for (const line of [...logger.lines, error.message]) assert.ok(!line.includes('FromDshOwnDotEnv'), line)
@@ -481,13 +481,13 @@ test('the guard also matches Windows paths (backslashes, other case) and ~/.dsh 
     assert.deepEqual(fs.reads, [], envFile)
   }
   // lower-case dsh_ prefix is reserved too (Windows variable names are case-insensitive)
-  const lower = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: 'C:\\Users\\13558\\.dsh\\.env', tokenEnv: 'dsh_hub_token' }, { env: { DSH_HOME: winHome } })
+  const lower = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: 'C:\\Users\\13558\\.dsh\\.env', tokenEnv: 'dsh_hub_token' }, { env: { DSH_HOME: winHome } }, hermetic())
   assert.equal(lower.envFileBlocked, true)
   // no DSH_HOME: ~/.dsh/.env is DSH's file
-  const home = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: '/home/u/.dsh/.env' }, { env: {}, homedir: () => '/home/u' })
+  const home = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: '/home/u/.dsh/.env' }, { fs: fakeFs(), env: {}, homedir: () => '/home/u' })
   assert.equal(home.envFileBlocked, true)
   // a different DSH home: /home/u/.dsh/.env is then just some file
-  const other = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: '/home/u/.dsh/.env' }, { env: { DSH_HOME: '/srv/dsh' }, homedir: () => '/home/u' })
+  const other = resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x', envFile: '/home/u/.dsh/.env' }, { fs: fakeFs(), env: { DSH_HOME: '/srv/dsh' }, homedir: () => '/home/u' })
   assert.equal(other.envFileBlocked, false)
   assert.deepEqual(other.warnings, [])
 })
@@ -505,3 +505,146 @@ test('tokenEnv AGENT_HUB_TOKEN may be read from <DSH home>/.env, with a weaker w
   assert.equal(calls[0].headers['X-DSH-Token'], FILE_TOKEN)
   assert.ok(fs.reads.length >= 1 && fs.reads.every(p => p === DSH_DOT_ENV), 'read from <DSH home>/.env')
 })
+
+// --- connection settings: cordis config > process env > controller.env > default ---
+
+const CTL_ENV = '/srv/dsh/agent-hub/controller.env'
+const CA_PATH = '/srv/dsh/agent-hub/hub-ca.pem'
+/** A complete MYDESK-style controller.env (bare IP, Clash proxy, CA, token). */
+const ctlFile = (over = {}) => {
+  const values = { DSH_HUB_URL: '8.134.170.38', DSH_HUB_CONTROLLER_ID: CONTROLLER, DSH_HUB_PROXY: 'http://127.0.0.1:7890', DSH_HUB_CAFILE: CA_PATH, DSH_HUB_TOKEN: TOKEN, ...over }
+  return `# dsh-agent-hub controller (test)\n${Object.entries(values).map(([k, v]) => `${k}=${v}`).join('\n')}\n`
+}
+const fromFile = key => `${CTL_ENV} (${CONFIG_ENV_KEYS[key]})`
+
+test('controller.env alone sets hubUrl, controllerId, proxy and caFile; each source is reported, the token is not', () => {
+  assert.deepEqual(CONFIG_ENV_KEYS, { hubUrl: 'DSH_HUB_URL', controllerId: 'DSH_HUB_CONTROLLER_ID', proxy: 'DSH_HUB_PROXY', caFile: 'DSH_HUB_CAFILE' })
+  const c = resolveConfig({ envFile: CTL_ENV }, hermetic({ fs: fakeFs({ [CTL_ENV]: ctlFile() }) }))
+  assert.equal(c.ok, true, c.problems.join())
+  assert.equal(c.hubUrl, 'https://8.134.170.38:7891', 'bare IP completed like the worker does')
+  assert.equal(c.controllerId, CONTROLLER)
+  assert.deepEqual([c.proxyMode, c.proxy], ['url', 'http://127.0.0.1:7890'])
+  assert.equal(c.caFile, CA_PATH)
+  for (const key of ['hubUrl', 'controllerId', 'proxy', 'caFile']) assert.equal(c.sources[key], fromFile(key), key)
+  assert.deepEqual([c.warnings, c.notices, c.setupHint], [[], [], undefined])
+  assertNoToken(c)
+})
+
+test('a client configured only by controller.env sends to the file\'s hub; editing the file applies on the next call (no restart)', async () => {
+  const fs = fakeFs({ [CTL_ENV]: ctlFile({ DSH_HUB_PROXY: 'off' }) })
+  const { client, calls, logger } = makeClient(() => ok({ agents: [] }), { hubUrl: undefined, controllerId: undefined, envFile: CTL_ENV, env: {}, fs, readCa: async () => 'PEM' })
+  await client.listAgents()
+  assert.equal(calls[0].url.href, `https://8.134.170.38:7891/v1/ctl/agents?id=${CONTROLLER}`)
+  assert.equal(calls[0].headers[TOKEN_HEADER], TOKEN)
+  assert.equal(calls[0].options.ca, 'PEM')
+  fs.files[CTL_ENV] = ctlFile({ DSH_HUB_URL: 'https://hub.example:7891', DSH_HUB_PROXY: 'off', DSH_HUB_CAFILE: '' })
+  await client.listAgents()
+  assert.equal(calls[1].url.origin, 'https://hub.example:7891')
+  assert.equal('ca' in calls[1].options, false, 'DSH_HUB_CAFILE= (empty) counts as not set')
+  assert.equal(client.config.hubUrl, 'https://hub.example:7891')
+  assert.deepEqual(client.route(), { via: 'direct', source: 'direct' })
+  assertNoToken(logger.lines)
+})
+
+test('explicit cordis.patch.yml values win per setting and warn once that controller.env is shadowed', async () => {
+  const fs = fakeFs({ [CTL_ENV]: ctlFile() })
+  const logger = fakeLogger()
+  const { client, calls } = makeClient(() => ok({ agents: [] }), { hubUrl: 'https://hub.example:7891', controllerId: undefined, proxy: 'off', envFile: CTL_ENV, env: {}, fs, logger, readCa: async () => 'PEM' })
+  const c = client.config
+  assert.deepEqual([c.hubUrl, c.sources.hubUrl], ['https://hub.example:7891', 'cordis.patch.yml'])
+  assert.deepEqual([c.controllerId, c.sources.controllerId], [CONTROLLER, fromFile('controllerId')], 'not in cordis: still from the file')
+  assert.deepEqual([c.proxyMode, c.sources.proxy], ['direct', 'cordis.patch.yml'])
+  assert.deepEqual([c.caFile, c.sources.caFile], [CA_PATH, fromFile('caFile')])
+  await client.listAgents()
+  await client.listAgents()
+  assert.ok(calls.every(call => call.url.origin === 'https://hub.example:7891'))
+  const w = logger.lines.filter(l => l.startsWith('warn '))
+  assert.equal(w.filter(l => l.includes(`${CTL_ENV} 里的 DSH_HUB_URL 被 cordis.patch.yml 覆盖了`)).length, 1, w.join('\n'))
+  assert.equal(w.filter(l => l.includes(`${CTL_ENV} 里的 DSH_HUB_PROXY 被 cordis.patch.yml 覆盖了`)).length, 1)
+  assert.ok(!w.some(l => l.includes('DSH_HUB_CONTROLLER_ID 被') || l.includes('DSH_HUB_CAFILE 被')), 'no reminder for settings cordis does not set')
+  assertNoToken(logger.lines)
+})
+
+test('the process environment beats controller.env (and says so); the token still falls back to the file', async () => {
+  const fs = fakeFs({ [CTL_ENV]: ctlFile() })
+  const env = { DSH_HUB_URL: 'hub.example', DSH_HUB_PROXY: 'direct' }
+  const { client, calls, logger } = makeClient(() => ok({ agents: [] }), { hubUrl: undefined, controllerId: undefined, envFile: CTL_ENV, env, fs, readCa: async () => 'PEM' })
+  const c = client.config
+  assert.deepEqual([c.hubUrl, c.sources.hubUrl], ['https://hub.example:7891', 'environment DSH_HUB_URL'])
+  assert.deepEqual([c.proxyMode, c.sources.proxy], ['direct', 'environment DSH_HUB_PROXY'])
+  assert.equal(c.sources.controllerId, fromFile('controllerId'))
+  assert.equal(client.tokenSource(), 'envFile')
+  await client.listAgents()
+  assert.equal(calls[0].url.origin, 'https://hub.example:7891')
+  assert.ok(logger.lines.some(l => l.includes(`${CTL_ENV} 里的 DSH_HUB_URL 被进程环境变量 DSH_HUB_URL 覆盖了`)))
+  // cordis still beats both
+  const both = resolveConfig({ hubUrl: 'https://cordis.example:7891', envFile: CTL_ENV }, hermetic({ env, fs }))
+  assert.equal(both.hubUrl, 'https://cordis.example:7891')
+  assert.ok(both.notices.some(n => n.includes('进程环境变量 DSH_HUB_URL 被 cordis.patch.yml 的 config.hubUrl 覆盖了')))
+})
+
+test('bare hub addresses are completed like the worker does: https:// and port 7891; a trailing /v1 is dropped', () => {
+  const url = hubUrl => resolveConfig({ hubUrl, controllerId: 'dsh-x' }, hermetic())
+  assert.equal(normalizeHubUrl('8.134.170.38'), 'https://8.134.170.38:7891/')
+  for (const [input, expected] of [
+    ['8.134.170.38', 'https://8.134.170.38:7891'],
+    [' 8.134.170.38 ', 'https://8.134.170.38:7891'],
+    ['8.134.170.38:9443', 'https://8.134.170.38:9443'],
+    ['hub.example', 'https://hub.example:7891'],
+    ['hub.example:443', 'https://hub.example'],
+    ['[::1]', 'https://[::1]:7891'],
+    ['https://hub.example', 'https://hub.example'],
+    ['https://8.134.170.38:7891', 'https://8.134.170.38:7891'],
+  ]) {
+    const c = url(input)
+    assert.equal(c.ok, true, `${input}: ${c.problems}`)
+    assert.equal(c.hubUrl, expected, input)
+  }
+  const v1 = url('8.134.170.38:7891/v1')
+  assert.equal(v1.hubUrl, 'https://8.134.170.38:7891')
+  assert.match(v1.warnings.join(), /ends in \/v1 \(the worker form\)/)
+  assert.equal(url('http://127.0.0.1:7891/v1/').hubUrl, 'http://127.0.0.1:7891')
+  assert.match(url('user:pw@8.134.170.38').problems.join(), /must not contain credentials/)
+  assert.match(url('not a url').problems.join(), /not a valid URL/)
+})
+
+test('DSH_HUB_PROXY words match the worker: off/direct/none/no = direct, env/system = environment proxy', () => {
+  const proxy = value => resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x' }, hermetic({ env: { DSH_HUB_PROXY: value } }))
+  for (const v of ['off', 'OFF', 'direct', 'none', 'no', 'false']) assert.equal(proxy(v).proxyMode, 'direct', v)
+  for (const v of ['env', 'system']) assert.equal(proxy(v).proxyMode, 'env', v)
+  assert.deepEqual([proxy('127.0.0.1:7890').proxyMode, proxy('127.0.0.1:7890').proxy], ['url', 'http://127.0.0.1:7890'])
+  const bad = proxy('socks5://127.0.0.1:7891')
+  assert.equal(bad.ok, false)
+  assert.match(bad.problems.join(), /^DSH_HUB_PROXY \(environment\): proxy must be an http:\/\//)
+  assert.equal(resolveConfig({ hubUrl: HUB_URL, controllerId: 'dsh-x' }, hermetic()).sources.proxy, 'default (direct)')
+})
+
+test('nothing configured: hub-not-configured names the controller.env path and the two keys; fixing the file works without restart', async () => {
+  const fs = fakeFs({})
+  const { client, calls } = makeClient(() => ok({ agents: [] }), { hubUrl: undefined, controllerId: undefined, envFile: CTL_ENV, env: { DSH_HUB_TOKEN: TOKEN }, fs })
+  assert.equal(client.config.ok, false)
+  assert.equal(client.config.sources.envFile, `${CTL_ENV} (not found)`)
+  const error = await expectHubError(() => client.listAgents(), 503, 'hub-not-configured')
+  assert.ok(error.message.includes(`在 ${CTL_ENV} 写上 DSH_HUB_URL=`), error.message)
+  assert.ok(error.message.includes('DSH_HUB_CONTROLLER_ID='), error.message)
+  assert.match(error.message, /hubUrl is not set/)
+  assert.match(error.message, /controllerId is not set/)
+  assertNoToken(error.message)
+  assert.equal(calls.length, 0)
+  fs.files[CTL_ENV] = 'DSH_HUB_URL=hub.example\nDSH_HUB_CONTROLLER_ID=dsh-test\n'
+  await client.listAgents()
+  assert.equal(calls[0].url.href, `https://hub.example:7891/v1/ctl/agents?id=${CONTROLLER}`)
+})
+
+test('DSH\'s own <DSH home>/.env never supplies DSH_HUB_* settings, even when it is read for a non-DSH token name', async () => {
+  const fs = fakeFs({ [DSH_DOT_ENV]: `AGENT_HUB_TOKEN=${FILE_TOKEN}\nDSH_HUB_URL=hub.example\nDSH_HUB_CONTROLLER_ID=dsh-test\n` })
+  const { client, calls } = makeClient(() => ok({ agents: [] }), { hubUrl: undefined, controllerId: undefined, env: { DSH_HOME: '/srv/dsh' }, fs, envFile: DSH_DOT_ENV, tokenEnv: 'AGENT_HUB_TOKEN' })
+  assert.equal(client.config.ok, false)
+  assert.equal(client.config.hubUrl, undefined)
+  assert.equal(client.tokenSource(), 'envFile', 'the non-DSH token name is still read')
+  const error = await expectHubError(() => client.listAgents(), 503, 'hub-not-configured')
+  assert.match(error.message, /在 .*agent-hub[\\/]controller\.env 写上 DSH_HUB_URL=/, 'points at controller.env, not at DSH\'s .env')
+  assert.ok(!error.message.includes(`在 ${DSH_DOT_ENV} `))
+  assert.equal(calls.length, 0)
+})
+

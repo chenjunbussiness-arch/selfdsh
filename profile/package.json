@@ -15,7 +15,11 @@
     "dsh-host-token-stats": "link:/srv/workspace/deepseek-harness/dsh-token-stats/packages/host-token-stats",
     "dsh-client-ui-token-stats": "link:/srv/workspace/deepseek-harness/dsh-token-stats/packages/client-ui-token-stats",
     "dsh-secrets": "link:/srv/workspace/deepseek-harness/dsh-secrets",
-    "dsh-host-secrets": "link:/srv/workspace/deepseek-harness/dsh-secrets/packages/host-secrets"
+    "dsh-host-secrets": "link:/srv/workspace/deepseek-harness/dsh-secrets/packages/host-secrets",
+    "dsh-client-ui-secrets": "link:/srv/workspace/deepseek-harness/dsh-secrets/packages/client-ui-secrets",
+    "dsh-agent-hub": "link:/srv/dsh-warroom/plugins/dsh-agent-hub",
+    "dsh-host-agent-hub": "link:/srv/dsh-warroom/plugins/dsh-agent-hub/packages/host-agent-hub",
+    "dsh-client-ui-agent-hub": "link:/srv/dsh-warroom/plugins/dsh-agent-hub/packages/client-ui-agent-hub"
   },
   "dsh": {
     "profile": {
@@ -26,7 +30,8 @@
         "dsh-egress",
         "dsh-vpn",
         "dsh-token-stats",
-        "dsh-secrets"
+        "dsh-secrets",
+        "dsh-agent-hub"
       ]
     }
   }

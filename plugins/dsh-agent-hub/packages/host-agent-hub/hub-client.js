@@ -14,7 +14,25 @@
  * (a hub without TLS only listens on 127.0.0.1), so the token never crosses a
  * network in clear text.
  *
- * Proxy (config `proxy`, see proxy.js): `https.request` does not read
+ * Connection settings, each resolved separately on EVERY call (resolveConfig):
+ *
+ *   setting        cordis config   process env / envFile key   default
+ *   hubUrl         hubUrl          DSH_HUB_URL                 none (required)
+ *   controllerId   controllerId    DSH_HUB_CONTROLLER_ID       none (required)
+ *   proxy          proxy           DSH_HUB_PROXY               direct
+ *   caFile         caFile          DSH_HUB_CAFILE              none (system CAs)
+ *
+ *   priority: cordis.patch.yml config (explicitly written) > process environment
+ *   > envFile (default <DSH home>/agent-hub/controller.env) > default. So one file,
+ *   controller.env, can configure the whole controller; editing it needs no DSH
+ *   restart. A lower layer that is shadowed gets a one-time warning ("controller.env
+ *   里的 X 被 cordis.patch.yml 覆盖了"). A bare address is completed like the worker
+ *   does (`8.134.170.38` -> `https://8.134.170.38:7891`); a trailing `/v1` (worker
+ *   form) is dropped. Missing hubUrl / controllerId: the plugin still loads and
+ *   every call answers hub-not-configured naming the file and the two keys.
+ *   DSH_HUB_* settings are NEVER read from <DSH home>/.env (see below).
+ *
+ * Proxy (`proxy` / DSH_HUB_PROXY, see proxy.js): `https.request` does not read
  * HTTPS_PROXY, so with `proxy: http://127.0.0.1:7890` (MYDESK: Clash / mihomo)
  * or `proxy: env` the client first opens `CONNECT <hub>:<port>` on the proxy,
  * then TLS (servername = hub host, ca = caFile) over that tunnel, and sends
@@ -144,34 +162,73 @@ export function isDshCredentialsFile(path, env = globalThis.process?.env ?? {}, 
 /** DSH reserves every `DSH_*` name for the launching environment (case-insensitive, as on Windows). */
 export const RESERVED_ENV_RE = /^DSH_/i
 
+/** Default port of dsh-hub (7890 is the local Clash / mihomo proxy on MYDESK, not the hub). */
+export const DEFAULT_HUB_PORT = 7891
+
 /**
- * Validate the plugin config. Never throws: returns `{ problems }` (fatal: every
- * call then fails with a clear `hub-not-configured`, but the plugin still loads)
- * and `{ warnings }` (a default was used instead).
- *
- * @param {{ hubUrl?: string, controllerId?: string, caFile?: string, timeoutMs?: number, tokenEnv?: string, envFile?: string, proxy?: string | false }} config
- * @param {{ env?: object, homedir?: () => string }} [deps]
+ * Environment / controller.env names of the four connection settings. Same names
+ * (and, for DSH_HUB_PROXY, the same values) as the worker's worker/.env.
  */
-export function resolveConfig(config = {}, deps = {}) {
+export const CONFIG_ENV_KEYS = Object.freeze({
+  hubUrl: 'DSH_HUB_URL',
+  controllerId: 'DSH_HUB_CONTROLLER_ID',
+  proxy: 'DSH_HUB_PROXY',
+  caFile: 'DSH_HUB_CAFILE',
+})
+
+/**
+ * Complete a bare hub address the way the worker does: no scheme -> https://,
+ * no port -> 7891 (`8.134.170.38` -> `https://8.134.170.38:7891`). An address
+ * WITH a scheme is kept as written (a reverse proxy on 443 stays on 443).
+ * Never throws; an unparsable value is returned for the validator to reject.
+ */
+export function normalizeHubUrl(raw) {
+  const text = String(raw ?? '').trim()
+  if (text === '' || text.includes('://')) return text
+  const authority = text.split(/[/?#]/)[0].replace(/^.*@/, '')
+  const hasPort = /^\[[^\]]*\]:\d*$/.test(authority) || /^[^:[\]]+:\d*$/.test(authority)
+  let url
+  try { url = new URL(`https://${text}`) } catch { return `https://${text}` }
+  if (!hasPort) url.port = String(DEFAULT_HUB_PORT)
+  return url.href
+}
+
+const isSet = value => value !== undefined && value !== null && !(typeof value === 'string' && value.trim() === '')
+const text = value => (typeof value === 'string' ? value.trim() : value)
+
+/**
+ * One connection setting, by priority: cordis.patch.yml config > process
+ * environment > envFile (controller.env) > default. `notices` remind that a
+ * lower layer is shadowed (never contain a value).
+ */
+function pickSetting(key, config, env, fileValues, envFile) {
+  const envKey = CONFIG_ENV_KEYS[key]
+  const inConfig = isSet(config[key])
+  const inEnv = typeof env[envKey] === 'string' && env[envKey].trim() !== ''
+  const inFile = typeof fileValues[envKey] === 'string' && fileValues[envKey].trim() !== ''
+  const notices = []
+  if (inConfig && inFile) notices.push(`${envFile} 里的 ${envKey} 被 cordis.patch.yml 覆盖了（config.${key} 优先）；要让 controller.env 生效，删掉 cordis.patch.yml 里的 ${key}`)
+  if (inConfig && inEnv) notices.push(`进程环境变量 ${envKey} 被 cordis.patch.yml 的 config.${key} 覆盖了`)
+  if (!inConfig && inEnv && inFile) notices.push(`${envFile} 里的 ${envKey} 被进程环境变量 ${envKey} 覆盖了（环境变量优先）`)
+  if (inConfig) return { value: text(config[key]), from: 'config', source: 'cordis.patch.yml', label: `config.${key}`, notices }
+  if (inEnv) return { value: env[envKey].trim(), from: 'env', source: `environment ${envKey}`, label: `${envKey} (environment)`, notices }
+  if (inFile) return { value: fileValues[envKey].trim(), from: 'envFile', source: `${envFile} (${envKey})`, label: `${envKey} in ${envFile}`, notices }
+  return { value: undefined, from: 'default', source: 'default', label: `config.${key} / ${envKey}`, notices }
+}
+
+/**
+ * Resolve the whole controller configuration, reading `envFile` once.
+ * Internal: the result carries the raw file values (token!) and the parsed proxy
+ * (credentials!), so only `config` ever leaves hub-client.js.
+ */
+function resolveState(config = {}, deps = {}) {
   const problems = []
   const warnings = []
-  let base
-  const rawUrl = typeof config.hubUrl === 'string' ? config.hubUrl.trim() : ''
-  if (rawUrl === '') problems.push('config.hubUrl is not set (e.g. https://<hub-host>:7891)')
-  else {
-    try { base = new URL(rawUrl) } catch { problems.push('config.hubUrl is not a valid URL') }
-    if (base !== undefined) {
-      if (base.protocol !== 'https:' && base.protocol !== 'http:') problems.push('config.hubUrl must be http(s)://')
-      else if (base.protocol === 'http:' && !LOOPBACK.has(base.hostname)) problems.push('config.hubUrl must use https:// unless the hub is on this machine (127.0.0.1 / localhost)')
-      if (base.username !== '' || base.password !== '') problems.push('config.hubUrl must not contain credentials')
-      if (base.search !== '' || base.hash !== '') problems.push('config.hubUrl must not contain a query or fragment')
-    }
-  }
-  const controllerId = typeof config.controllerId === 'string' ? config.controllerId.trim() : ''
-  if (controllerId === '') problems.push('config.controllerId is not set (e.g. dsh-cloud)')
-  else if (!ID_RE.test(controllerId)) problems.push('config.controllerId must match /^[a-z][a-z0-9-]{1,47}$/')
-  const caFile = typeof config.caFile === 'string' && config.caFile.trim() !== '' ? config.caFile.trim() : undefined
-  if (caFile !== undefined && base?.protocol === 'http:') problems.push('config.caFile only applies to an https:// hubUrl')
+  const homeEnv = deps.env ?? globalThis.process?.env ?? {}
+  const homeFn = deps.homedir ?? homedir
+  const fs = deps.fs ?? { readFileSync, statSync }
+  const platform = deps.platform ?? globalThis.process?.platform
+
   let timeoutMs = DEFAULT_TIMEOUT_MS
   if (config.timeoutMs !== undefined) {
     if (!Number.isInteger(config.timeoutMs) || config.timeoutMs < MIN_TIMEOUT_MS || config.timeoutMs > MAX_TIMEOUT_MS) {
@@ -183,30 +240,101 @@ export function resolveConfig(config = {}, deps = {}) {
     if (typeof config.tokenEnv !== 'string' || !ENV_NAME_RE.test(config.tokenEnv.trim())) warnings.push(`config.tokenEnv must be a variable name like ${TOKEN_ENV}; using ${TOKEN_ENV}`)
     else tokenEnv = config.tokenEnv.trim()
   }
-  const homeEnv = deps.env ?? globalThis.process?.env ?? {}
-  const homeFn = deps.homedir ?? homedir
   const recommendedEnvFile = defaultEnvFile(homeEnv, homeFn)
   const envFile = typeof config.envFile === 'string' && config.envFile.trim() !== ''
     ? config.envFile.trim()
     : recommendedEnvFile
   // <DSH home>/.env belongs to DSH itself: a DSH_* line there makes DSH refuse to start.
+  // The DSH_HUB_* connection settings are therefore NEVER taken from it.
+  const isDshEnv = isDshCredentialsFile(envFile, homeEnv, homeFn)
   let envFileBlocked = false
-  if (isDshCredentialsFile(envFile, homeEnv, homeFn)) {
+  if (isDshEnv) {
     if (RESERVED_ENV_RE.test(tokenEnv)) {
       envFileBlocked = true
       warnings.push(`config.envFile ${envFile} is DSH's own <DSH home>/.env and is NOT read for ${tokenEnv}: DSH 不允许 <DSH home>/.env 里出现 DSH_ 开头的变量（会拒绝启动）；把 ${tokenEnv} 移到 <DSH home>/agent-hub/controller.env（${recommendedEnvFile}），或改用其他变量名`)
     } else {
-      warnings.push(`config.envFile ${envFile} is DSH's own <DSH home>/.env (DSH 凭据层的文件); ${tokenEnv} is read from it, but a separate file is safer: <DSH home>/agent-hub/controller.env (${recommendedEnvFile})`)
+      warnings.push(`config.envFile ${envFile} is DSH's own <DSH home>/.env (DSH 凭据层的文件); ${tokenEnv} is read from it, but a separate file is safer: <DSH home>/agent-hub/controller.env (${recommendedEnvFile}); DSH_HUB_URL 等 DSH_ 配置项永远不会从这个文件读取`)
     }
   }
-  const proxy = proxySetting(config.proxy)
+  /** The file the user should edit (never DSH's own .env). */
+  const setupFile = isDshEnv ? recommendedEnvFile : envFile
+
+  let fileValues = Object.create(null)
+  let fileWarning
+  let envFileExists = false
+  if (!envFileBlocked) {
+    const file = readEnvFile(envFile, { fs, platform })
+    fileValues = file.values
+    fileWarning = file.warning
+    envFileExists = file.exists
+  }
+  const settingsFile = isDshEnv ? Object.create(null) : fileValues
+
+  const notices = []
+  const sources = {}
+  const pick = (key) => {
+    const s = pickSetting(key, config, homeEnv, settingsFile, envFile)
+    notices.push(...s.notices)
+    sources[key] = s.source
+    return s
+  }
+
+  // hubUrl: required, bare host / IP completed to https://<host>:7891
+  const url = pick('hubUrl')
+  let base
+  if (url.value === undefined) problems.push(`hubUrl is not set (no config.hubUrl in cordis.patch.yml, no DSH_HUB_URL in the environment or in ${setupFile})`)
+  else if (typeof url.value !== 'string') problems.push(`${url.label} must be a string like https://<hub-host>:7891`)
+  else {
+    const raw = normalizeHubUrl(url.value)
+    try { base = new URL(raw) } catch { problems.push(`${url.label} is not a valid URL`) }
+    if (base !== undefined) {
+      if (base.protocol !== 'https:' && base.protocol !== 'http:') problems.push(`${url.label} must be http(s)://`)
+      else if (base.protocol === 'http:' && !LOOPBACK.has(base.hostname)) problems.push(`${url.label} must use https:// unless the hub is on this machine (127.0.0.1 / localhost)`)
+      if (base.username !== '' || base.password !== '') problems.push(`${url.label} must not contain credentials`)
+      if (base.search !== '' || base.hash !== '') problems.push(`${url.label} must not contain a query or fragment`)
+      if (/\/v1\/?$/.test(base.pathname)) {
+        warnings.push(`${url.label} ends in /v1 (the worker form); the controller adds /v1 itself, so it is dropped`)
+        base.pathname = base.pathname.replace(/\/v1\/?$/, '')
+      }
+    }
+  }
+
+  // controllerId: required
+  const id = pick('controllerId')
+  const controllerId = typeof id.value === 'string' ? id.value : ''
+  if (id.value === undefined) problems.push(`controllerId is not set (no config.controllerId in cordis.patch.yml, no DSH_HUB_CONTROLLER_ID in the environment or in ${setupFile})`)
+  else if (!ID_RE.test(controllerId)) problems.push(`${id.label} must match /^[a-z][a-z0-9-]{1,47}$/ (e.g. dsh-local, dsh-cloud)`)
+
+  // caFile: optional, only for https://
+  const ca = pick('caFile')
+  const caFile = typeof ca.value === 'string' && ca.value !== '' ? ca.value : undefined
+  if (ca.value !== undefined && typeof ca.value !== 'string') problems.push(`${ca.label} must be a file path`)
+  if (caFile !== undefined && base?.protocol === 'http:') problems.push(`${ca.label} only applies to an https:// hubUrl (caFile is for TLS)`)
+
+  // proxy: optional, default direct; off/direct/none/no = direct, env = HTTPS_PROXY ...
+  const px = pick('proxy')
+  const proxy = proxySetting(px.value, px.label)
+  if (px.from === 'default') sources.proxy = 'default (direct)'
   if (proxy.mode === 'invalid') problems.push(proxy.problem)
-  else if (proxy.mode !== 'direct' && base?.protocol === 'http:') warnings.push('config.proxy is ignored: an http:// hubUrl is a loopback hub, never proxied')
+  else if (proxy.mode !== 'direct' && base?.protocol === 'http:') warnings.push(`${px.label}: proxy is ignored: an http:// hubUrl is a loopback hub, never proxied`)
+
+  if (!envFileExists && !isDshEnv && (url.from === 'default' || id.from === 'default')) sources.envFile = `${envFile} (not found)`
+  const missing = url.value === undefined || id.value === undefined
+  const setupHint = missing
+    ? `在 ${setupFile} 写上 DSH_HUB_URL=...（例如 https://8.134.170.38:7891）和 DSH_HUB_CONTROLLER_ID=...（例如 dsh-local），保存即可，不用重启 DSH（示例：插件目录里的 controller.env.example）`
+    : undefined
+
   const basePath = base === undefined ? '' : base.pathname.replace(/\/+$/, '')
-  return {
+  const resolved = {
     ok: problems.length === 0,
     problems,
     warnings,
+    /** "X in controller.env is shadowed by ..." reminders (logged once each by the client). */
+    notices,
+    /** Where each setting came from: 'cordis.patch.yml' | 'environment DSH_HUB_URL' | '<envFile> (DSH_HUB_URL)' | 'default'. */
+    sources,
+    setupHint,
+    setupFile,
     tokenEnv,
     envFile,
     /** true: envFile is `<DSH home>/.env` and tokenEnv is a DSH_* name, so the file is never read. */
@@ -223,6 +351,24 @@ export function resolveConfig(config = {}, deps = {}) {
     proxyMode: proxy.mode,
     proxy: proxy.mode === 'url' ? proxy.proxy.display : proxy.mode === 'env' ? 'env' : undefined,
   }
+  return { config: resolved, fileValues, fileWarning, proxySetting: proxy }
+}
+
+/**
+ * Validate the plugin config. Never throws: returns `{ problems }` (fatal: every
+ * call then fails with a clear `hub-not-configured`, but the plugin still loads)
+ * and `{ warnings }` (a default was used instead).
+ *
+ * hubUrl / controllerId / proxy / caFile are each taken, separately, from:
+ *   cordis.patch.yml config > process environment (DSH_HUB_URL, DSH_HUB_CONTROLLER_ID,
+ *   DSH_HUB_PROXY, DSH_HUB_CAFILE) > envFile (default <DSH home>/agent-hub/controller.env)
+ *   > default (hubUrl / controllerId: none, proxy: direct, caFile: none).
+ *
+ * @param {{ hubUrl?: string, controllerId?: string, caFile?: string, timeoutMs?: number, tokenEnv?: string, envFile?: string, proxy?: string | false }} config
+ * @param {{ env?: object, homedir?: () => string, fs?: object, platform?: string }} [deps]
+ */
+export function resolveConfig(config = {}, deps = {}) {
+  return resolveState(config, deps).config
 }
 
 /** `<tokenEnv> is not set (...)`, naming where it was looked for (no value). */
@@ -264,16 +410,15 @@ const compact = obj => Object.fromEntries(Object.entries(obj ?? {}).filter(([, v
  */
 export function createHubClient(options = {}) {
   const env = options.env ?? globalThis.process?.env ?? {}
-  const config = resolveConfig(options, { env, homedir: options.homedir })
   const logger = options.logger
   const fs = options.fs ?? { readFileSync, statSync }
   const platform = options.platform ?? globalThis.process?.platform
+  const deps = { env, homedir: options.homedir, fs, platform }
   const warned = new Set()
   const readCa = options.readCa ?? (path => readFile(path))
   const transport = options.request ?? ((url, opts, cb) => (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, opts, cb))
-  const proxyConfig = proxySetting(options.proxy) // closure only: the parsed form holds credentials
   const tunnelDeps = options.tunnel ?? {}
-  let caPromise
+  let caCache // { path, promise }: re-read when caFile changes
 
   /** Warn once per distinct message (never contains a value). */
   const warnOnce = (message) => {
@@ -282,14 +427,25 @@ export function createHubClient(options = {}) {
     try { logger?.warn?.(`agent-hub: ${message}`) } catch { /* ignore */ }
   }
 
+  /**
+   * Configuration as of NOW: cordis config > process env > envFile > default,
+   * the envFile re-read on every call (edit controller.env, no restart needed).
+   * The parsed proxy (may hold credentials) and the file values stay in this closure.
+   */
+  function current() {
+    const state = resolveState(options, deps)
+    if (state.fileWarning !== undefined) warnOnce(state.fileWarning)
+    for (const notice of state.config.notices) warnOnce(notice)
+    return state
+  }
+
   /** `{ value, source: 'env' | 'envFile' }` or `{ value: undefined }`. Re-read on every call. */
-  function lookupToken() {
+  function lookupToken(state = current()) {
+    const { config } = state
     const fromEnv = env[config.tokenEnv]
     if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return { value: fromEnv.trim(), source: 'env' }
     if (config.envFileBlocked) return { value: undefined, source: undefined } // DSH's own .env: never read for DSH_*
-    const file = readEnvFile(config.envFile, { fs, platform })
-    if (file.warning !== undefined) warnOnce(file.warning)
-    const fromFile = file.values[config.tokenEnv]
+    const fromFile = state.fileValues[config.tokenEnv]
     if (typeof fromFile === 'string' && fromFile.trim() !== '') return { value: fromFile.trim(), source: 'envFile' }
     return { value: undefined, source: undefined }
   }
@@ -308,25 +464,32 @@ export function createHubClient(options = {}) {
     return JSON.parse(json.split(secret).join('***'))
   }
 
-  function ensureReady() {
-    if (!config.ok) throw new HubError(503, 'hub-not-configured', `agent-hub is not configured: ${config.problems.join('; ')}`)
-    const value = token()
-    if (value === undefined) throw new HubError(503, 'hub-token-missing', `${tokenMissingMessage(config)}: issue a controller token on the hub machine (node server.mjs controller add ${config.controllerId}) and put it into the DSH service environment or ${config.envFileBlocked ? config.recommendedEnvFile : 'that env file'} (never into <DSH home>/.env: DSH refuses to start on DSH_* lines there)`)
+  const notConfigured = config => new HubError(503, 'hub-not-configured', `agent-hub is not configured: ${config.problems.join('; ')}${config.setupHint ? `. ${config.setupHint}` : ''}`)
+
+  function ensureReady(state) {
+    const { config } = state
+    if (!config.ok) throw notConfigured(config)
+    const value = lookupToken(state).value
+    if (value === undefined) throw new HubError(503, 'hub-token-missing', `${tokenMissingMessage(config)}: issue a controller token on the hub machine (node server.mjs controller add ${config.controllerId}) and write ${config.tokenEnv}=<token> into ${config.envFileBlocked ? config.recommendedEnvFile : config.envFile} (or the DSH service environment; never into <DSH home>/.env: DSH refuses to start on DSH_* lines there)`)
     if (!value.startsWith(`dshc_${config.controllerId}_`)) throw new HubError(503, 'hub-token-mismatch', `${config.tokenEnv} is not a controller token of "${config.controllerId}" (expected dshc_${config.controllerId}_...)`)
     return value
   }
 
-  async function loadCa() {
+  async function loadCa(config) {
     if (config.caFile === undefined) return undefined
-    caPromise ??= Promise.resolve().then(() => readCa(config.caFile)).catch((error) => {
-      caPromise = undefined // retry on the next call (file may be fixed meanwhile)
-      throw new HubError(503, 'hub-ca-unreadable', `cannot read caFile ${config.caFile}: ${error?.code ?? 'error'}`)
-    })
-    return caPromise
+    if (caCache?.path !== config.caFile) {
+      const entry = { path: config.caFile }
+      entry.promise = Promise.resolve().then(() => readCa(entry.path)).catch((error) => {
+        if (caCache === entry) caCache = undefined // retry on the next call (file may be fixed meanwhile)
+        throw new HubError(503, 'hub-ca-unreadable', `cannot read caFile ${entry.path}: ${error?.code ?? 'error'}`)
+      })
+      caCache = entry
+    }
+    return caCache.promise
   }
 
   /** Build `<hubUrl>/v1/<path>?id=<controllerId>&<params>`. */
-  function urlFor(path, params = {}) {
+  function urlFor(config, path, params = {}) {
     const url = new URL(`${config.basePath}/v1/${path}`, config.origin)
     url.searchParams.set('id', config.controllerId)
     for (const [key, value] of Object.entries(params)) {
@@ -340,7 +503,7 @@ export function createHubClient(options = {}) {
    * One HTTP exchange. Resolves `{ status, headers, body: Buffer }` for ANY status;
    * rejects with `hub-unreachable` when no response arrives (refused, DNS, TLS, timeout).
    */
-  function exchange(method, url, headers, payload, ca, maxBytes, extra = {}) {
+  function exchange(config, method, url, headers, payload, ca, maxBytes, extra = {}) {
     return new Promise((resolve, reject) => {
       let settled = false
       let req
@@ -394,8 +557,8 @@ export function createHubClient(options = {}) {
   }
 
   /** Proxy for one hub URL (env mode re-reads HTTPS_PROXY / NO_PROXY on every call). */
-  function routeFor(url) {
-    const route = resolveProxy(proxyConfig, url, env)
+  function routeFor(state, url) {
+    const route = resolveProxy(state.proxySetting, url, env)
     if (route.problem !== undefined) throw new HubError(503, 'hub-not-configured', `agent-hub proxy: ${route.problem}`)
     return route
   }
@@ -417,11 +580,13 @@ export function createHubClient(options = {}) {
    * @param {{ query?: object, body?: object, raw?: boolean, auth?: boolean }} [init]
    */
   async function call(method, path, { query, body, raw = false, auth = true } = {}) {
+    const state = current() // one snapshot per call
+    const { config } = state
     let value
-    if (auth) value = ensureReady()
-    else if (!config.ok) throw new HubError(503, 'hub-not-configured', `agent-hub is not configured: ${config.problems.join('; ')}`)
-    const ca = await loadCa()
-    const url = urlFor(path, query)
+    if (auth) value = ensureReady(state)
+    else if (!config.ok) throw notConfigured(config)
+    const ca = await loadCa(config)
+    const url = urlFor(config, path, query)
     const headers = { accept: raw ? 'application/octet-stream, application/json' : 'application/json' }
     if (auth) headers[TOKEN_HEADER] = value
     let payload
@@ -431,7 +596,7 @@ export function createHubClient(options = {}) {
       headers['content-length'] = String(payload.length)
     }
     const started = Date.now()
-    const route = routeFor(url)
+    const route = routeFor(state, url)
     const extra = {}
     if (route.proxy !== undefined) {
       let socket
@@ -443,7 +608,7 @@ export function createHubClient(options = {}) {
       }
       extra.createConnection = () => socket
     }
-    const res = await exchange(method, url, headers, payload, ca, raw ? MAX_OUTPUT_BYTES : MAX_JSON_BYTES, extra)
+    const res = await exchange(config, method, url, headers, payload, ca, raw ? MAX_OUTPUT_BYTES : MAX_JSON_BYTES, extra)
     // Log line: method, path, status, route (masked proxy) only.
     try { logger?.debug?.(`agent-hub: ${method} /v1/${path} -> ${res.status} (${Date.now() - started} ms${route.proxy ? ` via ${route.proxy.display}` : ''})`) } catch { /* ignore */ }
     if (res.status < 200 || res.status >= 300) throw hubFailure(res.status, res.body)
@@ -457,7 +622,8 @@ export function createHubClient(options = {}) {
   const ctlPost = (path, body) => call('POST', `ctl/${path}`, { body })
 
   return {
-    config,
+    /** The configuration as of now (re-resolved on every access; no secrets in it). */
+    get config() { return current().config },
     /** True when a token is found (value never exposed). */
     hasToken: () => token() !== undefined,
     /** Where the token comes from: 'env' | 'envFile' | undefined (value never exposed). */
@@ -467,8 +633,9 @@ export function createHubClient(options = {}) {
     call,
     /** How the hub is reached right now: `{ via: 'direct' | <masked proxy URL>, source }` (no credentials). */
     route: () => {
-      if (!config.ok) return { via: 'direct', source: 'not configured' }
-      const r = resolveProxy(proxyConfig, new URL(`${config.origin}/`), env)
+      const state = current()
+      if (!state.config.ok) return { via: 'direct', source: 'not configured' }
+      const r = resolveProxy(state.proxySetting, new URL(`${state.config.origin}/`), env)
       return { via: r.proxy?.display ?? 'direct', source: r.problem ?? r.source }
     },
 
@@ -496,7 +663,8 @@ export function createHubClient(options = {}) {
     // --- workers and enrollment ---------------------------------------------
     listAgents: async () => asList(await ctlGet('agents'), 'agents'),
     listRequests: async status => asList(await ctlGet('requests', { status }), 'requests'),
-    approve: async ({ request_id, capabilities, workspaces, max_concurrency }) => asObject(await ctlPost('approve', { request_id, capabilities, workspaces, max_concurrency })),
+    /** `role` is additive: a hub that does not know roles ignores it (and reports `worker`). */
+    approve: async ({ request_id, capabilities, workspaces, max_concurrency, role }) => asObject(await ctlPost('approve', { request_id, capabilities, workspaces, max_concurrency, role })),
     reject: async (requestId, reason) => asObject(await ctlPost('reject', { request_id: requestId, reason })),
     revoke: async agentId => asObject(await ctlPost('revoke', { agent_id: agentId })),
     provision: async body => asObject(await ctlPost('provision', body)),

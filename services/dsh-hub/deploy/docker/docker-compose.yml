@@ -1,0 +1,134 @@
+# Local end-to-end test of dsh-hub on MYDESK (Docker Desktop).
+#
+#   hub     dsh-hub with a self-signed TLS cert, published ONLY on 127.0.0.1:7891.
+#           The local DSH (dsh-local) connects to https://127.0.0.1:7891 with caFile = ./out/hub-ca.pem.
+#   worker  (profile "worker") a demo worker: registers as docker-worker (node "docker",
+#           workspace "sandbox" = ./sandbox), then answers every task it gets with a
+#           summary.md, so the whole dispatch -> lease -> result loop can be watched.
+#
+# Run from this folder:
+#   docker compose up -d --build hub
+#   docker compose --profile worker up -d worker
+# Full guide: README.md in this folder.
+name: dsh-hub-local
+
+services:
+  hub:
+    build:
+      context: ../..                     # services/dsh-hub
+      dockerfile: deploy/docker/Dockerfile
+    image: dsh-hub:local
+    environment:
+      DSH_HOME: /data
+      HUB_TLS_SAN: "DNS:hub,DNS:localhost,IP:127.0.0.1"
+      HUB_ALLOW: ""                      # only used when hub.json is created; empty = no IP filter (port is loopback-only anyway)
+    ports:
+      - "127.0.0.1:7891:7891"
+    volumes:
+      - hubdata:/data                    # state, hub.json, TLS keys, controllers.json (stays inside Docker)
+      - ./out:/out                       # gets hub-ca.pem (public CA cert) for the host
+    restart: unless-stopped
+
+  worker:
+    profiles: ["worker"]
+    image: python:3.12-alpine
+    depends_on:
+      hub:
+        condition: service_healthy
+    environment:
+      DSH_HOME: /worker-home             # worker dir = /worker-home/worker (.env, profile.json, agent.token)
+      DSH_HUB_URL: https://hub:7891
+      DSH_HUB_PROXY: "off"               # same Docker network, no proxy
+      DSH_HUB_CAFILE: /hubca/hub-ca.pem
+      DSH_AGENT_ID: docker-worker
+      DSH_NODE: docker
+      DSH_PLATFORM: custom
+      DSH_CAPABILITIES: "document,code"
+      DSH_MAX_CONCURRENCY: "1"
+      DSH_EXCHANGE: /worker-home/exchange
+      DSH_HEARTBEAT_SECONDS: "30"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../../../../plugins/dsh-agent-hub/scripts:/opt/agent:ro
+      - ./worker:/opt/demo:ro
+      - ./out:/hubca:ro
+      - ./sandbox:/workspaces/sandbox
+      - workerdata:/worker-home
+    entrypoint: ["/bin/sh", "/opt/demo/worker-entrypoint.sh"]
+    restart: unless-stopped
+
+  # Long-running worker for THIS machine (quick-mydesk): docker keeps it alive instead of a
+  # manual "register / run" in PowerShell. Same client, same variables as the demo worker
+  # (agent_client.py is stdlib-only, so the plain python image is enough).
+  #   docker compose --profile quick-worker up -d worker-quick
+  #   docker compose logs -f worker-quick
+  worker-quick:
+    profiles: ["quick-worker"]
+    image: python:3.12-alpine
+    depends_on:
+      hub:
+        condition: service_healthy
+    environment:
+      DSH_HOME: /worker-home
+      DSH_HUB_URL: https://hub:7891
+      DSH_HUB_PROXY: "off"
+      DSH_HUB_CAFILE: /hubca/hub-ca.pem
+      DSH_AGENT_ID: quick-mydesk
+      DSH_NODE: mydesk
+      DSH_PLATFORM: aws-quick
+      DSH_CAPABILITIES: "document,research,data,code"
+      DSH_MAX_CONCURRENCY: "10"          # tasks held at once (the hub keeps the value approved at enrollment)
+      DSH_AGENT_TOKEN_FILE: /wd/agent.token   # on the host: out/quick-worker/agent.token
+      DSH_EXCHANGE: /exchange
+      DSH_HEARTBEAT_SECONDS: "30"
+      # The workspace list comes from the HOST profile (out/quick-worker/profile.json + its dshProfile's
+      # router-b partitions), written with Windows paths; this map lets the container check they exist.
+      DSH_PATH_MAP: E:/PythonProject=/host/e/PythonProject;${USERPROFILE}/.dsh/profiles/desktop=/host/dsh-profile
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../../../../plugins/dsh-agent-hub/scripts:/opt/agent:ro
+      - ./out:/hubca:ro                 # hub-ca.pem
+      - ./out/quick-worker:/wd          # token + worker-dir visible on the host
+      - ./out/quick-exchange:/exchange
+      - type: bind                      # workspaces live here (read-only: this container only relays)
+        source: E:/PythonProject
+        target: /host/e/PythonProject
+        read_only: true
+      - type: bind                      # the local DSH profile: its router-b partitions = workspaces
+        source: ${USERPROFILE}/.dsh/profiles/desktop
+        target: /host/dsh-profile
+        read_only: true
+        bind:
+          create_host_path: true
+      - workerdata-quick:/worker-home
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -u
+        mkdir -p "$$DSH_HOME/worker" "$$DSH_EXCHANGE" /wd
+        CLIENT=/opt/agent/agent_client.py
+        PROFILE=/wd/profile.json          # host file: out/quick-worker/profile.json
+        echo "== workspaces (host profile through DSH_PATH_MAP) =="
+        python "$$CLIENT" workspaces --profile-file "$$PROFILE" || echo "workspaces: see the message above"
+        echo "== check =="
+        python "$$CLIENT" check || echo "check failed (continuing)"
+        # register before every run: a token the hub accepts -> "already registered" (no new request);
+        # a revoked / rejected token (401) is moved aside and ONE new request waits for agent_approve.
+        # (Checking only that the token file exists would loop on 401 forever after a revoke.)
+        while true; do
+          echo "== register $$(date -u +%FT%TZ) =="
+          if python "$$CLIENT" register --profile-file "$$PROFILE"; then
+            echo "== run $$(date -u +%FT%TZ) =="
+            python "$$CLIENT" run --profile-file "$$PROFILE" || echo "run exited with $$?; restarting in 10s"
+          else
+            echo "register failed (hub down?); retrying in 10s"
+          fi
+          sleep 10
+        done
+    restart: unless-stopped
+
+volumes:
+  hubdata: {}
+  workerdata: {}
+  workerdata-quick: {}

@@ -25,6 +25,14 @@
  *     through an EventEmitter when a task that could go to this worker becomes
  *     pending (dispatch, retry, requeue, freed slot, completed upstream,
  *     heartbeat that changed the reported workspaces).
+ *   - Runtime and effort (docs section 10): a worker may declare what it can be
+ *     asked to run (`runtime`: modes, thinking levels, defaults per task type and
+ *     named agents/personas of its platform) at enrollment and in every heartbeat;
+ *     it is descriptive, not a grant, so a heartbeat may change it. A task may
+ *     carry `effort` {mode, thinking, agent}: dispatch to a worker that declared a
+ *     runtime refuses what it does not support (409 unsupported-effort), pools
+ *     only hand the task to workers that support it, and a worker that declared
+ *     nothing gets the task with a warning (it may ignore effort).
  *   - Presence (docs section 9): a worker is `pending` (approved, token not
  *     collected yet), `online` (last heartbeat / poll / event within
  *     offlineAfterMs, default 90 s), `offline`, `left` (it called leave) or
@@ -74,6 +82,11 @@ export const DEFAULT_OFFLINE_AFTER_MS = 90_000
 export const RECONCILE_GRACE_MS = 30_000
 export const AGENT_STATUSES = ['pending', 'online', 'offline', 'left', 'revoked']
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9 ._+\/()-]{0,63}$/
+export const EFFORT_MODES = ['fast', 'balanced', 'smart']
+export const EFFORT_THINKING = ['off', 'low', 'medium', 'high']
+/** Named agents / personas a worker platform offers (e.g. an AWS Quick agent, a Claude Code sub-agent). */
+export const PERSONA_RE = /^[a-z][a-z0-9-]{0,47}$/
+const MAX_PERSONAS = 32
 
 /** A caller-visible failure with an HTTP status and a stable code. */
 export class HubError extends Error {
@@ -106,6 +119,99 @@ function nameList(value, re, code, message, max) {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value) || value.length > max || value.some(v => typeof v !== 'string' || !re.test(v))) throw new HubError(400, code, message)
   return [...new Set(value)]
+}
+
+const isPlainObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+/** Validate a task's `effort` ({ mode, thinking, agent }, all optional). Returns a clean copy or undefined. */
+export function validateEffort(raw, code = 'bad-task') {
+  if (raw === undefined || raw === null) return undefined
+  if (!isPlainObject(raw)) throw new HubError(400, code, 'effort must be an object { mode, thinking, agent }')
+  const out = {}
+  if (raw.mode !== undefined) {
+    if (!EFFORT_MODES.includes(raw.mode)) throw new HubError(400, code, `effort.mode must be one of ${EFFORT_MODES.join(', ')}`)
+    out.mode = raw.mode
+  }
+  if (raw.thinking !== undefined) {
+    if (!EFFORT_THINKING.includes(raw.thinking)) throw new HubError(400, code, `effort.thinking must be one of ${EFFORT_THINKING.join(', ')}`)
+    out.thinking = raw.thinking
+  }
+  if (out.mode === 'fast' && out.thinking !== undefined && out.thinking !== 'off') throw new HubError(400, code, 'effort.thinking needs mode balanced or smart (fast has no thinking)')
+  if (raw.agent !== undefined) {
+    if (typeof raw.agent !== 'string' || !PERSONA_RE.test(raw.agent)) throw new HubError(400, code, 'effort.agent must match /^[a-z][a-z0-9-]{0,47}$/')
+    out.agent = raw.agent
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** A subset of `allowed`, in canonical order. */
+function choiceList(value, allowed, label) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value) || value.some(v => !allowed.includes(v))) throw new HubError(400, 'bad-runtime', `runtime.${label} must be a list of ${allowed.join(', ')}`)
+  return allowed.filter(v => value.includes(v))
+}
+
+/**
+ * Validate a worker's `runtime` declaration. Unknown keys are dropped.
+ *   modes     ["fast", "balanced", "smart"]        what effort.mode may ask for
+ *   thinking  ["off", "low", "medium", "high"]     what effort.thinking may ask for
+ *   default   { mode, thinking, agent }            used when a task names no effort
+ *   defaults  { <task type>: { mode, thinking, agent } }
+ *   agents    [{ name, description }]              named agents effort.agent may pick
+ *   note      free text (<= 300)
+ */
+export function validateRuntime(raw) {
+  if (raw === undefined || raw === null) return undefined
+  if (!isPlainObject(raw)) throw new HubError(400, 'bad-runtime', 'runtime must be an object')
+  const agentsIn = raw.agents ?? []
+  if (!Array.isArray(agentsIn) || agentsIn.length > MAX_PERSONAS) throw new HubError(400, 'bad-runtime', `runtime.agents must be a list of at most ${MAX_PERSONAS} entries`)
+  const agents = []
+  for (const a of agentsIn) {
+    const entry = typeof a === 'string' ? { name: a } : a
+    if (!isPlainObject(entry) || typeof entry.name !== 'string' || !PERSONA_RE.test(entry.name)) throw new HubError(400, 'bad-runtime', 'runtime.agents[].name must match /^[a-z][a-z0-9-]{0,47}$/')
+    if (agents.some(x => x.name === entry.name)) continue
+    const clean = { name: entry.name }
+    if (entry.description !== undefined) clean.description = String(entry.description).slice(0, 200)
+    agents.push(clean)
+  }
+  const rt = { modes: choiceList(raw.modes, EFFORT_MODES, 'modes'), thinking: choiceList(raw.thinking, EFFORT_THINKING, 'thinking'), agents }
+  const check = (effort, where) => {
+    const e = validateEffort(effort, 'bad-runtime')
+    const why = effortProblem(rt, e)
+    if (why !== null) throw new HubError(400, 'bad-runtime', `${where}: ${why}`)
+    return e
+  }
+  if (raw.default !== undefined && raw.default !== null) {
+    const e = check(raw.default, 'runtime.default')
+    if (e !== undefined) rt.default = e
+  }
+  if (raw.defaults !== undefined && raw.defaults !== null) {
+    if (!isPlainObject(raw.defaults)) throw new HubError(400, 'bad-runtime', 'runtime.defaults must be an object of task type -> effort')
+    const defaults = {}
+    for (const [type, effort] of Object.entries(raw.defaults)) {
+      if (!TASK_TYPES.includes(type)) throw new HubError(400, 'bad-runtime', `runtime.defaults: unknown task type ${type.slice(0, 32)}`)
+      const e = check(effort, `runtime.defaults.${type}`)
+      if (e !== undefined) defaults[type] = e
+    }
+    if (Object.keys(defaults).length > 0) rt.defaults = defaults
+  }
+  if (raw.note !== undefined && raw.note !== null) rt.note = String(raw.note).slice(0, 300)
+  return rt
+}
+
+/**
+ * Why this runtime cannot honour this effort, or null. No effort -> null. No runtime
+ * declared -> only a named agent is a problem (mode / thinking are best effort).
+ */
+export function effortProblem(runtime, effort) {
+  if (effort === undefined) return null
+  if (runtime === undefined) return effort.agent !== undefined ? `declares no agents (asked for agent ${effort.agent})` : null
+  if (effort.mode !== undefined && runtime.modes.length > 0 && !runtime.modes.includes(effort.mode)) return `does not offer mode ${effort.mode} (offers ${runtime.modes.join(', ')})`
+  if (effort.thinking !== undefined && runtime.thinking.length > 0 && !runtime.thinking.includes(effort.thinking)) return `does not offer thinking ${effort.thinking} (offers ${runtime.thinking.join(', ')})`
+  if (effort.agent !== undefined && !runtime.agents.some(a => a.name === effort.agent)) {
+    return `has no agent ${effort.agent} (has ${runtime.agents.map(a => a.name).join(', ') || 'none'})`
+  }
+  return null
 }
 
 /** Constant-time check of a token against a stored hex sha256 ('' = no usable token). */
@@ -328,6 +434,7 @@ export class AgentHub {
       id, mode, maxConcurrency, capabilities: [...new Set(caps)], node, workspaces,
       platform: String(input.platform ?? 'custom').slice(0, 64),
       description: String(input.description ?? '').slice(0, 500),
+      runtime: validateRuntime(input.runtime),
     }
   }
 
@@ -338,7 +445,7 @@ export class AgentHub {
     state.agents[v.id] = {
       id: v.id, platform: v.platform, mode: v.mode, node: v.node, capabilities: v.capabilities,
       workspaces: v.workspaces, reportedWorkspaces: reported.filter(w => v.workspaces.includes(w)),
-      maxConcurrency: v.maxConcurrency, description: v.description, tokenHash,
+      maxConcurrency: v.maxConcurrency, description: v.description, runtime: v.runtime, tokenHash,
       createdAt: previous?.createdAt ?? nowIso(this.clock()),
       rekeyedAt: previous === undefined ? undefined : nowIso(this.clock()),
       lastSeen: undefined, reportedStatus: undefined, revoked: false,
@@ -417,7 +524,7 @@ export class AgentHub {
       .map(r => ({
         request_id: r.request_id, status: r.status, agent_id: r.agent.id, platform: r.agent.platform, mode: r.agent.mode,
         node: r.agent.node, workspaces: r.agent.workspaces ?? [], capabilities: r.agent.capabilities, max_concurrency: r.agent.maxConcurrency,
-        description: r.agent.description, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
+        description: r.agent.description, runtime: r.agent.runtime, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
       })))
   }
 
@@ -432,6 +539,7 @@ export class AgentHub {
       const o = overrides ?? {}
       const v = this.validateAgent({
         agent_id: asked.id, platform: asked.platform, mode: asked.mode, description: asked.description, node: asked.node,
+        runtime: asked.runtime,
         capabilities: o.capabilities ?? asked.capabilities,
         workspaces: o.workspaces ?? asked.workspaces,
         max_concurrency: o.max_concurrency ?? asked.maxConcurrency,
@@ -509,7 +617,7 @@ export class AgentHub {
     return {
       agent_id: agent.id, platform: agent.platform, mode: agent.mode, node: agent.node, capabilities: agent.capabilities,
       workspaces: agent.workspaces, reported_workspaces: agent.reportedWorkspaces,
-      max_concurrency: agent.maxConcurrency, description: agent.description, revoked: agent.revoked,
+      max_concurrency: agent.maxConcurrency, description: agent.description, runtime: agent.runtime, revoked: agent.revoked,
       status, online: status === 'online', last_seen: agent.lastSeen, left_at: agent.leftAt, version: agent.clientVersion,
       reported_status: agent.reportedStatus, running_tasks: running, created_at: agent.createdAt,
     }
@@ -567,6 +675,7 @@ export class AgentHub {
     if (!this.targets(task, agent)) return false
     if (task.workspace !== undefined && !(agent.workspaces.includes(task.workspace) && agent.reportedWorkspaces.includes(task.workspace))) return false
     if (task.node !== undefined && task.node !== agent.node) return false
+    if (effortProblem(agent.runtime, task.effort) !== null) return false
     return true
   }
 
@@ -610,6 +719,7 @@ export class AgentHub {
     if (t.task_id !== undefined && (typeof t.task_id !== 'string' || !TASK_ID_RE.test(t.task_id))) throw new HubError(400, 'bad-task', 'invalid task_id')
     if (t.require_online !== undefined && typeof t.require_online !== 'boolean') throw new HubError(400, 'bad-task', 'require_online must be true or false')
     const requireOnline = t.require_online === true
+    const effort = validateEffort(t.effort)
 
     return this.mutate(async (state) => {
       await this.liveController(controllerId)
@@ -625,6 +735,9 @@ export class AgentHub {
         // Fail fast instead of leaving a task no one can ever lease.
         if (workspace !== undefined && !agent.workspaces.includes(workspace)) throw new HubError(409, 'unroutable', `${target} was not granted workspace ${workspace}`)
         if (node !== undefined && agent.node !== node) throw new HubError(409, 'unroutable', `${target} is not on node ${node}`)
+        const why = effortProblem(agent.runtime, effort)
+        if (why !== null) throw new HubError(409, 'unsupported-effort', `${target} ${why}`)
+        if (effort !== undefined && agent.runtime === undefined) warnings.push('effort-not-declared')
         const status = this.agentStatus(agent)
         if (status !== 'online') {
           if (requireOnline) throw new HubError(409, 'agent-offline', `${target} is ${status} (last seen ${agent.lastSeen ?? 'never'})`)
@@ -634,7 +747,8 @@ export class AgentHub {
         const probe = { agent: target, workspace, node }
         const ready = Object.values(state.agents).some(a => this.agentStatus(a) === 'online' && this.targets(probe, a)
           && (workspace === undefined || (a.workspaces.includes(workspace) && a.reportedWorkspaces.includes(workspace)))
-          && (node === undefined || a.node === node))
+          && (node === undefined || a.node === node)
+          && effortProblem(a.runtime, effort) === null)
         if (!ready) {
           if (requireOnline) throw new HubError(409, 'no-online-worker', `no online worker can take ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''} right now`)
           warnings.push('no-online-worker')
@@ -657,7 +771,7 @@ export class AgentHub {
       }
       const task = {
         protocol: PROTOCOL, task_id: id, agent: target, type, title: t.title.trim(), instruction: t.instruction,
-        workspace, node, ref,
+        workspace, node, ref, effort,
         inputs: inputNames, output: t.output ?? {}, priority, deadline: t.deadline, lease_seconds: leaseSeconds,
         parent_task_id: t.parent_task_id, depends_on: deps, context: t.context ?? {},
         created_by: controllerId, created_at: nowIso(this.clock()),
@@ -705,6 +819,8 @@ export class AgentHub {
         if (!(target && !target.revoked) && !(typeof agent === 'string' && POOL_RE.test(agent))) throw new HubError(400, 'bad-task', 'unknown target agent')
         if (target && task.workspace !== undefined && !target.workspaces.includes(task.workspace)) throw new HubError(409, 'unroutable', `${agent} was not granted workspace ${task.workspace}`)
         if (target && task.node !== undefined && target.node !== task.node) throw new HubError(409, 'unroutable', `${agent} is not on node ${task.node}`)
+        const why = target ? effortProblem(target.runtime, task.effort) : null
+        if (why !== null) throw new HubError(409, 'unsupported-effort', `${agent} ${why}`)
         task.agent = agent
       }
       task.status = 'pending'; task.assignedTo = undefined; task.leaseUntil = undefined; task.attempts = 0; task.result = undefined
@@ -735,7 +851,7 @@ export class AgentHub {
   publicTask(task, { full = false } = {}) {
     const out = {
       task_id: task.task_id, agent: task.agent, assigned_to: task.assignedTo, type: task.type, title: task.title,
-      workspace: task.workspace, node: task.node, ref: task.ref, created_by: task.created_by,
+      workspace: task.workspace, node: task.node, ref: task.ref, effort: task.effort, created_by: task.created_by,
       status: task.status, priority: task.priority, attempts: task.attempts, progress: task.progress, message: task.message,
       created_at: task.created_at, lease_until: task.leaseUntil, depends_on: task.depends_on,
       result: task.result === undefined ? undefined : { status: task.result.status, summary: task.result.summary, outputs: task.result.outputs, error: task.result.error, needs_input: task.result.needs_input },
@@ -785,9 +901,15 @@ export class AgentHub {
     const reported = b.workspaces === undefined ? undefined : nameList(b.workspaces, WORKSPACE_RE, 'bad-workspaces', `workspaces must be a list of at most ${MAX_WORKSPACES} workspace names`, MAX_WORKSPACES)
     const running = b.running === undefined || b.running === null ? undefined : nameList(b.running, TASK_ID_RE, 'bad-running', `running must be a list of at most ${MAX_RUNNING} task ids`, MAX_RUNNING)
     const version = typeof b.client_version === 'string' && VERSION_RE.test(b.client_version) ? b.client_version : undefined
+    const runtime = b.runtime === undefined ? undefined : validateRuntime(b.runtime) // descriptive, not a grant: may change
     return this.mutate((state) => {
       const agent = this.liveAgent(state, agentId)
       this.seen(agent)
+      if (b.runtime !== undefined && JSON.stringify(runtime) !== JSON.stringify(agent.runtime)) {
+        agent.runtime = runtime
+        this.wakes.add(agentId) // pool tasks it can now take
+        this.log(`dsh-hub: ${agentId} runtime ${runtime === undefined ? 'cleared' : `modes ${runtime.modes.join('/') || '-'}, agents ${runtime.agents.map(a => a.name).join('/') || '-'}`}`)
+      }
       agent.reportedStatus = ['idle', 'busy'].includes(b.status) ? b.status : undefined
       if (version !== undefined) agent.clientVersion = version
       let ignored = []
@@ -901,7 +1023,7 @@ export class AgentHub {
         const upstream = task.depends_on.flatMap(d => (own(state.tasks, d).result?.outputs ?? []).map(o => ({ from_task: d, name: o.name })))
         leased.push({
           protocol: PROTOCOL, task_id: task.task_id, type: task.type, title: task.title, instruction: task.instruction,
-          workspace: task.workspace, node: task.node, ref: task.ref, created_by: task.created_by,
+          workspace: task.workspace, node: task.node, ref: task.ref, effort: task.effort, created_by: task.created_by,
           inputs: task.inputs.map(name => ({ name, from_task: task.task_id })).concat(upstream),
           output: task.output, priority: task.priority, deadline: task.deadline, lease_until: task.leaseUntil,
           parent_task_id: task.parent_task_id, context: task.context, attempt: task.attempts,

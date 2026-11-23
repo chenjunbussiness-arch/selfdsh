@@ -2,7 +2,7 @@
   "name": "dsh-vpn",
   "version": "0.1.0",
   "private": true,
-  "description": "VPN manager bundle for DeepSeek Harness: a host plugin that runs openfortivpn with split-tunnel routes and a watchdog, and a Web page to manage profiles, connect and read logs",
+  "description": "VPN manager for DeepSeek Harness on a Linux server: runs openfortivpn with split-tunnel routes and a watchdog, with a Web page to manage profiles, connect and read logs, and a read-only vpn_status tool. Required: openfortivpn and ppp installed on the server, and one profile created on the VPN page. See README.md",
   "type": "module",
   "icon": "./icon.svg",
   "main": "index.js",
@@ -19,7 +19,8 @@
     "icon.svg",
     "locale",
     "docs",
-    "packages"
+    "packages",
+    "README.md"
   ],
   "license": "MIT",
   "engines": {

@@ -87,12 +87,20 @@ export function fakeHub(handler = () => ({ body: {} })) {
  * Missing paths throw ENOENT, so no real file (~/.dsh/agent-hub/controller.env,
  * let alone DSH's own ~/.dsh/.env) is ever read by the tests.
  * The map stays live: tests may add, change or delete files between calls.
+ * Keys and lookups are compared with `/` separators, so a POSIX path in a test
+ * also matches the `\\` form `node:path` builds on Windows (and vice versa).
  */
 export function fakeFs(files = {}) {
   const reads = []
+  const slash = path => String(path).replace(/\\/g, '/')
+  const keyOf = (path) => {
+    if (Object.hasOwn(files, path)) return path
+    return Object.keys(files).find(key => slash(key) === slash(path))
+  }
   const entry = (path) => {
-    if (!Object.hasOwn(files, path)) { const e = new Error(`ENOENT: ${path}`); e.code = 'ENOENT'; throw e }
-    const value = files[path]
+    const key = keyOf(path)
+    if (key === undefined) { const e = new Error(`ENOENT: ${path}`); e.code = 'ENOENT'; throw e }
+    const value = files[key]
     return typeof value === 'string' ? { text: value, mode: 0o100600 } : value
   }
   return {
@@ -102,9 +110,15 @@ export function fakeFs(files = {}) {
       if (e.error) { const err = new Error(`${e.error}: ${path}`); err.code = e.error; throw err }
       return { mode: e.mode ?? (e.dir ? 0o40755 : 0o100600), isFile: () => !e.dir }
     },
-    readFileSync(path) { reads.push(path); return entry(path).text },
+    readFileSync(path) { reads.push(slash(path)); return entry(path).text },
   }
 }
+
+/**
+ * resolveConfig() deps that see NO environment and NO file, so a real
+ * controller.env / DSH_HUB_* on the test machine cannot change the result.
+ */
+export const hermetic = (extra = {}) => ({ env: {}, fs: fakeFs(), homedir: () => '/home/u', platform: 'linux', ...extra })
 
 /** A client against a fake hub. `env` defaults to a valid token, `fs` to an empty fake. */
 export function makeClient(handler, options = {}) {

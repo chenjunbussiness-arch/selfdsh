@@ -1,5 +1,7 @@
 # 在自家电脑上 clone 作战室仓库
 
+> **2026-11-23 提示**：本文是旧版说明，以根目录 [CLONE.md](../CLONE.md) 为准；clone 之后怎么装见 [README.md](../README.md)。
+
 适用：macOS / Linux 的 bash。Windows 用户请用 **Git Bash** 执行同样的命令（路径里的 `$HOME` 同样可用）。
 仓库是私有仓，地址 `https://8.134.170.38:8444/dev/dsh-warroom.git`（Gitea `dev/dsh-warroom`），
 证书是自签的，认证用 **Gitea 用户名 + token**。

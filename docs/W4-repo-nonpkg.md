@@ -1,5 +1,7 @@
 # 作战室移植审计 · W4：插件仓库内、但不在插件包里的内容
 
+> **2026-11-23 提示**：本文写于 agent-hub / dsh-hub 加入之前（当时只有 4～5 个插件），部分数字和步骤已过时。仓库现状与安装步骤以根目录 [README.md](../README.md) 为准，全部文档目录见 [INDEX.md](INDEX.md)。
+
 > 审计对象：`/srv/workspace/deepseek-harness/dsh-router-b`
 > 审计方式：**严格只读**。未改任何脚本，未执行 `safe-build-host.sh` / `tsc` / `vite` / `pnpm build`，未重启 DSH。
 > 允许的写操作只有本文件。时间：2026-11-20 15:2x（Asia/Shanghai）。

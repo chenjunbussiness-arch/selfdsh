@@ -15,9 +15,10 @@
  * Only `http://` proxies are accepted (no https:// or SOCKS proxies). Plain
  * `http://` hub URLs (loopback only) never go through a proxy.
  *
- * Config value (`proxy` of the plugin):
- *   unset / '' / false / 'off'  -> direct
- *   'env'                       -> HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy (first set wins),
+ * Config value (`proxy` of the plugin, or DSH_HUB_PROXY in the environment /
+ * controller.env; same words as the worker's DSH_HUB_PROXY):
+ *   unset / '' / false / off / direct / none / no -> direct
+ *   'env' (or 'system')         -> HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy (first set wins),
  *                                  unless NO_PROXY / no_proxy matches the hub host
  *   'http://[user:pass@]host:port' -> always this proxy (NO_PROXY is not consulted)
  *
@@ -33,7 +34,8 @@ import { connect as tlsConnect } from 'node:tls'
 
 export const PROXY_ENV_KEYS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy']
 export const NO_PROXY_ENV_KEYS = ['NO_PROXY', 'no_proxy']
-const OFF = new Set(['', 'off', 'none', 'direct', 'false'])
+const OFF = new Set(['', 'off', 'none', 'direct', 'false', 'no'])
+const ENV = new Set(['env', 'system'])
 
 /** A tunnel failure: `stage` is proxy-connect | proxy-refused | tls | timeout. Message has no credentials. */
 export class TunnelError extends Error {
@@ -115,18 +117,19 @@ export function shouldBypass(noProxy, host, port) {
 }
 
 /**
- * Validate the `proxy` config value (no env lookup yet).
- * @returns {{ mode: 'direct' } | { mode: 'env' } | { mode: 'url', proxy: object } | { mode: 'invalid', problem: string }}
+ * Validate the `proxy` config value (no env lookup yet). `label` names where the
+ * value came from (config.proxy, DSH_HUB_PROXY ...) in problems and route sources.
+ * @returns {{ mode: 'direct' } | { mode: 'env' } | { mode: 'url', proxy: object, label: string } | { mode: 'invalid', problem: string }}
  */
-export function proxySetting(value) {
+export function proxySetting(value, label = 'config.proxy') {
   if (value === undefined || value === null || value === false) return { mode: 'direct' }
-  if (typeof value !== 'string') return { mode: 'invalid', problem: 'config.proxy must be an http:// URL, "env" or "off"' }
+  if (typeof value !== 'string') return { mode: 'invalid', problem: `${label} must be an http:// URL, "env" or "off"` }
   const v = value.trim()
   if (OFF.has(v.toLowerCase())) return { mode: 'direct' }
-  if (v.toLowerCase() === 'env') return { mode: 'env' }
+  if (ENV.has(v.toLowerCase())) return { mode: 'env' }
   const parsed = parseProxyUrl(v)
-  if (!parsed.ok) return { mode: 'invalid', problem: `config.proxy: ${parsed.problem}` }
-  return { mode: 'url', proxy: parsed }
+  if (!parsed.ok) return { mode: 'invalid', problem: `${label}: ${parsed.problem}` }
+  return { mode: 'url', proxy: parsed, label }
 }
 
 /**
@@ -135,7 +138,7 @@ export function proxySetting(value) {
  */
 export function resolveProxy(setting, target, env = {}) {
   if (target.protocol !== 'https:') return { source: 'direct (plain http hub on loopback is never proxied)' }
-  if (setting.mode === 'url') return { proxy: setting.proxy, source: 'config.proxy' }
+  if (setting.mode === 'url') return { proxy: setting.proxy, source: setting.label ?? 'config.proxy' }
   if (setting.mode !== 'env') return { source: 'direct' }
   const key = PROXY_ENV_KEYS.find(k => typeof env[k] === 'string' && env[k].trim() !== '')
   if (key === undefined) return { source: 'direct (proxy: env, but no HTTPS_PROXY / HTTP_PROXY set)' }

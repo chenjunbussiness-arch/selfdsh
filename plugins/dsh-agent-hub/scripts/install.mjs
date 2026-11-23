@@ -144,5 +144,11 @@ if (!uninstall) {
   const built = ['packages/client-ui-agent-hub/lib/client.js', 'packages/client-ui-agent-hub/lib/index.js']
     .filter(file => !existsSync(join(BUNDLE, file)))
   if (built.length > 0) console.warn(`warning: not built yet: ${built.join(', ')} (run \`node packages/client-ui-agent-hub/scripts/build-client.mjs\`)`)
-  console.log('\nNext: restart the service that owns this profile (the operator decides when), then check the log for\n  "agent-hub: mounted /api/agent-hub/v1/*", then open the "Agent 调度" row in the Sidebar.')
+  // Only existsSync: the controller file holds the token and is never read here.
+  const dshHome = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+  const controllerEnv = join(dshHome, 'agent-hub', 'controller.env')
+  if (!existsSync(controllerEnv)) {
+    console.log(`\n还没有控制方配置：把 ${join(BUNDLE, 'controller.env.example')}\n  复制到 ${controllerEnv}，填好 DSH_HUB_URL、DSH_HUB_CONTROLLER_ID、DSH_HUB_TOKEN（不要写进 ${join(dshHome, '.env')}）。`)
+  }
+  console.log('\nNext: restart the service that owns this profile (the operator decides when), then check the log for\n  "agent-hub: config hubUrl=..." and "agent-hub: mounted /api/agent-hub/admin/*", then try agent_list in DSH\n  and open the "Agent" tab of the task board.')
 }

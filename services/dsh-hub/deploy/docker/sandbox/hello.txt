@@ -1,0 +1,2 @@
+This folder is the demo workspace "sandbox" of the docker worker (mounted at /workspaces/sandbox).
+A task dispatched with workspace "sandbox" lists these files in its summary.md.

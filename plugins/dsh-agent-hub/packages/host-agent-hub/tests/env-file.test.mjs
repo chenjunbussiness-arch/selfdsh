@@ -93,3 +93,8 @@ test('readEnvFile: a directory or an unreadable file warns without values (and w
   assert.ok(!denied.warning.includes('secret'))
   assert.deepEqual(plain(denied.values), {})
 })
+
+test('parseEnvFile: `KEY=   # comment` is an empty value (controller.env.example style), not the comment text', () => {
+  const out = parseEnvFile('DSH_HUB_CAFILE=        # 自签证书时填 CA 路径\nDSH_HUB_TOKEN=# from controller add\nDSH_HUB_URL=https://8.134.170.38:7891   # MYDESK\n')
+  assert.deepEqual(plain(out), { DSH_HUB_CAFILE: '', DSH_HUB_TOKEN: '', DSH_HUB_URL: 'https://8.134.170.38:7891' })
+})

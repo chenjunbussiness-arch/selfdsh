@@ -1,4 +1,8 @@
-# dsh-agent-hub · DSH 作为 dsh-hub 的控制方
+# dsh-agent-hub · Agent 调度中心（DSH 作为 dsh-hub 的控制方）
+
+## 这是什么
+
+让 DSH 给外部 agent（AWS Quick、Claude Code、Kiro……）**派任务、看进度、收结果**。任务本身由服务器上独立运行的 **dsh-hub**（`services/dsh-hub`，端口 7891）保存和调度；这个插件只是 DSH 这一端的**控制方客户端**，每台跑 agent 的机器上再跑一个 worker 客户端 `scripts/agent_client.py`。
 
 协议：`dsh-agent/2.0`（接口契约见 [`docs/DSH-HUB-PROTOCOL-v2.md`](../../docs/DSH-HUB-PROTOCOL-v2.md)）。Node >= 22。
 
@@ -15,6 +19,114 @@ v1 时 hub 运行在 DSH web server 里；v2 把 hub 拆成**独立服务 dsh-hu
                     │                     dsh-hub ────┼── kiro-mydesk
   面板 ── DSH 登录 ── /api/agent-hub/admin/* ─┘          └── claude-cloud
 ```
+
+## 装好后在哪里看到
+
+- **任务板（router-b 右侧工作板）多一个「Agent」tab**：在线 agent、待审批的加入申请、任务列表和详情，只读。没装 router-b 时改为**左侧栏一行「Agent 调度」**，点开是整页。
+- **DSH 模型多 11 个工具**（只有 DSH 能调用）：`task_dispatch` / `task_list` / `task_get` / `task_cancel` / `task_retry`，`agent_list` / `agent_requests` / `agent_approve` / `agent_reject` / `agent_revoke` / `agent_provision`。
+- **DSH 启动日志**：`agent-hub: config hubUrl=https://8.134.170.38:7891 (C:\Users\<你>\.dsh\agent-hub\controller.env (DSH_HUB_URL)), controllerId=…`（每项后面括号里是它的来源） 和 `agent-hub: controller token from …`（只写来源，不写令牌）。
+
+## 快速上手（6 步）
+
+以 MYDESK 上的 DSH（控制方 `dsh-local`）连服务器 `8.134.170.38` 上的 hub 为例：
+
+1. **服务器上 hub 要先跑起来**：按 [`services/dsh-hub/README.md`](../../services/dsh-hub/README.md) 部署。在 MYDESK 上验证：
+   `curl -k https://8.134.170.38:7891/v1/health`（直连；不通再试 `curl -k -x http://127.0.0.1:7890 …` 走本机 Clash，7891 才是 hub）。
+2. **在服务器上签发控制方令牌**（只显示一次，马上复制）：
+   `node services/dsh-hub/server.mjs controller add dsh-local`　→　`dshc_dsh-local_…`
+3. **装插件**：`node plugins/dsh-agent-hub/scripts/install.mjs --profile <DSH profile 目录> --dry-run`，确认后去掉 `--dry-run` 再跑一次，然后重启 DSH 一次。
+4. **写配置**：把插件根目录的 [`controller.env.example`](controller.env.example) 复制成 `<DSH home>/agent-hub/controller.env`（MYDESK：`C:\Users\<你>\.dsh\agent-hub\controller.env`），**只需要填 `DSH_HUB_TOKEN`**，地址和控制方 id 已经按 MYDESK 填好，默认直连（`DSH_HUB_PROXY=off`）。改这个文件不用重启 DSH。
+   ⚠ 不要写进 `<DSH home>/.env`：那里出现 `DSH_` 开头的变量 DSH 会拒绝启动。
+5. **验证**：DSH 对话里让模型调 `agent_list`，或者打开任务板「Agent」tab，能看到统计就通了。报错看下面「常见问题」。
+6. **接入 worker**（每台跑 agent 的机器做一次，详见第 8 节）：
+   ```bash
+   python plugins/dsh-agent-hub/scripts/agent_client.py init       # 写 <DSH home>/worker/.env、profile.json，并建好交换目录 E:/dsh-exchange
+   python plugins/dsh-agent-hub/scripts/agent_client.py check      # 能否连到 hub（默认直连），hub 看到的 IP
+   python plugins/dsh-agent-hub/scripts/agent_client.py register   # 申请加入，然后在 DSH 里 agent_requests → agent_approve
+   python plugins/dsh-agent-hub/scripts/agent_client.py run        # 常驻：心跳 + 收任务（AWS Quick 用定时 bridge --once）
+   ```
+   **交换目录一开始是空的，这是正常的**：要等 register 被批准、run 在跑、DSH 用 `task_dispatch` 派了任务，`inbox/` 里才会出现任务。
+
+## 必须配置
+
+一共涉及 3 个文件，**都不入库**（里面有令牌或本机路径）：
+
+| 文件 | 在哪台机器 | 键 | 必填 | 含义 | 示例（MYDESK） | 不配 / 默认 |
+|---|---|---|---|---|---|---|
+| `<DSH home>/agent-hub/controller.env`（模板 `controller.env.example`） | 跑 DSH 的机器 | `DSH_HUB_URL` | ✅ | hub 地址；裸 IP 自动补成 `https://IP:7891` | `https://8.134.170.38:7891` | 工具和面板报 `hub-not-configured` |
+| 同上 | | `DSH_HUB_CONTROLLER_ID` | ✅ | 本 DSH 的控制方 id，和第 2 步 `controller add` 的一致 | `dsh-local`（服务器同机 DSH 用 `dsh-cloud`） | `hub-not-configured` |
+| 同上 | | `DSH_HUB_TOKEN` | ✅ | 控制方令牌 `dshc_<id>_…` | 第 2 步得到的令牌 | `hub-token-missing` |
+| 同上 | | `DSH_HUB_PROXY` | 可选 | 怎么连 hub：`off` 直连 / `env` 用环境变量 / `http://host:port` 代理 | `off`；直连不通时 `http://127.0.0.1:7890` | 直连 |
+| 同上 | | `DSH_HUB_CAFILE` | 自签证书时必填 | hub 证书或 CA 的 PEM 路径 | 留空（正规证书） | 系统 CA；自签却不填 → `hub-unreachable`（TLS） |
+| `<DSH home>/worker/.env`（模板 `scripts/worker.env.example`，`init` 生成） | 每台 worker 机器 | `DSH_HUB_URL` | ✅ | 同上 | `https://8.134.170.38:7891` | `check` / `register` / `run` 报错 |
+| 同上 | | `DSH_AGENT_ID` | ✅ | worker 名，`^[a-z][a-z0-9-]{1,47}$` | `quick-mydesk` | `register` 报错 |
+| 同上 | | `DSH_HUB_PROXY` | 可选 | 同上 | `off`（模板默认） | `env`（读 HTTPS_PROXY / 系统代理） |
+| 同上 | | `DSH_EXCHANGE` | 建议 | 交换目录 | `E:/dsh-exchange` | worker 目录下的 `exchange/` |
+| 同上 | | `DSH_PLATFORM` / `DSH_CAPABILITIES` / `DSH_NODE` | 建议 | 平台、能力（给 `pool:<capability>` 抢单用）、机器名 | `aws-quick` / `code,document` / `mydesk` | `custom` / 无 / 主机名 |
+| `<DSH home>/worker/profile.json`（模板 `scripts/profile.example.json`） | 每台 worker 机器 | `workspaces` | 派 `code` 任务时必填 | 工作区名 → 本机路径（名字和 router-b 一致） | `{"deepseek-harness": "E:/PythonProject/dsh-warroom"}` | 没映射的工作区任务直接失败 `WORKSPACE_MISSING` |
+
+- `<DSH home>` = 环境变量 `DSH_HOME`，没设就是 `~/.dsh`（Windows：`C:\Users\<你>\.dsh`）。
+- 优先级：controller 端 `cordis.patch.yml` 显式写的 > 进程环境变量 > `controller.env` > 默认；worker 端 命令行 > 进程环境变量 > `worker/.env` > `profile.json` > 默认。
+- hub 自己的配置（端口、TLS 证书、IP 白名单 `allow`）在服务器的 `<DSH home>/agent-hub/hub.json`，见 [`services/dsh-hub/README.md`](../../services/dsh-hub/README.md)。worker `check` 打印的出口 IP 要在 `allow` 里。
+
+## 可选配置
+
+只在 profile 层 `cordis.patch.yml` 的 `host-agent-hub.config` 里设置，一般不用动：
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `timeoutMs` | `15000` | 单次请求 hub 的超时，1000..120000 |
+| `tokenEnv` | `DSH_HUB_TOKEN` | 令牌的变量名 |
+| `envFile` | `<DSH home>/agent-hub/controller.env` | 换配置文件位置；**绝不能**指向 `<DSH home>/.env` |
+| `hubUrl` / `controllerId` / `proxy` / `caFile` | 不写 | 写了就覆盖 `controller.env` 里对应的项（日志会提醒）；bundle 自带的配置故意不写 |
+
+worker 端其余可选项（`DSH_MAX_CONCURRENCY`、`DSH_HEARTBEAT_SECONDS`、`DSH_AGENT_TOKEN_FILE`、`profile.json` 的 `dshProfile`）见 `python agent_client.py --help` 和第 8 节。
+
+### 选 worker、档位和 agent（runtime / effort）
+
+每个 worker 注册时会声明 `runtime`：它支持哪些档位（fast / balanced / smart）、哪些思考强度、每种任务类型的默认强度，以及这个平台上能点名的 agent。DSH 里 `agent_requests`（审批时）和 `agent_list` 都能看到。派任务时用 `effort` 指定：
+
+```
+task_dispatch: agent = quick-mydesk, type = code, workspace = deepseek-harness,
+               effort = { mode: "smart", thinking: "medium", agent: "quick" }
+```
+
+| `mode` | 适合 | `thinking` |
+|---|---|---|
+| `fast` | 简单查询、小文档、定时接单 | 不能设（fast 没有思考） |
+| `balanced` | 大多数文档、调研、一般代码 | `off` / `low` / `medium` / `high` |
+| `smart` | 复杂编程、难的推理 | 同上 |
+
+- 不写 `effort`：用 worker 自己的默认值（AWS Quick：`code` 用 smart + medium，`review` 用 smart + low，其他用 balanced + low）。
+- worker 不支持的组合直接返回 409 `unsupported-effort`，并说明它支持什么；派给 `pool:<能力>` 时只交给支持的 worker。
+- `effort.agent` 用来指定平台上的具体 agent，名字必须在 worker 的 `runtime.agents` 里。以后接入更多平台（Claude Code、Kiro……），各自声明自己的 agents，DSH 就能统一按 agent 和档位分配。
+- worker 端在 `profile.json` 里写 `runtime` 覆盖内置值，例如 `"runtime": {"modes": ["fast", "balanced", "smart"], "agents": [{"name": "quick", "description": "默认"}]}`；写 `null` 表示不声明。改完下一次心跳就会同步到 hub，不需要重新注册。
+- 详细规则见协议第 10 节。**需要新版 hub**（`docker compose up -d --build hub`）；旧版 hub 会忽略 runtime，effort 只通过 `context.effort` 带给 worker，不做检查。
+
+### 容器里的 worker 读取本机 profile（`DSH_PATH_MAP`）
+
+注册时上报的工作区来自 worker 的 `profile.json`（显式的 `workspaces` + `dshProfile` 里 router-b 的分区）。worker 跑在 Docker 里时，这些路径是 Windows 路径，容器里不存在，会被当成“不存在”丢掉。设置 `DSH_PATH_MAP` 把宿主路径前缀换成容器里的挂载点，就能直接用宿主那份 profile：
+
+```yaml
+DSH_PATH_MAP: E:/PythonProject=/host/e/PythonProject;${USERPROFILE}/.dsh/profiles/desktop=/host/dsh-profile
+```
+
+多条用 `;` 分隔，最长前缀优先，盘符不分大小写，`\` 和 `/` 等价。`task.json` 里 `workspace_path` 是容器里的路径，`workspace_host_path` 是宿主上的原路径（AWS Quick 用它读写）。示例见 `services/dsh-hub/deploy/docker/docker-compose.yml` 的 `worker-quick`。注意：注册时 hub 只批准了申请里的工作区，之后 profile 里新增的工作区会在 `status` 里显示为 ignored，要重新申请（`agent_revoke` 后容器会自动重新 `register`）。
+
+## 常见问题
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| `hub-not-configured` | `controller.env` 不在 `<DSH home>/agent-hub/` 下，或 `DSH_HUB_URL` / `DSH_HUB_CONTROLLER_ID` 没填。日志 `agent-hub: config …` 会写出每项来自哪里 |
+| `hub-token-missing` / `hub-token-mismatch` | 没填 `DSH_HUB_TOKEN`，或令牌不是 `dshc_<controllerId>_` 开头（拿了别的控制方或 worker 的令牌） |
+| `hub-unreachable` | hub 没运行 / 自签证书没配 `DSH_HUB_CAFILE` / 直连不通（改 `DSH_HUB_PROXY=http://127.0.0.1:7890` 试试）/ 配了代理但代理没开。message 写明是哪一步失败 |
+| `hub-unauthorized` | hub 不认这个控制方令牌（填错、控制方被删、令牌已轮换）：在服务器上为这个控制方重新签发令牌，更新 `controller.env` 里的 `DSH_HUB_TOKEN`（不用重启） |
+| DSH 启动失败，提示 `.env sets "DSH_…"` | 把 `DSH_` 开头的行从 `<DSH home>/.env` 挪到 `<DSH home>/agent-hub/controller.env` |
+| 交换目录（如 `E:\dsh-exchange`）是空的 / 不存在 | 正常。目录由 `agent_client.py init` / `run` 创建；任务要等 register 被批准、`run` 在跑、DSH 派了任务才会出现。`python agent_client.py status` 看 hub 眼里的本机状态 |
+
+---
+
+# 参考
 
 ## 1. 目录
 
@@ -43,22 +155,25 @@ node plugins/dsh-agent-hub/scripts/install.mjs --profile /root/.dsh/profiles/web
 #      node services/dsh-hub/server.mjs controller add dsh-cloud
 # 2) 把令牌放进 DSH 服务的环境变量，或者写进 <DSH home>/agent-hub/controller.env（chmod 600，见第 3.2 节）
 #    ⚠ 不要写进 <DSH home>/.env：DSH 不允许那里出现 DSH_ 开头的变量，会拒绝启动
-# 3) 确认 cordis.patch.yml 里的 hubUrl / controllerId 正确，然后由运维决定何时重启。日志里应该能看到：
+# 3) hubUrl / controllerId / proxy / caFile 也写在 controller.env（DSH_HUB_URL 等，见上面「必须配置」），cordis.patch.yml 里不用写。
+#    第一次装插件要重启 DSH 一次（由运维决定何时）；之后改 controller.env 不用重启。日志里应该能看到：
 #      agent-hub: controller token from environment variable DSH_HUB_TOKEN   （或 from /root/.dsh/agent-hub/controller.env (DSH_HUB_TOKEN)）
 #      agent-hub: mounted /api/agent-hub/admin/* (login, read-only, forwarded to the hub)
 #      agent-hub: 11 control tools registered (agent_*, task_*); controller of https://127.0.0.1:7891 as dsh-cloud
-#      （MYDESK 上的 dsh-local：controller of https://hub.example:7891 as dsh-local via proxy http://127.0.0.1:7890）
+#      （MYDESK 上的 dsh-local：controller of https://8.134.170.38:7891 as dsh-local via proxy http://127.0.0.1:7890）
 ```
 
 配置或令牌缺失时，插件**照常加载**，日志中会给出 warning；此时每个工具调用和面板请求都会返回明确的错误码（`hub-not-configured` / `hub-token-missing`），不会导致 DSH 启动失败。
 
 ## 3. 配置与令牌
 
-### 3.1 配置项（`cordis.patch.yml` → `host-agent-hub.config`）
+### 3.1 配置项细节（`controller.env` 或 `cordis.patch.yml` → `host-agent-hub.config`）
+
+`hubUrl` / `controllerId` / `caFile` / `proxy` 平时写在 `<DSH home>/agent-hub/controller.env`，键名分别是 `DSH_HUB_URL` / `DSH_HUB_CONTROLLER_ID` / `DSH_HUB_CAFILE` / `DSH_HUB_PROXY`。每一项单独决定来源：`cordis.patch.yml` 里显式写的 > DSH 进程环境变量 > `controller.env` > 默认值；被 `cordis.patch.yml` 盖掉时日志会提醒。`timeoutMs` / `tokenEnv` / `envFile` 只能在 `cordis.patch.yml` 里设置。
 
 | 键 | 含义 | 默认值 |
 |---|---|---|
-| `hubUrl` | hub 的基础地址。远程 hub 用 `https://<hub-host>:7891`；只有 `127.0.0.1` / `localhost` / `[::1]` 才允许用 `http://`（没有配置 TLS 的 hub 只监听回环地址）。地址里不能带用户名密码、query 或 fragment；可以带路径前缀（`https://proxy/hub` 会请求 `/hub/v1/ctl/...`）。 | 无（必填）；样例里写的是 `https://127.0.0.1:7891`，适用于 hub 和 DSH 在同一台机器（dsh-cloud）。hub 配了 TLS 后只提供 https，所以同机也要用 https 并配 `caFile`（证书 SAN 要包含 127.0.0.1）；只有 hub 不配 TLS、只监听回环时才用 `http://` |
+| `hubUrl` | hub 的基础地址。远程 hub 用 `https://<hub-host>:7891`；只有 `127.0.0.1` / `localhost` / `[::1]` 才允许用 `http://`（没有配置 TLS 的 hub 只监听回环地址）。地址里不能带用户名密码、query 或 fragment；可以带路径前缀（`https://proxy/hub` 会请求 `/hub/v1/ctl/...`）。 | 无（必填）。MYDESK：`https://8.134.170.38:7891`（裸写 `8.134.170.38` 会自动补全）；hub 和 DSH 在同一台机器（dsh-cloud）时用 `https://127.0.0.1:7891`。hub 配了 TLS 后只提供 https，所以同机也要用 https 并配 `caFile`（证书 SAN 要包含 127.0.0.1）；只有 hub 不配 TLS、只监听回环时才用 `http://` |
 | `controllerId` | 这个 DSH 在 hub 上的控制方 id，需匹配 `/^[a-z][a-z0-9-]{1,47}$/`，例如 `dsh-cloud`、`dsh-local`。每个请求都会带上 `?id=<controllerId>`。 | 无（必填） |
 | `caFile` | hub 证书（自签）或其 CA 的 PEM 文件。配置后它是验证 hub 证书的**唯一**信任根；不配置时使用系统 CA。只对 `https://` 生效。 | 不设置 |
 | `timeoutMs` | 单次请求 hub 的超时时间，取值为 1000..120000 的整数。配置非法时给出 warning 并使用默认值。 | `15000` |
@@ -195,12 +310,12 @@ node --test packages/host-agent-hub/tests/*.test.mjs
 
 worker 目录固定是 `<DSH home>/worker/`（DSH home = `$DSH_HOME` 或 `~/.dsh`），里面放 `.env`、`profile.json` 和令牌文件。完整的配置项和优先级（命令行 > 进程环境变量 > `worker/.env` > `profile.json` > 默认值）见 `python agent_client.py --help`，状态机见协议第 9 节。
 
-1. **生成模板**：`python plugins/dsh-agent-hub/scripts/agent_client.py init`（已存在的文件不会覆盖），会打印下一步。
+1. **生成模板**：`python plugins/dsh-agent-hub/scripts/agent_client.py init`（已存在的文件不会覆盖），同时按 `DSH_EXCHANGE` 建好交换目录（`inbox` / `working` / `outbox` / `failed` / `archive` + `README.md`；`--exchange <目录>` 换位置，`--no-exchange` 不建），会打印下一步。
 2. **填 `.env` 和 `profile.json`**（样例 `scripts/worker.env.example`、`scripts/profile.example.json`）：
 
    ```dotenv
    # C:/Users/<you>/.dsh/worker/.env（MYDESK）
-   DSH_HUB_URL=https://<server>:7891
+   DSH_HUB_URL=https://8.134.170.38:7891
    DSH_HUB_PROXY=http://127.0.0.1:7890     # 本机 Clash/mihomo；off = 直连；env = 系统 / 环境变量代理
    DSH_HUB_CAFILE=                          # 自签证书时填 CA 路径
    DSH_AGENT_ID=quick-mydesk

@@ -1,5 +1,7 @@
 # 作战室移植手册（W6 合成版）
 
+> **2026-11-23 提示**：本文写于 agent-hub / dsh-hub 加入之前（当时只有 4～5 个插件），部分数字和步骤已过时。仓库现状与安装步骤以根目录 [README.md](../README.md) 为准，全部文档目录见 [INDEX.md](INDEX.md)。
+
 > 对象：DSH（DeepSeek Harness）0.2.2-rc.5 + 插件仓 `dsh-router-b`、`dsh-egress`、`dsh-vpn`、`dsh-token-stats`，GUI 链路 `浏览器 → nginx :8443（TLS + basic auth）→ gate 127.0.0.1:42444 → DSH 127.0.0.1:42443`。
 > 来源：W1（运行时配置）、W2（系统侧）、W3（环境与插件注册）、W4（仓内非包内容）、W5（数据源与硬编码路径）五份实测报告，路径都在 本目录（`docs/`）。
 > W6 只做合成。为裁决冲突补跑过几条只读命令，结果标为「W6 复核」。全程没有修改任何被审计的文件。

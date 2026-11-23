@@ -87,16 +87,31 @@ dsh-web 已经重启。继续验证 agent-hub，用中文汇报，红线同上�
 1. journalctl -u dsh-web -n 200 --no-pager | grep -i agent-hub：应看到 11 control tools registered、controller of https://127.0.0.1:7891 as dsh-cloud；没有 hub-token-missing / hub-unreachable。
 2. 调用工具 agent_list、agent_requests、task_list，把结果给我（应该都是空的，但不能报错）。
 3. 派一个测试任务：task_dispatch {agent: "pool:document", type: "document", title: "连通测试", instruction: "回复 ok"}，应返回 warnings: ["no-online-worker"]（还没有 worker 在线）。然后 task_cancel 掉它。
-4. 打开 Web 界面的右侧任务板，确认「现在 / 已结束 / 工作区」后面出现「Agent」标签（你看不到界面的话就跳过，告诉我去看）。
-5. 更新 /root/.dsh/agent-hub/DEPLOY-REPORT.md 的验证部分。
+4. 验证任务强度：task_dispatch {agent: "pool:document", type: "document", title: "强度测试", instruction: "回复 ok", effort: {mode: "fast", thinking: "high"}} 应返回 400 bad-task（fast 没有思考）；改成 effort: {mode: "smart", thinking: "medium"} 应正常入队（warnings: ["no-online-worker"]），然后 task_cancel 掉。
+5. 打开 Web 界面的右侧任务板，确认「现在 / 已结束 / 工作区」后面出现「Agent」标签（你看不到界面的话就跳过，告诉我去看）。
+6. 更新 /root/.dsh/agent-hub/DEPLOY-REPORT.md 的验证部分。
+```
+
+---
+
+## 升级：已部署的服务器加上 runtime / effort（协议第 10 节）
+
+```text
+把服务器上的 dsh-hub 和 agent-hub 插件升级到支持 worker runtime 和任务 effort 的版本。用中文汇报，不打印任何令牌。
+1. cd $REPO && git pull（或按我给的方式同步代码），记下前后 commit。
+2. 跑测试，全部通过才继续：
+   cd $REPO/services/dsh-hub && node --test tests/*.test.mjs（必须包含 tests/runtime.test.mjs）
+   cd $REPO/plugins/dsh-agent-hub && node --test packages/host-agent-hub/tests/*.test.mjs
+3. systemctl restart dsh-hub，curl --cacert <CA> https://127.0.0.1:7891/v1/health 应返回 ok。
+4. 停下，告诉我「可以重启 dsh-web 了」。我重启后你再：调用 agent_list，确认每个 worker 多了 runtime 字段（没声明的 worker 没有这个字段，正常）；按第二轮第 4 步验证 effort。
 ```
 
 ---
 
 ## 之后在 MYDESK 上做（不是给 dsh 的）
 
-1. Clash 规则靠前加：`- IP-CIDR,<服务器公网IP>/32,<固定节点名>`（不要 DIRECT）。
+1. 默认直连，不用改 Clash。只有直连不通、或 hub 拒绝了本机 IP 时，才在 Clash 规则靠前加 `- IP-CIDR,<服务器公网IP>/32,<固定节点名>`，并在 `.env` 里设 `DSH_HUB_PROXY=http://127.0.0.1:7890`。
 2. 把服务器上的 CA 文件拷到 `C:\Users\<你>\.dsh\worker\hub-ca.pem`；`dsh-local.token` 拷到本地 dsh 能读的地方（不要放进 Quick 能访问的文件夹）。
-3. `python agent_client.py init`，在 `.env` 填 `DSH_HUB_URL=https://<服务器公网IP>:7891`、`DSH_HUB_PROXY=http://127.0.0.1:7890`、`DSH_HUB_CAFILE=C:/Users/<你>/.dsh/worker/hub-ca.pem`。
+3. `python agent_client.py init`，在 `.env` 填 `DSH_HUB_URL=https://<服务器公网IP>:7891`、`DSH_HUB_PROXY=off`（直连；不通再换成 `http://127.0.0.1:7890`）、`DSH_HUB_CAFILE=C:/Users/<你>/.dsh/worker/hub-ca.pem`。
 4. `python agent_client.py check` → 被 403 挡住时记下 `client_ip`，让云端 dsh 把它加进 hub.json 的 `allow` 并 `systemctl restart dsh-hub`，再 check 一次。
-5. `python agent_client.py register` → 在 dsh 里 `agent_requests` / `agent_approve` → `python agent_client.py run`。
+5. `python agent_client.py register` → 在 dsh 里 `agent_requests`（能看到 worker 声明的 runtime：档位、思考强度、可点名的 agent）/ `agent_approve` → `python agent_client.py run`。worker 的 runtime 写在 `profile.json`（不写就用平台内置值），改了下一次心跳自动同步。

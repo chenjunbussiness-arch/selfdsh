@@ -281,3 +281,23 @@
     passphraseEnv: DSH_SECRETS_PASSPHRASE   # 口令变量名
     envFile: /root/.dsh/secrets.env         # 口令所在的 dotenv 文件（不能是 /root/.dsh/.env）；false = 只看进程环境
     # keyfilePath: /root/.dsh/secrets.key   # keySource=keyfile 时启用，权限 600
+
+# ── dsh-agent-hub：本机作为 dsh-hub 的控制方（dsh-cloud）──────────────────────
+# 地址、控制方 id、令牌都不写在这里，统一放在 /root/.dsh/agent-hub/controller.env（chmod 600）：
+#   install -d -m 700 /root/.dsh/agent-hub
+#   install -m 600 /dev/null /root/.dsh/agent-hub/controller.env
+#   这台服务器（hub 同机）的内容：
+#     DSH_HUB_URL=https://127.0.0.1:7891              # 同机直连 hub；证书 SAN 要含 127.0.0.1
+#     DSH_HUB_CONTROLLER_ID=dsh-cloud
+#     DSH_HUB_PROXY=off                               # 同机不走代理
+#     DSH_HUB_CAFILE=/root/.dsh/agent-hub/hub-ca.pem  # hub 证书（自签）或其 CA，换成实际路径
+#     DSH_HUB_TOKEN=dshc_dsh-cloud_...                # hub 机器上 node server.mjs controller add dsh-cloud 签发，只显示一次
+# 下面的 config 故意不写 hubUrl / controllerId：写了会盖过 controller.env 里的值。
+# ⚠ 不要写进 /root/.dsh/.env：DSH 不允许那里出现任何 DSH_ 开头的变量，会拒绝启动。
+# 详见 plugins/dsh-agent-hub/README.md；改 controller.env 后按该 README 说明决定是否重启 dsh-web。
+- id: host-agent-hub
+  name: dsh-host-agent-hub
+  config:
+    timeoutMs: 15000
+    tokenEnv: DSH_HUB_TOKEN
+    envFile: /root/.dsh/agent-hub/controller.env    # 控制方配置文件（不能是 /root/.dsh/.env）

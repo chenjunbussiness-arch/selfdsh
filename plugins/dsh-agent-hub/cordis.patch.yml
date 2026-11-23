@@ -26,93 +26,70 @@
 # ---------------------------------------------------------------------------------------
 # config (host-agent-hub)
 #
-#   hubUrl        Base URL of the hub. https://<hub-host>:7891 for a remote hub;
-#                 http:// is accepted ONLY for 127.0.0.1 / localhost / [::1] (a hub
-#                 without TLS only listens on loopback). No credentials, query or
-#                 fragment. A path prefix is kept (https://proxy/hub -> /hub/v1/ctl/...).
-#                 Default: none (required). Example below: hub on this same machine.
-#   controllerId  This DSH's controller id on the hub, /^[a-z][a-z0-9-]{1,47}$/,
-#                 e.g. dsh-cloud or dsh-local. Sent as ?id=<controllerId> on every
-#                 request. Default: none (required).
-#   caFile        PEM file of the hub's (self-signed) certificate or its CA. When set,
-#                 it is the ONLY trust anchor for the hub (passed as `ca` to
-#                 node:https request); when unset, the system CAs are used.
-#                 Only for https:// hubUrl. Default: unset.
-#   timeoutMs     Per-request timeout towards the hub, integer 1000..120000.
-#                 Default: 15000 (an invalid value warns and uses the default).
-#   tokenEnv      NAME of the variable holding the controller token, used both for the
-#                 process environment and for the .env file. Default: DSH_HUB_TOKEN.
-#   envFile       .env-format file read when the process environment has no <tokenEnv>.
-#                 Default: <DSH home>/agent-hub/controller.env, where DSH home =
-#                 $DSH_HOME or ~/.dsh (e.g. /root/.dsh/agent-hub/controller.env,
-#                 C:\Users\<you>\.dsh\agent-hub\controller.env).
-#                 WARNING: never put DSH_HUB_TOKEN (or ANY DSH_* variable) into
-#                 <DSH home>/.env. That file is DSH's own credential file and DSH
-#                 REFUSES TO START when it sets a DSH_* variable ("only the launching
-#                 environment may set ..."). 不要把 DSH_ 开头的变量写进 <DSH home>/.env，
-#                 DSH 会拒绝启动。If envFile points at <DSH home>/.env and tokenEnv starts
-#                 with DSH_, the plugin does not read it and logs a migration warning.
-#   proxy         How this DSH reaches an https:// hub. Node's https.request ignores
-#                 HTTPS_PROXY, so the plugin opens the tunnel itself: CONNECT <hub>:<port>
-#                 on the proxy, then TLS to the hub (hostname checked, caFile applies)
-#                 inside it. The token travels only inside that TLS tunnel.
-#                   unset / off    direct connection (DEFAULT)
-#                   http://h:p     always this HTTP proxy; http://user:pass@h:p sends
-#                                  Proxy-Authorization: Basic (credentials are never
-#                                  logged or shown in errors). Only http:// proxies, no SOCKS.
-#                   env            HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy (first
-#                                  set wins, read on every call), unless NO_PROXY / no_proxy
-#                                  matches the hub host (comma separated: host, .suffix,
-#                                  *.suffix, host:port, or * for everything; no CIDR).
-#                 Examples: dsh-local on MYDESK -> proxy: http://127.0.0.1:7890 (Clash /
-#                 mihomo; the server only accepts outside traffic, so the hub address must
-#                 go through a fixed proxy node in Clash, see docs/DSH-HUB-PROTOCOL-v2.md
-#                 section 8); dsh-cloud on the hub machine -> hubUrl https://127.0.0.1:7891 + caFile (http:// only when the hub runs without TLS),
-#                 no proxy (an http:// loopback hub is never proxied; a proxy set there
-#                 is ignored with a warning). Proxy down / CONNECT refused / TLS failure
-#                 / timeout -> 503 hub-unreachable naming the failed step.
+# 默认什么都不用在这里写：连接配置全部放在 <DSH home>/agent-hub/controller.env
+# （DSH home = $DSH_HOME 或 ~/.dsh，例如 C:\Users\<you>\.dsh\agent-hub\controller.env、
+# /root/.dsh/agent-hub/controller.env），换机器只改这一个文件。模板见插件根目录的
+# controller.env.example。controller.env 每次调用都重新读取，改完不用重启 DSH。
 #
-# Controller token (dshc_<controllerId>_<random>), looked up on EVERY call, so a rotated
-# token is picked up without a restart:
-#   1. process environment variable <tokenEnv>                  (wins if non-empty)
-#   2. the <tokenEnv>=... line of <envFile>                     (fallback)
-#   Neither found -> the plugin still loads, logs a warning, and every tool / panel call
-#   answers hub-token-missing. A token of another controller -> hub-token-mismatch.
-#   Issue it ON THE HUB MACHINE (shown once):  node server.mjs controller add dsh-cloud
-#   The token is sent only in the X-DSH-Token header, never in the URL, and is never
-#   written to logs, tool outputs or panel responses (only its source is logged).
+#   setting        controller.env / 环境变量     含义                                   默认
+#   hubUrl         DSH_HUB_URL                 hub 地址；裸地址 8.134.170.38 会补成        无（必填）
+#                                              https://8.134.170.38:7891；http:// 只允许
+#                                              127.0.0.1 / localhost / [::1]；不能带账号密码、
+#                                              query、fragment；结尾的 /v1 会被去掉
+#   controllerId   DSH_HUB_CONTROLLER_ID       本 DSH 在 hub 上的控制方 id，                无（必填）
+#                                              /^[a-z][a-z0-9-]{1,47}$/，如 dsh-local / dsh-cloud
+#   proxy          DSH_HUB_PROXY               off/direct/none = 直连；env = 用 HTTPS_PROXY 等  直连
+#                                              环境变量；http://host:port = 固定 HTTP 代理
+#                                              （MYDESK: http://127.0.0.1:7890，Clash/mihomo）
+#   caFile         DSH_HUB_CAFILE              自签证书时 hub 证书 / CA 的 PEM 路径           系统 CA
+#   (token)        DSH_HUB_TOKEN               控制方令牌，在 hub 机器上                     无
+#                                              node server.mjs controller add <controllerId>
 #
-# .env format (one KEY=value per line; no third-party parser):
-#     # dsh-hub controller token for this DSH      <- comment line
-#     DSH_HUB_TOKEN=dshc_dsh-cloud_xxxxxxxxxxxxxxxx
-#     export DSH_HUB_TOKEN="dshc_dsh-cloud_xxxx"    # `export ` prefix ignored, '...' or "..." optional
-#   - blank lines and lines starting with # are ignored; ` #` after an unquoted value
-#     starts a comment; quoted values are literal; malformed lines are skipped;
-#     the last definition of a key wins;
-#   - a missing file is skipped silently;
-#   - permissions: the file holds a secret. POSIX: chmod 600 <envFile> (owner
-#     read/write only), e.g.
-#         install -d -m 700 /root/.dsh/agent-hub
-#         install -m 600 /dev/null /root/.dsh/agent-hub/controller.env
-#     a file readable by group or others is still used but logs a warning.
-#     Windows: keeping it under your user profile (C:\Users\<you>\.dsh\agent-hub\)
-#     is enough (the default ACL is owner-only).
-#   - the file must NOT be <DSH home>/.env (see envFile above).
+# 优先级（每一项单独计算，启动日志里会写出每项来自哪里，令牌只写来源不写值）：
+#   1. 本文件 / profile 层 cordis.patch.yml 里显式写的 config
+#   2. DSH 进程的环境变量（DSH_HUB_URL ...）
+#   3. envFile（默认 <DSH home>/agent-hub/controller.env）
+#   4. 默认值
+# 如果这里写了某一项，controller.env 里同名的那一项就不再生效，日志会提醒
+# “controller.env 里的 X 被 cordis.patch.yml 覆盖了”。所以本 bundle 层故意不写
+# hubUrl / controllerId。
 #
-# v1 keys (dataDir, publicUrl, offlineAfterMs, sweepIntervalMs, maxRetries,
-# maxPendingRequests, maxResultBytes) are ignored with a warning: they now live in the
-# hub's own <DSH home>/agent-hub/hub.json on the hub machine.
+# 只有在确实需要时，才在 profile 层的 cordis.patch.yml 里覆盖，例如：
+#   - id: host-agent-hub
+#     config:
+#       hubUrl: https://127.0.0.1:7891      # 盖过 controller.env 的 DSH_HUB_URL
+#       controllerId: dsh-cloud
+#
+# 其余只能在这里设置的键（都有默认值）：
+#   timeoutMs     每个请求的超时，整数 1000..120000。默认 15000（非法值告警后用默认）。
+#   tokenEnv      令牌变量名（同时用于进程环境和 envFile）。默认 DSH_HUB_TOKEN。
+#   envFile       .env 格式的配置文件。默认 <DSH home>/agent-hub/controller.env。
+#                 警告：永远不要指向 <DSH home>/.env，也不要把任何 DSH_ 开头的变量写进
+#                 <DSH home>/.env —— 那是 DSH 自己的凭据文件，出现 DSH_ 变量 DSH 会拒绝启动。
+#                 envFile 指向它时插件不会从中读取任何 DSH_ 变量，并在日志里提示迁移。
+#
+# 代理细节：Node 的 https.request 不读 HTTPS_PROXY，所以插件自己先对代理发
+# CONNECT <hub>:<port>，再在隧道里和 hub 做 TLS（校验主机名，caFile 生效），令牌只在
+# 这条 TLS 隧道里传输。只支持 http:// 代理（http://user:pass@h:p 会发 Basic 认证，凭据
+# 不进日志），不支持 SOCKS。服务器只接受外网流量，所以 MYDESK 上 hub 地址必须在 Clash 里
+# 走固定代理节点（docs/DSH-HUB-PROTOCOL-v2.md 第 8 节）。http:// 回环 hub 永不走代理。
+# 代理不通 / CONNECT 被拒 / TLS 失败 / 超时 -> 503 hub-unreachable，并写明哪一步失败。
+#
+# .env 格式：每行 KEY=value；# 开头是注释；支持 export 前缀和 '...' / "..." 引号；未加引号
+# 的值里“空格+#”之后是注释；KEY= 留空等于没配；同名键以最后一行为准；文件不存在则跳过。
+# 权限：文件里有令牌。POSIX: chmod 600；Windows 放在自己的用户目录下即可。
+#
+# v1 的键（dataDir, publicUrl, offlineAfterMs, sweepIntervalMs, maxRetries,
+# maxPendingRequests, maxResultBytes）会被忽略并告警：它们现在属于 hub 机器上的
+# <DSH home>/agent-hub/hub.json。
 
 - insert:
     - id: host-agent-hub
       name: dsh-host-agent-hub
       config:
-        hubUrl: https://127.0.0.1:7891  # dsh-cloud next to a TLS hub (cert SAN must include 127.0.0.1; http:// only if the hub has no TLS); remote hub: https://<hub-host>:7891 (+ caFile if self-signed)
-        controllerId: dsh-cloud         # dsh-local on the workstation
-        # caFile: /root/.dsh/agent-hub/hub-ca.pem
+        # hubUrl / controllerId / proxy / caFile 故意不写：从 <DSH home>/agent-hub/controller.env 读取
         timeoutMs: 15000
         tokenEnv: DSH_HUB_TOKEN
-        # envFile: /root/.dsh/agent-hub/controller.env  # default: <DSH home>/agent-hub/controller.env (NEVER <DSH home>/.env)
-        # proxy: http://127.0.0.1:7890  # dsh-local on MYDESK (Clash/mihomo); default: unset = direct; or: env
+        # envFile: /root/.dsh/agent-hub/controller.env  # 默认就是 <DSH home>/agent-hub/controller.env（绝不能是 <DSH home>/.env）
     - id: client-ui-agent-hub
       name: dsh-client-ui-agent-hub

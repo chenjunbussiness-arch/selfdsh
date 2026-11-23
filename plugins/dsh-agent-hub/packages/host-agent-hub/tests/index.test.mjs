@@ -25,7 +25,17 @@ function withToken(t, value) {
   })
 }
 
+/** The DSH_HUB_* connection variables of the real process env are hidden during a test. */
+const HUB_ENV_KEYS = ['DSH_HUB_URL', 'DSH_HUB_CONTROLLER_ID', 'DSH_HUB_PROXY', 'DSH_HUB_CAFILE']
+function hideHubEnv(t) {
+  const env = globalThis.process.env
+  const saved = HUB_ENV_KEYS.map(k => [k, env[k]])
+  for (const k of HUB_ENV_KEYS) delete env[k]
+  t.after(() => { for (const [k, v] of saved) { if (v === undefined) delete env[k]; else env[k] = v } })
+}
+
 function mount(t, options = {}, config = {}) {
+  hideHubEnv(t)
   const fake = fakeCtx(options)
   t.after(() => fake.dispose())
   apply(fake.ctx, config)
@@ -89,11 +99,12 @@ test('missing token: loads with a warning; tools and panel answer hub-token-miss
 
 test('missing config: loads with warnings; tools and panel answer hub-not-configured', async (t) => {
   withToken(t, TOKEN)
-  const fake = mount(t, { connection: { requestRejection: () => undefined } }, {})
+  const fake = mount(t, { connection: { requestRejection: () => undefined } }, { envFile: NO_ENV_FILE })
   assert.equal(fake.tools.size, 11)
   const w = warns(fake)
-  assert.ok(w.some(l => l.includes('config.hubUrl is not set')))
-  assert.ok(w.some(l => l.includes('config.controllerId is not set')))
+  assert.ok(w.some(l => l.includes('hubUrl is not set')))
+  assert.ok(w.some(l => l.includes('controllerId is not set')))
+  assert.ok(w.some(l => l.includes(`在 ${NO_ENV_FILE} 写上 DSH_HUB_URL=`) && l.includes('DSH_HUB_CONTROLLER_ID=')), w.join('\n'))
   assert.ok(w.some(l => l.includes('not configured')))
   assert.ok(fake.logger.lines.includes('info agent-hub: 11 control tools registered (agent_*, task_*); controller of an unconfigured hub'))
   const res = await callRoute(findRoute(fake.routes, `${ADMIN_BASE}/agents`), { method: 'GET' })
@@ -105,7 +116,7 @@ test('missing config: loads with warnings; tools and panel answer hub-not-config
 
 test('insecure remote http hubUrl is refused with a warning', (t) => {
   withToken(t, TOKEN)
-  const fake = mount(t, {}, { hubUrl: 'http://203.0.113.5:7891', controllerId: 'dsh-test' })
+  const fake = mount(t, {}, { hubUrl: 'http://203.0.113.5:7891', controllerId: 'dsh-test', envFile: NO_ENV_FILE })
   assert.ok(warns(fake).some(l => l.includes('must use https://')))
 })
 
@@ -174,3 +185,38 @@ test('envFile = <DSH home>/.env with DSH_HUB_TOKEN: a real file there is not rea
   assert.equal(res.json().error.code, 'hub-token-missing')
   assertNoToken(fake.logger.lines, res.text)
 })
+
+test('controller.env alone (real file): all four settings and the token come from it; the startup log names every source, never the token', async (t) => {
+  withToken(t, undefined)
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-agent-hub-ctl-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const ca = join(dir, 'hub-ca.pem')
+  await writeFile(ca, '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n')
+  const file = join(dir, 'controller.env')
+  await writeFile(file, `# test\nDSH_HUB_URL=127.0.0.1:1\nDSH_HUB_CONTROLLER_ID=dsh-test\nDSH_HUB_PROXY=off\nDSH_HUB_CAFILE=${ca}\nDSH_HUB_TOKEN=${TOKEN}\n`, { mode: 0o600 })
+  await chmod(file, 0o600)
+  const fake = mount(t, { connection: { requestRejection: () => undefined } }, { envFile: file, timeoutMs: 3000 })
+  assert.deepEqual(warns(fake), [], 'complete controller.env: no warning')
+  const src = key => `${file} (${key})`
+  assert.ok(fake.logger.lines.includes(`info agent-hub: config hubUrl=https://127.0.0.1:1 (${src('DSH_HUB_URL')}), controllerId=dsh-test (${src('DSH_HUB_CONTROLLER_ID')}), proxy=direct (${src('DSH_HUB_PROXY')}), caFile=${ca} (${src('DSH_HUB_CAFILE')})`), fake.logger.lines.join('\n'))
+  assert.ok(fake.logger.lines.includes(`info agent-hub: controller token from ${file} (DSH_HUB_TOKEN)`))
+  assert.ok(fake.logger.lines.includes('info agent-hub: 11 control tools registered (agent_*, task_*); controller of https://127.0.0.1:1 as dsh-test'))
+  const res = await callRoute(findRoute(fake.routes, OVERVIEW), { method: 'GET' })
+  assert.equal(res.json().error.code, 'hub-unreachable', 'configured from the file: the (dead) hub was contacted')
+  assertNoToken(fake.logger.lines, res.text)
+})
+
+test('cordis config shadowing controller.env is reported at startup', async (t) => {
+  withToken(t, TOKEN)
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-agent-hub-ctl-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const file = join(dir, 'controller.env')
+  await writeFile(file, 'DSH_HUB_URL=https://8.134.170.38:7891\nDSH_HUB_CONTROLLER_ID=dsh-local\n', { mode: 0o600 })
+  const fake = mount(t, {}, { ...DEAD_HUB, envFile: file })
+  const w = warns(fake)
+  assert.ok(w.includes(`warn agent-hub: ${file} 里的 DSH_HUB_URL 被 cordis.patch.yml 覆盖了（config.hubUrl 优先）；要让 controller.env 生效，删掉 cordis.patch.yml 里的 hubUrl`), w.join('\n'))
+  assert.ok(w.some(l => l.includes(`${file} 里的 DSH_HUB_CONTROLLER_ID 被 cordis.patch.yml 覆盖了`)))
+  assert.ok(fake.logger.lines.some(l => l.startsWith('info agent-hub: config hubUrl=http://127.0.0.1:1 (cordis.patch.yml), controllerId=dsh-test (cordis.patch.yml)')))
+  assertNoToken(fake.logger.lines)
+})
+

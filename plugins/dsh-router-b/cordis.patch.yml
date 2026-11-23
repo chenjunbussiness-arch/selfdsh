@@ -104,3 +104,12 @@
             workers: 0
     - id: client-ui-router
       name: dsh-client-ui-router
+#
+# ── 换机器必读（中文）────────────────────────────────────────────────
+# 上面 partitions 里的三个工作区是作者服务器上的配置，root 都是服务器本机路径
+# （/srv/workspace/...）。换一台机器必须改成那台机器上真实存在的绝对路径。
+# 推荐不改本文件，而是在 profile 的 <profile>/cordis.patch.yml 里按 id host-router
+# 覆盖整段 config（不做合并，manager / maxWorkers / autoVerify 要一起写上）。
+# 工作区名同时也是 dsh-agent-hub 使用的工作区名，两边要一致。
+# 完整说明见插件根目录 README.md「必须配置」。
+# ────────────────────────────────────────────────────────────────

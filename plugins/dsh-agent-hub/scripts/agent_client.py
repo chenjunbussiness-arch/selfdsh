@@ -12,7 +12,9 @@ the hub must use a proxy node, and the hub sees that node's exit IP.
 Lifecycle of a worker (one per machine folder <DSH home>/worker):
 
   init       write .env and profile.json templates into the worker dir (existing files
-             are never overwritten) and print the next steps. No network.
+             are never overwritten), create the exchange folder (DSH_EXCHANGE: inbox, working,
+             outbox, failed, archive + README.md; --no-exchange skips it) and print the next
+             steps. No network.
   check      one GET /v1/health through the configured proxy (or directly): proxy used,
              target, TLS verification, round trip, hub version and the client_ip the hub
              sees; on failure a hint (proxy not running / proxy refused CONNECT /
@@ -52,8 +54,10 @@ Lifecycle of a worker (one per machine folder <DSH home>/worker):
        archive/<task_id>/                          <- client moves it here after upload (or on abort)
 
      task.json is the hub task plus `workspace_path` (the real local path of the
-     task's workspace, or null), `node` (this machine) and `exchange` (where to put
-     the result). If the task names a `ref`, the agent checks it out first; the
+     task's workspace, or null), `node` (this machine), `exchange` (where to put
+     the result) and `effort_resolved` ({mode, thinking, agent, source}: the task's
+     effort, else this worker's runtime default for the task type; source = task |
+     default | none) -- the agent runs the task with it. If the task names a `ref`, the agent checks it out first; the
      client itself never runs git. A task whose workspace is not mapped on this
      machine never reaches the inbox: it is failed at once with
      error.code=WORKSPACE_MISSING, retryable=false.
@@ -116,6 +120,14 @@ An empty value (DSH_HUB_CAFILE=) counts as not set.
   DSH_HEARTBEAT_SECONDS  --heartbeat-seconds  heartbeat period of run, 5..3600 seconds; the hub
                                               marks a worker offline after 90 s without a
                                               heartbeat / poll. Default: 30.
+  DSH_PATH_MAP           (environment / .env) host path prefixes -> local prefixes, for a worker
+                                              in a container reading the HOST profile.json /
+                                              dshProfile: "E:/=/host/e;C:/Users/me/.dsh=/host/dsh"
+                                              (';' separated, longest prefix wins, drive letters
+                                              and backslash vs / ignored). Applied to dshProfile, partition
+                                              roots and workspaces paths before the existence
+                                              check; task.json keeps the host path as
+                                              workspace_host_path. Default: none.
 
 profile.json keys (all optional; unknown keys are ignored):
   node        node name (see DSH_NODE).
@@ -126,6 +138,15 @@ profile.json keys (all optional; unknown keys are ignored):
               name and adds new names; null hides a name the dshProfile would provide.
               An explicit path that does not exist is dropped; it does NOT fall back
               to the dshProfile path. Default: {}.
+  runtime     what this worker can be asked to run, sent at register and in every
+              heartbeat (shown by agent_list / agent_requests in DSH; checked by the hub
+              against task effort):
+                {"modes": ["fast", "balanced", "smart"], "thinking": ["off", "low", "medium", "high"],
+                 "default": {"mode": "balanced", "thinking": "low"},
+                 "defaults": {"code": {"mode": "smart", "thinking": "medium"}},
+                 "agents": [{"name": "quick", "description": "..."}], "note": "..."}
+              Default: the built-in runtime of DSH_PLATFORM (aws-quick has one; other
+              platforms declare nothing). null = declare nothing.
   hubUrl, tokenFile, proxy
               lowest-priority fallbacks of DSH_HUB_URL, DSH_AGENT_TOKEN_FILE and
               DSH_HUB_PROXY (proxy false = off), kept for older workspaces.json files.
@@ -135,7 +156,8 @@ Workspace map (contract section 3), highest priority first:
   2. router-b partitions of "dshProfile".
 Workspaces whose path does not exist are dropped with a warning and never
 reported. Only workspace NAMES leave this machine (register and every heartbeat);
-paths only go into the local task.json as workspace_path.
+paths only go into the local task.json as workspace_path (local / container path) and
+workspace_host_path (the path as written in the profile, i.e. on the host).
 
 Examples: scripts/worker.env.example and scripts/profile.example.json (legacy:
 scripts/workspaces.example.json). Check the merged result offline with:
@@ -164,8 +186,21 @@ TASK_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,96}")
 ABORT_MARK = "ABORTED.json"
 DEFAULT_HEARTBEAT = 30
 ENV_KEYS = ("DSH_HUB_URL", "DSH_HUB_PROXY", "DSH_HUB_CAFILE", "DSH_AGENT_ID", "DSH_NODE", "DSH_PLATFORM",
-            "DSH_CAPABILITIES", "DSH_MAX_CONCURRENCY", "DSH_AGENT_TOKEN_FILE", "DSH_EXCHANGE", "DSH_HEARTBEAT_SECONDS")
+            "DSH_CAPABILITIES", "DSH_MAX_CONCURRENCY", "DSH_AGENT_TOKEN_FILE", "DSH_EXCHANGE", "DSH_HEARTBEAT_SECONDS",
+            "DSH_PATH_MAP")
 PROXY_OFF = ("off", "direct", "none", "false", "no")
+EFFORT_MODES = ("fast", "balanced", "smart")
+EFFORT_THINKING = ("off", "low", "medium", "high")
+# Built-in runtime declarations per platform (profile.json "runtime" overrides; null = none).
+PLATFORM_RUNTIMES = {
+    "aws-quick": {
+        "modes": list(EFFORT_MODES), "thinking": list(EFFORT_THINKING),
+        "default": {"mode": "balanced", "thinking": "low"},
+        "defaults": {"code": {"mode": "smart", "thinking": "medium"}, "review": {"mode": "smart", "thinking": "low"}},
+        "agents": [],
+        "note": "AWS Quick: picked up by a schedule; runs each task in the requested mode",
+    },
+}
 PROXY_ENV = ("env", "system")
 
 
@@ -292,8 +327,9 @@ class HubClient:
     """Worker side of /v1/*. Token-less calls (enroll) work with token=None."""
 
     def __init__(self, url, token=None, insecure=False, cafile=None, timeout=60, *, agent_id=None,
-                 proxy=None, no_proxy=False, workspaces=(), opener=None, ctx=None):
+                 proxy=None, no_proxy=False, workspaces=(), opener=None, ctx=None, runtime=None):
         self.url = hub_url(url)
+        self.runtime = runtime
         self.token = token
         derived = agent_id_from_token(token)
         if agent_id is None:
@@ -338,6 +374,8 @@ class HubClient:
     def enroll_request(self, platform, mode, node, workspaces, capabilities, max_concurrency, description):
         body = {"platform": platform, "mode": mode, "node": node, "workspaces": list(workspaces),
                 "capabilities": list(capabilities), "max_concurrency": max_concurrency, "description": description}
+        if self.runtime is not None:
+            body["runtime"] = self.runtime
         return self._req("POST", "enroll", body, auth=False)
 
     def enroll_status(self, request_id, poll_secret):
@@ -348,6 +386,8 @@ class HubClient:
         """`running` (task ids still held locally) lets the hub reconcile: it answers `abort`."""
         names = self.workspaces if workspaces is None else list(workspaces)
         body = {"status": status, "workspaces": names, "client_version": CLIENT_VERSION}
+        if self.runtime is not None:
+            body["runtime"] = self.runtime  # descriptive: the hub keeps the latest one
         if running is not None:
             body["running"] = list(running)
         return self._req("POST", "heartbeat", body)
@@ -630,6 +670,34 @@ def _is_abs(path):
     return os.path.isabs(path) or path.startswith(("/", "\\"))
 
 
+def parse_path_map(value):
+    """DSH_PATH_MAP "host=local;host2=local2" -> [(host, local)], longest host prefix first."""
+    pairs = []
+    for part in re.split(r"[;\n]", value or ""):
+        part = part.strip()
+        if not part:
+            continue
+        host, sep, local = part.partition("=")
+        host, local = host.strip().replace("\\", "/").rstrip("/"), local.strip()
+        if not sep or not host or not local:
+            raise ConfigError(f"DSH_PATH_MAP entry {part!r} must be <host path>=<local path>")
+        pairs.append((host, local.rstrip("/") or "/"))
+    return sorted(pairs, key=lambda p: -len(p[0]))
+
+
+def map_path(path, path_map):
+    """Rewrite a host path through DSH_PATH_MAP (unchanged when no prefix matches)."""
+    if not path_map or not isinstance(path, str):
+        return path
+    s = path.strip().replace("\\", "/")
+    for host, local in path_map:
+        fold = re.match(r"^[A-Za-z]:", host) is not None  # Windows paths: case-insensitive
+        a, h = (s.lower(), host.lower()) if fold else (s, host)
+        if a == h or a.startswith(h + "/"):
+            return local + s[len(host):]
+    return path
+
+
 def _local_path(path, base=None):
     p = os.path.expanduser(path.strip())
     if base is not None and not _is_abs(p):
@@ -639,12 +707,16 @@ def _local_path(path, base=None):
 
 class WorkspaceMap:
     def __init__(self, node, config_path, profile, workspaces, sources, dropped, hub_url=None, token_file=None, proxy=None,
-                 file_node=None, legacy=False, exists=False):
+                 file_node=None, legacy=False, exists=False, host_paths=None, runtime=None, has_runtime=False):
         self.node, self.config_path, self.profile = node, config_path, profile
         self.workspaces, self.sources, self.dropped = workspaces, sources, dropped
         # connection settings from profile.json / workspaces.json (None = not set; proxy False = direct)
         self.hub_url, self.token_file, self.proxy = hub_url, token_file, proxy
         self.file_node, self.legacy, self.exists = file_node, legacy, exists
+        # name -> path as written in the profile (differs from workspaces[name] only with DSH_PATH_MAP)
+        self.host_paths = dict(host_paths or {})
+        # profile.json "runtime": has_runtime False = key absent (use the platform default)
+        self.runtime, self.has_runtime = runtime, has_runtime
 
     def names(self):
         """Names safe to report: mapped and still present on disk."""
@@ -655,6 +727,8 @@ class WorkspaceMap:
         return {"node": self.node, "workspaces_file": self.config_path, "profile": self.profile,
                 "workspaces": dict(sorted(self.workspaces.items())), "sources": dict(sorted(self.sources.items())),
                 "dropped": self.dropped,
+                "runtime": self.runtime if self.has_runtime else "(platform default)",
+                "host_paths": {n: p for n, p in sorted(self.host_paths.items()) if n in self.workspaces and p != self.workspaces[n]},
                 "file_settings": {"hubUrl": self.hub_url, "tokenFile": self.token_file, "proxy": proxy}}
 
 
@@ -704,6 +778,8 @@ def parse_env_text(text):
             if rest and not rest.startswith("#"):
                 continue
             value = value[1:end]
+        elif value.startswith("#"):
+            value = ""  # `KEY=   # comment`: empty value (= not set), the rest is a comment
         else:
             m = re.search(r"\s#", value)
             if m:
@@ -749,7 +825,7 @@ def profile_file_for(worker_dir, log=warn):
     return current, False
 
 
-def resolve_workspaces(config_path=None, node=None, required=False, log=warn, isdir=os.path.isdir, worker_dir=None):
+def resolve_workspaces(config_path=None, node=None, required=False, log=warn, isdir=os.path.isdir, worker_dir=None, path_map=None):
     """Merge profile.json "workspaces" (explicit, wins) over the dshProfile's router-b partitions.
 
     `config_path` names the file (profile.json or a legacy workspaces.json); without it the
@@ -775,17 +851,18 @@ def resolve_workspaces(config_path=None, node=None, required=False, log=warn, is
         log(f"no profile at {path}; no workspaces are mapped (python agent_client.py init writes a template)")
     base = os.path.dirname(path)
 
-    candidates, sources, dropped = {}, {}, []
+    candidates, sources, dropped, hosts = {}, {}, [], {}
     profile = config.get("dshProfile", config.get("profile"))
     if profile is not None and not isinstance(profile, str):
         raise ConfigError(f"{path}: dshProfile must be a string")
     if profile:
-        profile = _local_path(profile, base)
+        profile = _local_path(map_path(profile, path_map), base)
         patch = profile_patch_path(profile)
         if os.path.isfile(patch):
             with open(patch, encoding="utf-8-sig") as f:
                 for p in parse_partitions(f.read(), log):
-                    root = p["root"]
+                    host_root = p["root"]
+                    root = map_path(host_root, path_map)
                     if not root:
                         dropped.append({"name": p["name"], "path": None, "source": "profile", "reason": "no root"})
                         log(f"workspace {p['name']}: partition has no root; ignored")
@@ -795,6 +872,7 @@ def resolve_workspaces(config_path=None, node=None, required=False, log=warn, is
                         log(f"workspace {p['name']}: partition root is not absolute: {root}; ignored")
                         continue
                     candidates[p["name"]] = _local_path(root)
+                    hosts[p["name"]] = host_root if root != host_root else candidates[p["name"]]
                     sources[p["name"]] = "profile"
         else:
             log(f"profile patch not found: {patch}; no partitions read")
@@ -809,13 +887,16 @@ def resolve_workspaces(config_path=None, node=None, required=False, log=warn, is
             log(f"{path}: empty workspace name ignored")
             continue
         if value is None:
+            hosts.pop(name, None)
             if name in candidates:
                 dropped.append({"name": name, "path": candidates.pop(name), "source": sources.pop(name), "reason": "hidden by workspaces.json"})
             continue
         if not isinstance(value, str) or not value.strip():
             log(f"workspace {name}: path must be a non-empty string; ignored")
             continue
-        candidates[name] = _local_path(value, base)
+        mapped = map_path(value, path_map)
+        candidates[name] = _local_path(mapped, base)
+        hosts[name] = value.strip() if mapped != value else candidates[name]
         sources[name] = "workspaces.json"
 
     workspaces = {}
@@ -833,13 +914,71 @@ def resolve_workspaces(config_path=None, node=None, required=False, log=warn, is
     token_file = _opt_str(config, "tokenFile", path)
     if token_file is not None:
         token_file = _local_path(token_file, base)
+    has_runtime = "runtime" in config
+    runtime = config.get("runtime")
+    if runtime is not None and not isinstance(runtime, dict):
+        raise ConfigError(f"{path}: runtime must be an object or null")
     proxy = config.get("proxy")
     if proxy is True or not (proxy is None or proxy is False or isinstance(proxy, str)):
         raise ConfigError(f"{path}: proxy must be a URL string, false (direct) or null")
     if isinstance(proxy, str):
         proxy = normalize_proxy(proxy) if proxy.strip() else None
     return WorkspaceMap(node, path, profile or None, workspaces, sources, dropped, hub, token_file, proxy,
-                        file_node=file_node, legacy=legacy, exists=exists)
+                        file_node=file_node, legacy=legacy, exists=exists,
+                        host_paths={n: hosts.get(n, p) for n, p in workspaces.items()},
+                        runtime=runtime, has_runtime=has_runtime)
+
+
+def check_runtime(rt, where="runtime"):
+    """Light local check (the hub validates fully): lists of known values, effort objects."""
+    if rt is None:
+        return None
+    if not isinstance(rt, dict):
+        raise ConfigError(f"{where} must be an object")
+    for key, allowed in (("modes", EFFORT_MODES), ("thinking", EFFORT_THINKING)):
+        v = rt.get(key, [])
+        if not isinstance(v, list) or any(x not in allowed for x in v):
+            raise ConfigError(f"{where}.{key} must be a list of {', '.join(allowed)}")
+    agents = rt.get("agents", [])
+    if not isinstance(agents, list) or any(not (isinstance(a, str) or (isinstance(a, dict) and isinstance(a.get("name"), str))) for a in agents):
+        raise ConfigError(f"{where}.agents must be a list of names or {{name, description}}")
+    defaults = rt.get("defaults")
+    defaults = {} if defaults is None else defaults
+    if not isinstance(defaults, dict):
+        raise ConfigError(f"{where}.defaults must be an object of task type -> effort")
+    for label, e in [("default", rt.get("default"))] + [(f"defaults.{k}", v) for k, v in defaults.items()]:
+        if e is None:
+            continue
+        if not isinstance(e, dict) or e.get("mode", "fast") not in EFFORT_MODES or e.get("thinking", "off") not in EFFORT_THINKING:
+            raise ConfigError(f"{where}.{label} must be {{mode, thinking, agent}} with known values")
+    return rt
+
+
+def platform_runtime(platform):
+    rt = PLATFORM_RUNTIMES.get(platform)
+    return json.loads(json.dumps(rt)) if rt is not None else None
+
+
+def resolve_effort(task, runtime):
+    """The effort this task runs with: the task's own (top level, or context.effort from an older
+    hub), else the runtime default for its type, else the runtime default. Adds `source`."""
+    own = task.get("effort")
+    if not isinstance(own, dict):
+        ctx = task.get("context")
+        own = ctx.get("effort") if isinstance(ctx, dict) and isinstance(ctx.get("effort"), dict) else None
+    rt = runtime or {}
+    base = (rt.get("defaults") or {}).get(task.get("type")) or rt.get("default") or {}
+    keep = ("mode", "thinking", "agent")
+    if own:
+        out = {k: v for k, v in base.items() if k in keep}
+        if "mode" in own and own["mode"] != base.get("mode"):
+            out.pop("thinking", None)  # another mode does not inherit the default's thinking
+        out.update({k: v for k, v in own.items() if k in keep})
+        out["source"] = "task"
+        return out
+    if base:
+        return dict({k: v for k, v in base.items() if k in keep}, source="default")
+    return {"source": "none"}
 
 
 def parse_proxy_choice(value):
@@ -933,6 +1072,7 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
                                          "DSH_MAX_CONCURRENCY", 1, 32)
     st["token_file"] = in_wd(pick("token_file", "DSH_AGENT_TOKEN_FILE", token_file, wm.token_file, "agent.token"), "token_file")
     st["exchange"] = in_wd(pick("exchange", "DSH_EXCHANGE", cli.get("exchange"), None, "exchange"), "exchange")
+    st["runtime"] = check_runtime(wm.runtime, f"{wm.config_path}: runtime") if wm.has_runtime else platform_runtime(st["platform"])
     st["heartbeat_seconds"] = _int_setting(pick("heartbeat_seconds", "DSH_HEARTBEAT_SECONDS", cli.get("heartbeat_seconds"), None,
                                                 DEFAULT_HEARTBEAT), "DSH_HEARTBEAT_SECONDS", 5, 3600)
     return st
@@ -949,7 +1089,8 @@ def settings_summary(st):
     return {"hub_url": st["url"], "proxy": proxy, "cafile": st["cafile"], "agent_id": st["agent_id"], "node": st["node"],
             "platform": st["platform"], "capabilities": st["capabilities"], "max_concurrency": st["max_concurrency"],
             "token_file": st["token_file"], "token_file_exists": bool(st["token_file"]) and os.path.isfile(st["token_file"]),
-            "exchange": st["exchange"], "heartbeat_seconds": st["heartbeat_seconds"]}
+            "exchange": st["exchange"], "heartbeat_seconds": st["heartbeat_seconds"],
+            "runtime": st.get("runtime")}
 
 
 # --- exchange folder bridge ---------------------------------------------------------
@@ -968,21 +1109,61 @@ def write_atomic(path, text):
     os.replace(tmp, path)
 
 
+EXCHANGE_README = """\
+# dsh 交换目录（worker 本机）
+
+这个目录由 `agent_client.py`（`init` / `run` / `bridge`）创建，位置由 worker/.env 里的 `DSH_EXCHANGE` 决定。
+
+**刚建好时是空的，这是正常的。** 任务要满足下面三条才会出现在 `inbox/`：
+
+1. `python agent_client.py register` 已被 DSH 批准（DSH 对话里 `agent_requests` -> `agent_approve`），令牌已写进 `agent.token`；
+2. `python agent_client.py run` 正在运行（或定时执行 `bridge --once`）；
+3. DSH 用 `task_dispatch` 给这个 worker（或它能接的 `pool:<capability>`）派了任务。
+
+`python agent_client.py status` 可以看到 hub 眼里的本机状态（在线、持有的任务）。
+
+| 子目录 | 谁写 | 内容 |
+|---|---|---|
+| `inbox/<task_id>/` | agent_client | `task.json` + 输入文件 |
+| `working/<task_id>/` | agent | 开始做时把任务目录挪到这里（可选） |
+| `outbox/<task_id>/` | agent | 产出文件（`changes.patch`、`summary.md` 等），**最后**写 `result.json` |
+| `failed/<task_id>/` | agent | 失败时写 `result.json`（同样最后写） |
+| `archive/<task_id>/` | agent_client | 上传完成或任务被取消后归档 |
+
+协议：docs/DSH-HUB-PROTOCOL-v2.md；配置：plugins/dsh-agent-hub/README.md。
+"""
+
+
+def ensure_exchange(root):
+    """Create the exchange folder, its sub folders and README.md (never overwritten). Returns what was created."""
+    created = []
+    for d in EXCHANGE_DIRS:
+        p = os.path.join(root, d)
+        if not os.path.isdir(p):
+            os.makedirs(p, exist_ok=True)
+            created.append(d)
+    readme = os.path.join(root, "README.md")
+    if not os.path.exists(readme):
+        write_atomic(readme, EXCHANGE_README)
+        created.append("README.md")
+    return created
+
+
 def _upload_order(name):
     return ({"changes.patch": 0, "summary.md": 1}.get(name, 2), name)
 
 
 class Bridge:
-    def __init__(self, client, root, max_tasks=1, log=print, workspaces=None, node=None, wait=DEFAULT_WAIT):
+    def __init__(self, client, root, max_tasks=1, log=print, workspaces=None, node=None, wait=DEFAULT_WAIT, host_paths=None):
         self.c, self.root, self.max, self.log = client, root, max_tasks, log
         self.workspaces = dict(workspaces or {})
+        self.host_paths = dict(host_paths or {})
         self.node = node
         self.wait = wait
         self.rejected = 0
         self.aborted = 0
         self.full = False
-        for d in EXCHANGE_DIRS:
-            os.makedirs(os.path.join(root, d), exist_ok=True)
+        ensure_exchange(root)
 
     def live_workspaces(self):
         return sorted(n for n, p in self.workspaces.items() if os.path.isdir(p))
@@ -1077,6 +1258,8 @@ class Bridge:
                 with open(os.path.join(stage, item["name"]), "wb") as f:
                     f.write(data)
             t["workspace_path"] = ws_path
+            t["workspace_host_path"] = self.host_paths.get(ws, ws_path) if ws_path else None
+            t["effort_resolved"] = resolve_effort(t, getattr(self.c, "runtime", None))
             t["node"] = self.node
             t["exchange"] = {"result_dir": f"outbox/{tid}", "failed_dir": f"failed/{tid}",
                              "outputs": "changes.patch, summary.md and any other files; write result.json LAST"}
@@ -1263,10 +1446,8 @@ def _client(st, token, workspaces, a, agent_id=None):
     u = urllib.parse.urlsplit(url)
     if u.scheme == "http" and u.hostname not in LOOPBACK_HOSTS:
         warn("plain http to a non-loopback hub: the token would cross the network in clear text")
-    if st["no_proxy"] and is_public_host(u.hostname):
-        warn(f"DSH_HUB_PROXY=off but {u.hostname} is public: the server only accepts outside traffic; use the proxy")
     return HubClient(url, token, a.insecure, st["cafile"], a.timeout, agent_id=agent_id or st["agent_id"] or None,
-                     proxy=st["proxy"], no_proxy=st["no_proxy"], workspaces=workspaces)
+                     proxy=st["proxy"], no_proxy=st["no_proxy"], workspaces=workspaces, runtime=st.get("runtime"))
 
 
 def check_settings(st):
@@ -1425,8 +1606,8 @@ def run_check(url, proxy=None, no_proxy=False, cafile=None, insecure=False, time
     if u.scheme == "http" and u.hostname not in LOOPBACK_HOSTS:
         out("note:    plain http to a non-loopback host: a worker token would cross the network in clear text")
     if no_proxy and is_public_host(u.hostname):
-        out(f"warning: DSH_HUB_PROXY=off but {u.hostname} is a public address: the server only accepts traffic from "
-            "outside, so MYDESK must reach it through the proxy (DSH_HUB_PROXY=http://127.0.0.1:7890)")
+        out(f"note:    DSH_HUB_PROXY=off and {u.hostname} is a public address: direct connection. If it fails or the hub "
+            "refuses this IP, try the proxy (DSH_HUB_PROXY=http://127.0.0.1:7890)")
 
     def failed(what, hint, elapsed=None):
         if elapsed is not None:
@@ -1517,10 +1698,11 @@ ENV_TEMPLATE = """\
 # Priority: command line > process environment > this file > profile.json > default.
 # Relative paths are relative to this folder. Reference: python agent_client.py --help
 
-# Hub address: host, host:port or URL (default port 7891, path /v1)
-DSH_HUB_URL=https://hub.example.com:7891
-# Way out to the hub: http://host:port = HTTP proxy (MYDESK: Clash/mihomo 7890), off = direct, env = HTTPS_PROXY / system proxy
-DSH_HUB_PROXY=http://127.0.0.1:7890
+# Hub address: host, host:port or URL (default port 7891, path /v1). The warroom hub runs on 8.134.170.38
+DSH_HUB_URL=https://8.134.170.38:7891
+# Way out to the hub: off = direct (default of this template), env = HTTPS_PROXY / system proxy,
+# http://host:port = this HTTP proxy. Only when the direct connection fails: http://127.0.0.1:7890 (Clash/mihomo)
+DSH_HUB_PROXY=off
 # CA file (PEM) when the hub certificate is self-signed; empty = system CAs
 DSH_HUB_CAFILE=
 # Registered worker name, ^[a-z][a-z0-9-]{1,47}$, suggested <agent>-<machine>
@@ -1533,10 +1715,14 @@ DSH_CAPABILITIES=code,document
 DSH_MAX_CONCURRENCY=1
 # Written by `register` (mode 600); the token is only ever read from this file
 DSH_AGENT_TOKEN_FILE=agent.token
-# Exchange folder of run / bridge (inbox, working, outbox, failed, archive)
+# Exchange folder of run / bridge (inbox, working, outbox, failed, archive); `init` creates it with a README.md.
+# It stays empty until register was approved, `run` is running and DSH dispatched a task to this worker.
 DSH_EXCHANGE=E:/dsh-exchange
 # Heartbeat period of `run` in seconds (the hub marks a worker offline after 90 s of silence)
 DSH_HEARTBEAT_SECONDS=30
+# Only for a worker in a container that reads the host profile: host prefix=container prefix;...
+# e.g. E:/=/host/e  (empty on the host itself)
+DSH_PATH_MAP=
 """
 
 
@@ -1544,7 +1730,33 @@ def profile_template(node=None):
     return {"node": node or default_node(), "dshProfile": None, "workspaces": {}}
 
 
-def cmd_init(worker_dir, node=None, out=print):
+def _foreign_drive(path):
+    """A Windows drive path (E:/x) on a non-Windows machine: not a usable folder here."""
+    return os.name != "nt" and re.match(r"^[A-Za-z]:[\\/]", path or "") is not None
+
+
+def init_exchange(worker_dir, env=None, cli_value=None, out=print):
+    """Resolve DSH_EXCHANGE like `run` does (cli > env > worker/.env > default) and create it."""
+    env = os.environ if env is None else env
+    if cli_value:
+        value, base = cli_value, None
+    else:
+        dotenv = read_env_file(os.path.join(worker_dir, ".env"), log=lambda *_a, **_k: None)
+        value = next((v.strip() for v in (env.get("DSH_EXCHANGE"), dotenv.get("DSH_EXCHANGE"))
+                      if isinstance(v, str) and v.strip()), "exchange")
+        base = worker_dir
+    if _foreign_drive(value):
+        out(f"  exchange      skipped: DSH_EXCHANGE={value} is a Windows path; set a local folder in .env")
+        return None
+    root = _local_path(value, base) if base else os.path.abspath(os.path.expanduser(value))
+    created = ensure_exchange(root)
+    out(f"  exchange      {root} ({'created: ' + ', '.join(created) if created else 'kept (already exists)'})")
+    out("                empty until register is approved, run is running and DSH dispatches a task (see its README.md)")
+    return root
+
+
+def cmd_init(worker_dir, node=None, out=print, exchange=False, env=None, exchange_dir=None):
+    """Write .env / profile.json templates (never overwritten); exchange=True also creates DSH_EXCHANGE."""
     os.makedirs(worker_dir, exist_ok=True)
     done = {}
     env_path = os.path.join(worker_dir, ".env")
@@ -1564,9 +1776,11 @@ def cmd_init(worker_dir, node=None, out=print):
     out(f"worker dir: {worker_dir}")
     for name, what in done.items():
         out(f"  {name:<13} {what}")
+    if exchange:
+        init_exchange(worker_dir, env, exchange_dir, out)
     out("next:")
-    out("  1. edit .env: DSH_HUB_URL, DSH_AGENT_ID, DSH_NODE, DSH_PLATFORM, DSH_CAPABILITIES, DSH_EXCHANGE;")
-    out("     DSH_HUB_PROXY=http://127.0.0.1:7890 on MYDESK (the server only accepts outside traffic)")
+    out("  1. check .env: DSH_HUB_URL (template: https://8.134.170.38:7891), DSH_AGENT_ID, DSH_NODE, DSH_PLATFORM,")
+    out("     DSH_CAPABILITIES, DSH_EXCHANGE; DSH_HUB_PROXY=off (direct); only if check fails: http://127.0.0.1:7890 (Clash)")
     out("  2. edit profile.json: workspaces {name: local path} (names as in router-b), or dshProfile")
     out("  3. python agent_client.py check      (reachable through the proxy? which IP does the hub see?)")
     out("  4. python agent_client.py register   (then in DSH: agent_requests -> agent_approve)")
@@ -1632,9 +1846,11 @@ def build_parser():
             _add_net_args(s, worker)
         return s
 
-    i = sub.add_parser("init", help="write .env and profile.json templates into the worker dir (never overwrites)", epilog=epilog, formatter_class=fmt)
+    i = sub.add_parser("init", help="write .env / profile.json templates (never overwrites) and create the exchange folder", epilog=epilog, formatter_class=fmt)
     i.add_argument("--worker-dir", help="worker folder (default <DSH home>/worker)")
     i.add_argument("--node", help="node name for profile.json (default: host name)")
+    i.add_argument("--exchange", help="exchange folder to create (default: DSH_EXCHANGE from the environment / .env)")
+    i.add_argument("--no-exchange", action="store_true", help="only write the templates, do not create the exchange folder")
     add("workspaces", "print the local workspace map and file settings, then exit (no network)", net=False)
     c = add("check", "GET /v1/health through the configured proxy and report (no token)", worker=False)
     c.set_defaults(timeout=15)
@@ -1671,9 +1887,11 @@ def main(argv=None, env=None):
     try:
         wd = os.path.abspath(os.path.expanduser(a.worker_dir)) if a.worker_dir else default_worker_dir(env)
         if cmd == "init":
-            return cmd_init(wd, a.node)
+            return cmd_init(wd, a.node, exchange=not a.no_exchange, env=env, exchange_dir=a.exchange)
         dotenv = read_env_file(os.path.join(wd, ".env"))
-        wm = resolve_workspaces(a.profile_file, a.node, required=a.profile_file is not None, worker_dir=wd)
+        raw_map = next((v for v in (env.get("DSH_PATH_MAP"), dotenv.get("DSH_PATH_MAP")) if isinstance(v, str) and v.strip()), "")
+        wm = resolve_workspaces(a.profile_file, a.node, required=a.profile_file is not None, worker_dir=wd,
+                                path_map=parse_path_map(raw_map))
         cli = {k: getattr(a, k, None) for k in ("cafile", "agent_id", "node", "platform", "capabilities",
                                                 "max_concurrency", "exchange", "heartbeat_seconds")}
         st = resolve_settings(wm, getattr(a, "url", None), getattr(a, "token_file", None), getattr(a, "proxy", None),
@@ -1709,7 +1927,7 @@ def main(argv=None, env=None):
 
     exchange = os.path.abspath(st["exchange"])
     max_tasks = a.max if a.max is not None else st["max_concurrency"]
-    br = Bridge(client, exchange, max_tasks, workspaces=wm.workspaces, node=wm.node, wait=a.wait)
+    br = Bridge(client, exchange, max_tasks, workspaces=wm.workspaces, node=wm.node, wait=a.wait, host_paths=wm.host_paths)
     print(f"{cmd}: {client.agent_id} on node {wm.node} -> {client.url}; exchange {exchange}; "
           f"workspaces: {', '.join(wm.names()) or '-'}", file=sys.stderr)
     if cmd == "run":

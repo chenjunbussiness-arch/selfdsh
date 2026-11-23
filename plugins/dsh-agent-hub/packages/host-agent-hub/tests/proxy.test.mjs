@@ -10,7 +10,7 @@ import { resolveConfig } from '../hub-client.js'
 import {
   TunnelError, buildConnectRequest, buildTlsOptions, isIpLiteral, openTunnel, parseProxyUrl, proxySetting, resolveProxy, scrubProxy, shouldBypass,
 } from '../proxy.js'
-import { CONTROLLER, TOKEN, assertNoToken, expectHubError, fakeLogger, makeClient } from './helpers.mjs'
+import { CONTROLLER, TOKEN, assertNoToken, expectHubError, fakeLogger, hermetic, makeClient } from './helpers.mjs'
 
 const HUB = new URL('https://hub.example:7891/v1/ctl/agents?id=dsh-test')
 const SECRET_USER = 'clashuser'
@@ -191,15 +191,15 @@ test('openTunnel failures name the stage and never carry proxy credentials', asy
 // --- hub client over the proxy ---------------------------------------------------
 
 test('hub client: proxy config is validated without echoing credentials; http hubs warn that it is ignored', () => {
-  const ok = resolveConfig({ hubUrl: 'https://hub.example:7891', controllerId: 'dsh-local', proxy: AUTH_PROXY })
+  const ok = resolveConfig({ hubUrl: 'https://hub.example:7891', controllerId: 'dsh-local', proxy: AUTH_PROXY }, hermetic())
   assert.deepEqual([ok.ok, ok.proxyMode, ok.proxy], [true, 'url', 'http://***@127.0.0.1:7890'])
   assertNoProxySecret(ok)
-  assert.equal(resolveConfig({ hubUrl: 'https://hub.example:7891', controllerId: 'dsh-local' }).proxyMode, 'direct', 'default: no proxy')
-  const bad = resolveConfig({ hubUrl: 'https://hub.example:7891', controllerId: 'dsh-local', proxy: `https://${SECRET_USER}:${SECRET_PASS}@p:1` })
+  assert.equal(resolveConfig({ hubUrl: 'https://hub.example:7891', controllerId: 'dsh-local' }, hermetic()).proxyMode, 'direct', 'default: no proxy')
+  const bad = resolveConfig({ hubUrl: 'https://hub.example:7891', controllerId: 'dsh-local', proxy: `https://${SECRET_USER}:${SECRET_PASS}@p:1` }, hermetic())
   assert.equal(bad.ok, false)
   assert.match(bad.problems.join(), /config\.proxy: proxy must be an http:\/\/ URL/)
   assertNoProxySecret(bad.problems)
-  const loop = resolveConfig({ hubUrl: 'http://127.0.0.1:7891', controllerId: 'dsh-cloud', proxy: 'http://127.0.0.1:7890' })
+  const loop = resolveConfig({ hubUrl: 'http://127.0.0.1:7891', controllerId: 'dsh-cloud', proxy: 'http://127.0.0.1:7890' }, hermetic())
   assert.equal(loop.ok, true)
   assert.match(loop.warnings.join(), /proxy is ignored: an http:\/\/ hubUrl is a loopback hub/)
 })

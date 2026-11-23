@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "VPN",
-    "description": "管理连接内网 git 用的 VPN：分流隧道的 openfortivpn 配置（账号密码或 token URL）、连接看门狗，以及给 agent 的只读状态工具。",
-    "detail": "docs/VPN.md"
+    "description": "在 Linux 服务器上管理分流的 openfortivpn VPN（账号密码或 token 链接），带连接看门狗和只读工具 vpn_status。必须配置：服务器装好 openfortivpn 和 ppp（token 链接需 1.18 及以上），并在左侧栏「VPN」页新建一个连接配置。",
+    "detail": "README.md"
   }
 }

@@ -1,7 +1,7 @@
 {
   "meta": {
-    "title": "Partition Router",
-    "description": "Routes demands into file partitions, dispatches them to workers, and shows a board that keeps a worker's self-report distinct from a verified result.",
-    "detail": "docs/DETAIL.md"
+    "title": "Partition Router · War Room · Task Board",
+    "description": "Routes demands from the war-room chat to workers by workspace (partition), with a task board that keeps a worker's self-report apart from a verified result. Required: at least one workspace under host-router `partitions` in cordis.patch.yml, whose `root` is an absolute path on this machine.",
+    "detail": "README.md"
   }
 }

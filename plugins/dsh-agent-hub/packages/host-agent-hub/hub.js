@@ -11,6 +11,12 @@
  *   - An agent may ASK to join (enrollment request); it gets nothing until DSH
  *     approves, and the token is minted once when the requester collects it.
  *
+ * Roles (roles.js): every agent carries one optional `role` — worker (default,
+ * takes any task), tester (test tasks only), dispatcher / observer (never take
+ * tasks). It arrives with enroll / provision, is stored with the agent, can only
+ * be NARROWED at approval (`role-widened`) and is enforced by dispatch() and
+ * poll(). An agent stored before roles existed is a worker.
+ *
  * State lives in one JSON file written atomically; artifacts live on disk next
  * to it. Single process, so an in-memory promise chain serializes mutations.
  *
@@ -20,6 +26,8 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+
+import { DEFAULT_ROLE, ROLES, agentRole, roleAccepts, roleOf, roleRefusal, roleWidening } from './roles.js'
 
 export const PROTOCOL = 'dsh-agent/1.0'
 export const AGENT_ID_RE = /^[a-z][a-z0-9-]{1,47}$/
@@ -115,8 +123,12 @@ export class AgentHub {
     if (mode !== 'poll' && mode !== 'push') throw new HubError(400, 'bad-mode', 'mode must be poll or push')
     const maxConcurrency = input.max_concurrency ?? 1
     if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 32) throw new HubError(400, 'bad-concurrency', 'max_concurrency must be 1..32')
+    // Optional: absent / empty = worker (an agent that never reports a role, and every
+    // record stored before roles existed, takes work like it always did).
+    const role = roleOf(input.role)
+    if (role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')} (default ${DEFAULT_ROLE})`)
     return {
-      id, mode, maxConcurrency, capabilities: [...new Set(caps)],
+      id, mode, maxConcurrency, capabilities: [...new Set(caps)], role,
       platform: String(input.platform ?? 'custom').slice(0, 64),
       description: String(input.description ?? '').slice(0, 500),
     }
@@ -128,7 +140,7 @@ export class AgentHub {
     const previous = own(state.agents, v.id)
     state.agents[v.id] = {
       id: v.id, platform: v.platform, mode: v.mode, capabilities: v.capabilities, maxConcurrency: v.maxConcurrency,
-      description: v.description, tokenHash,
+      role: v.role ?? DEFAULT_ROLE, description: v.description, tokenHash,
       createdAt: previous?.createdAt ?? nowIso(this.clock()),
       rekeyedAt: previous === undefined ? undefined : nowIso(this.clock()),
       lastSeen: undefined, reportedStatus: undefined, revoked: false,
@@ -203,18 +215,26 @@ export class AgentHub {
       .map(r => ({
         request_id: r.request_id, status: r.status, agent_id: r.agent.id, platform: r.agent.platform, mode: r.agent.mode,
         capabilities: r.agent.capabilities, max_concurrency: r.agent.maxConcurrency, description: r.agent.description,
+        role: agentRole(r.agent),
         from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, reason: r.reason,
       })))
   }
 
-  /** DSH approves; it may narrow (or set) capabilities and concurrency. */
+  /** DSH approves; it may narrow (or set) capabilities, concurrency and role. */
   approveRequest(requestId, overrides = {}) {
     return this.mutate((state) => {
       const request = own(state.requests, requestId)
       if (request === undefined) throw new HubError(404, 'request-not-found', `request not found: ${requestId}`)
       if (request.status !== 'pending') throw new HubError(409, 'request-decided', `request is ${request.status}`)
+      const asked = agentRole(request.agent)
+      const role = overrides.role === undefined ? asked : roleOf(overrides.role)
+      if (role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')} (default ${DEFAULT_ROLE})`)
+      // Narrow only, like capabilities / workspaces / max_concurrency (`grant-widened`).
+      const widened = roleWidening(asked, role)
+      if (widened !== undefined) throw new HubError(400, widened.code, widened.message)
       const v = this.validateAgent({
         agent_id: request.agent.id, platform: request.agent.platform, mode: request.agent.mode, description: request.agent.description,
+        role,
         capabilities: overrides.capabilities ?? request.agent.capabilities,
         max_concurrency: overrides.max_concurrency ?? request.agent.maxConcurrency,
       })
@@ -270,6 +290,8 @@ export class AgentHub {
     return {
       agent_id: agent.id, platform: agent.platform, mode: agent.mode, capabilities: agent.capabilities,
       max_concurrency: agent.maxConcurrency, description: agent.description, revoked: agent.revoked,
+      // Additive field: a record stored before roles existed is a worker.
+      role: agentRole(agent),
       online: this.online(agent), last_seen: agent.lastSeen, reported_status: agent.reportedStatus,
       running_tasks: running, created_at: agent.createdAt,
     }
@@ -314,6 +336,8 @@ export class AgentHub {
 
     return this.mutate(async (state) => {
       if (AGENT_ID_RE.test(target) && own(state.agents, target) === undefined) throw new HubError(404, 'agent-not-found', `agent not provisioned: ${target}`)
+      // Role gate (roles.js): dispatcher / observer never take tasks, tester only takes tests.
+      this.checkTargetRole(state, target, { type, title: t.title.trim() })
       for (const dep of deps) if (own(state.tasks, dep) === undefined) throw new HubError(404, 'task-not-found', `depends_on task not found: ${dep}`)
       const names = inputs.map(file => safeFileName(file?.name))
       if (new Set(names).size !== names.length) throw new HubError(400, 'bad-task', 'duplicate input file name')
@@ -345,6 +369,26 @@ export class AgentHub {
       this.log(`agent-hub: dispatched ${id} to ${target}`)
       return this.publicTask(task)
     })
+  }
+
+  /**
+   * Role gate of one dispatch target.
+   * - `worker` accepts anything (and an agent without a stored role is a worker);
+   * - a `pool:` is refused only when EVERY member with that capability refuses the
+   *   task (a pool nobody can serve stays queued, exactly as before roles existed);
+   * - `dispatcher` / `observer` are refused with `role-not-dispatchable`, a
+   *   `tester` with a non-test task with `role-not-testable`.
+   */
+  checkTargetRole(state, target, task) {
+    if (AGENT_ID_RE.test(target)) {
+      const refusal = roleRefusal(task, agentRole(own(state.agents, target)), target)
+      if (refusal !== undefined) throw new HubError(400, refusal.code, refusal.message)
+      return
+    }
+    const capability = target.slice(5)
+    const members = Object.values(state.agents).filter(a => !a.revoked && a.capabilities.includes(capability))
+    const refusals = members.map(a => roleRefusal(task, agentRole(a), target))
+    if (refusals.length > 0 && refusals.every(r => r !== undefined)) throw new HubError(400, refusals[0].code, refusals[0].message)
   }
 
   cancel(id, reason = 'cancelled by dsh') {
@@ -441,11 +485,15 @@ export class AgentHub {
     return this.mutate((state) => {
       const agent = this.liveAgent(state, agentId)
       agent.lastSeen = nowIso(this.clock())
+      const role = agentRole(agent)
       const running = Object.values(state.tasks).filter(t => t.assignedTo === agentId && (t.status === 'accepted' || t.status === 'running')).length
       const room = Math.max(0, Math.min(Number.isInteger(max) ? max : 1, agent.maxConcurrency - running))
       const candidates = Object.values(state.tasks)
         .filter(t => t.status === 'pending')
         .filter(t => t.agent === agentId || (t.agent.startsWith('pool:') && agent.capabilities.includes(t.agent.slice(5))))
+        // Role gate: a pool only picks worker / tester agents, a tester only picks
+        // test tasks, and a dispatcher / observer leases nothing at all.
+        .filter(t => roleAccepts(role, t))
         .filter(t => t.depends_on.every(d => own(state.tasks, d)?.status === 'completed'))
         .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority] || a.created_at.localeCompare(b.created_at))
         .slice(0, room)

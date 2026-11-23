@@ -1,5 +1,7 @@
 # 作战室迁移安装说明（README-MIGRATE）
 
+> **2026-11-23 提示**：本文只覆盖前 5 个插件。第 6 个插件 dsh-agent-hub 的安装顺序和 `<DSH home>/agent-hub/controller.env` 配置见根目录 [README.md](../README.md) 第 3 节和 `plugins/dsh-agent-hub/README.md`；独立服务 dsh-hub 的部署见 `services/dsh-hub/README.md`。任何 `DSH_` 开头的变量都不能写进 `<DSH home>/.env`；dsh-secrets 的口令推荐写在 `<DSH home>/secrets.env`。全部文档目录见 [INDEX.md](INDEX.md)。
+
 适用：DSH 0.2.2-rc.5 + 五个插件仓 `dsh-router-b`、`dsh-egress`、`dsh-vpn`、`dsh-token-stats`、`dsh-secrets`，profile `web`。
 
 依据：`W6-MIGRATION-MANUAL.md`（主），W1–W5（辅），以及 2026-11-20 在源机只读核对的源码：

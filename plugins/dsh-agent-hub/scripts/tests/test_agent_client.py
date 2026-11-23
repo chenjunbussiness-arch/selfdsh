@@ -712,6 +712,7 @@ class TestBridge(TempCase):
         with open(os.path.join(self.ex, "inbox", "t1", "task.json"), encoding="utf-8") as f:
             t1 = json.load(f)
         self.assertEqual(t1["workspace_path"], self.ws)
+        self.assertEqual(t1["workspace_host_path"], self.ws, "no DSH_PATH_MAP: host path = local path")
         self.assertEqual(t1["node"], "mydesk")
         self.assertEqual(t1["ref"], "main")
         self.assertEqual(t1["exchange"]["result_dir"], "outbox/t1")
@@ -720,7 +721,13 @@ class TestBridge(TempCase):
         with open(os.path.join(self.ex, "inbox", "t2", "task.json"), encoding="utf-8") as f:
             t2 = json.load(f)
         self.assertIsNone(t2["workspace_path"])
+        self.assertIsNone(t2["workspace_host_path"])
         self.assertEqual(t2["node"], "mydesk")
+        br2 = ac.Bridge(FakeHub([task("t3", workspace="deepseek-harness")]), self.path("ex2"), 1, log=Logs(), node="mydesk",
+                        workspaces={"deepseek-harness": self.ws}, host_paths={"deepseek-harness": "E:/PythonProject/dsh-warroom"}, wait=5)
+        br2.pull()
+        with open(os.path.join(self.path("ex2"), "inbox", "t3", "task.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["workspace_host_path"], "E:/PythonProject/dsh-warroom")
         self.assertEqual([c[1] for c in hub.of("progress")], ["t1", "t2"])
         self.assertEqual(hub.of("result"), [])
         self.assertFalse(any(n.endswith(".part") for n in os.listdir(os.path.join(self.ex, "inbox"))))
@@ -815,9 +822,115 @@ class TestEnvFile(TempCase):
         self.assertEqual(text, ac.ENV_TEMPLATE, "worker.env.example is what `init` writes")
         self.assertEqual(tuple(ac.parse_env_text(text)), ac.ENV_KEYS)
         values = ac.parse_env_text(text)
-        self.assertEqual((values["DSH_HUB_PROXY"], values["DSH_HUB_URL"]), ("http://127.0.0.1:7890", "https://hub.example.com:7891"))
+        self.assertEqual((values["DSH_HUB_PROXY"], values["DSH_HUB_URL"]), ("off", "https://8.134.170.38:7891"))
         with open(prof_example, encoding="utf-8") as f:
             self.assertEqual(set(json.load(f)), set(ac.profile_template()))
+
+
+class TestRuntime(TempCase):
+    def settings(self, profile=None, platform="aws-quick"):
+        wd = self.path("wd-" + uuid.uuid4().hex[:6], make=True)
+        if profile is not None:
+            with open(os.path.join(wd, "profile.json"), "w", encoding="utf-8") as f:
+                json.dump(profile, f)
+        wm = ac.resolve_workspaces(worker_dir=wd, log=Logs())
+        return ac.resolve_settings(wm, env={}, dotenv={"DSH_PLATFORM": platform}, worker_dir=wd)
+
+    def test_platform_default_profile_override_and_null(self):
+        st = self.settings()
+        self.assertEqual(st["runtime"]["modes"], ["fast", "balanced", "smart"])
+        self.assertEqual(st["runtime"]["defaults"]["code"], {"mode": "smart", "thinking": "medium"})
+        st["runtime"]["modes"].append("x")
+        self.assertEqual(ac.PLATFORM_RUNTIMES["aws-quick"]["modes"], ["fast", "balanced", "smart"], "a copy, not the table")
+        self.assertIsNone(self.settings(platform="custom")["runtime"], "other platforms declare nothing")
+        mine = {"modes": ["fast"], "agents": [{"name": "quick", "description": "default"}]}
+        self.assertEqual(self.settings({"runtime": mine})["runtime"], mine)
+        self.assertIsNone(self.settings({"runtime": None})["runtime"], "null = declare nothing")
+        self.assertEqual(ac.settings_summary(self.settings({"runtime": mine}))["runtime"], mine)
+        for bad in ({"modes": ["turbo"]}, {"thinking": "high"}, {"agents": [1]}, {"default": {"mode": "x"}}, {"defaults": []}):
+            with self.assertRaises(ac.ConfigError, msg=json.dumps(bad)):
+                self.settings({"runtime": bad})
+        with self.assertRaises(ac.ConfigError):
+            self.settings({"runtime": ["fast"]})
+
+    def test_enroll_and_heartbeat_carry_the_runtime(self):
+        rt = {"modes": ["fast", "smart"]}
+        op = FakeOpener({"request_id": "r", "poll_secret": "s"}, {"ok": True})
+        c = ac.HubClient("hub.example.com", TOKEN, opener=op, workspaces=["w"], runtime=rt)
+        c.enroll_request("aws-quick", "poll", "mydesk", ["w"], [], 1, "")
+        c.heartbeat("idle")
+        self.assertEqual(json.loads(op.requests[0][0].data)["runtime"], rt)
+        self.assertEqual(json.loads(op.requests[1][0].data)["runtime"], rt)
+        op2 = FakeOpener({"ok": True})
+        ac.HubClient("hub.example.com", TOKEN, opener=op2).heartbeat("idle")
+        self.assertNotIn("runtime", json.loads(op2.requests[0][0].data), "nothing declared -> key not sent")
+
+    def test_resolve_effort(self):
+        rt = ac.platform_runtime("aws-quick")
+        self.assertEqual(ac.resolve_effort({"type": "code"}, rt), {"mode": "smart", "thinking": "medium", "source": "default"})
+        self.assertEqual(ac.resolve_effort({"type": "document"}, rt), {"mode": "balanced", "thinking": "low", "source": "default"})
+        self.assertEqual(ac.resolve_effort({"type": "code", "effort": {"mode": "fast"}}, rt), {"mode": "fast", "source": "task"},
+                         "another mode does not inherit the default's thinking")
+        self.assertEqual(ac.resolve_effort({"type": "code", "effort": {"thinking": "high"}}, rt), {"mode": "smart", "thinking": "high", "source": "task"})
+        self.assertEqual(ac.resolve_effort({"type": "data", "context": {"effort": {"mode": "smart", "agent": "quick"}}}, rt),
+                         {"mode": "smart", "agent": "quick", "source": "task"}, "context.effort from an older hub")
+        self.assertEqual(ac.resolve_effort({"type": "code", "effort": {"mode": "smart"}}, None), {"mode": "smart", "source": "task"})
+        self.assertEqual(ac.resolve_effort({"type": "code"}, None), {"source": "none"})
+
+    def test_bridge_writes_effort_resolved(self):
+        hub = FakeHub([task("t1", type="document"), task("t2", type="research", effort={"mode": "smart", "thinking": "high"})])
+        hub.runtime = ac.platform_runtime("aws-quick")
+        ex = self.path("ex-rt")
+        ac.Bridge(hub, ex, 5, log=Logs(), node="mydesk", wait=5).pull()
+        with open(os.path.join(ex, "inbox", "t1", "task.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["effort_resolved"], {"mode": "balanced", "thinking": "low", "source": "default"})
+        with open(os.path.join(ex, "inbox", "t2", "task.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["effort_resolved"], {"mode": "smart", "thinking": "high", "source": "task"})
+
+
+class TestPathMap(TempCase):
+    def test_parse_and_map(self):
+        pm = ac.parse_path_map(r"E:/=/host/e; C:\Users\me\.dsh\profiles\desktop=/host/dsh-profile ;")
+        self.assertEqual(pm, [("C:/Users/me/.dsh/profiles/desktop", "/host/dsh-profile"), ("E:", "/host/e")])
+        self.assertEqual(ac.map_path("e:\\PythonProject\\x", pm), "/host/e/PythonProject/x")
+        self.assertEqual(ac.map_path("E:/", pm), "/host/e/")
+        self.assertEqual(ac.map_path("c:/users/ME/.dsh/profiles/desktop/cordis.patch.yml", pm), "/host/dsh-profile/cordis.patch.yml")
+        self.assertEqual(ac.map_path("D:/other", pm), "D:/other")
+        self.assertEqual(ac.map_path("E:/x", []), "E:/x")
+        self.assertEqual(ac.parse_path_map(""), [])
+        for bad in ("E:/", "=/x", "E:/="):
+            with self.assertRaises(ac.ConfigError):
+                ac.parse_path_map(bad)
+        self.assertEqual(ac.map_path("/srv/a", ac.parse_path_map("/srv=/mnt")), "/mnt/a")
+        self.assertEqual(ac.map_path("/SRV/a", ac.parse_path_map("/srv=/mnt")), "/SRV/a", "POSIX prefixes stay case-sensitive")
+
+    def test_host_profile_read_through_the_map(self):
+        local = self.path("host-e", "Proj", "ws", make=True)
+        wd = self.path("wd", make=True)
+        with open(os.path.join(wd, "profile.json"), "w", encoding="utf-8") as f:
+            json.dump({"node": "mydesk", "workspaces": {"ws": "E:\\Proj\\ws", "gone": "E:/Proj/missing"}}, f)
+        logs = Logs()
+        wm = ac.resolve_workspaces(worker_dir=wd, log=logs, path_map=ac.parse_path_map("E:/=" + self.path("host-e")))
+        self.assertEqual(wm.names(), ["ws"])
+        self.assertEqual(wm.workspaces["ws"], os.path.abspath(local))
+        self.assertEqual(wm.host_paths["ws"], "E:\\Proj\\ws")
+        self.assertIn("gone", logs.joined())
+        self.assertEqual(wm.to_json()["host_paths"], {"ws": "E:\\Proj\\ws"})
+        plain = ac.resolve_workspaces(worker_dir=wd, log=Logs())
+        if os.name != "nt":
+            self.assertEqual(plain.names(), [], "without the map the Windows paths do not exist here")
+
+    def test_main_reads_dsh_path_map(self):
+        self.path("host-e", "Proj", "ws", make=True)
+        wd = self.path("wd2", make=True)
+        with open(os.path.join(wd, "profile.json"), "w", encoding="utf-8") as f:
+            json.dump({"workspaces": {"ws": "E:/Proj/ws"}}, f)
+        with open(os.path.join(wd, ".env"), "w", encoding="utf-8") as f:
+            f.write("DSH_PATH_MAP=E:/=" + self.path("host-e").replace("\\", "/") + "\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ac.main(["workspaces", "--worker-dir", wd], env={}), 0)
+        self.assertIn("ws", json.loads(out.getvalue())["workspaces"])
 
 
 class TestWorkerDir(TempCase):
@@ -924,8 +1037,44 @@ class TestWorkerDir(TempCase):
             self.assertEqual(f.read(), "DSH_HUB_URL=mine\n", "never overwritten")
         self.assertIn("kept", out.joined())
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(ac.main(["init", "--worker-dir", self.path("fresh")], env={}), 0)
+            self.assertEqual(ac.main(["init", "--worker-dir", self.path("fresh"), "--exchange", self.path("fresh-ex")], env={}), 0)
         self.assertTrue(os.path.isfile(self.path("fresh", ".env")))
+        self.assertTrue(os.path.isfile(self.path("fresh-ex", "README.md")))
+
+    def test_init_creates_the_exchange_folder_with_a_readme(self):
+        ex = self.path("ex")
+        out = Logs()
+        self.assertEqual(ac.cmd_init(self.wd, "mydesk", out, exchange=True, env={}, exchange_dir=ex), 0)
+        for d in ac.EXCHANGE_DIRS:
+            self.assertTrue(os.path.isdir(os.path.join(ex, d)), d)
+        with open(os.path.join(ex, "README.md"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), ac.EXCHANGE_README)
+        self.assertIn("created", out.joined())
+        with open(os.path.join(ex, "README.md"), "w", encoding="utf-8") as f:
+            f.write("mine")
+        out = Logs()
+        ac.cmd_init(self.wd, "mydesk", out, exchange=True, env={}, exchange_dir=ex)
+        with open(os.path.join(ex, "README.md"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "mine", "README.md is never overwritten")
+        self.assertIn("kept", out.joined())
+
+    def test_init_reads_dsh_exchange_from_env_and_dotenv(self):
+        with open(os.path.join(self.wd, ".env"), "w", encoding="utf-8") as f:
+            f.write("DSH_EXCHANGE=from-dotenv\n")
+        ac.cmd_init(self.wd, "mydesk", Logs(), exchange=True, env={})
+        self.assertTrue(os.path.isfile(os.path.join(self.wd, "from-dotenv", "README.md")))
+        ac.cmd_init(self.wd, "mydesk", Logs(), exchange=True, env={"DSH_EXCHANGE": self.path("from-env")})
+        self.assertTrue(os.path.isdir(self.path("from-env", "inbox")))
+        if os.name != "nt":
+            out = Logs()
+            self.assertIsNone(ac.init_exchange(self.wd, {"DSH_EXCHANGE": "E:/dsh-exchange"}, out=out))
+            self.assertIn("skipped", out.joined())
+
+    def test_bridge_creates_the_exchange_readme(self):
+        ex = self.path("bridge-ex")
+        ac.ensure_exchange(ex)
+        self.assertEqual(sorted(os.listdir(ex)), sorted(list(ac.EXCHANGE_DIRS) + ["README.md"]))
+        self.assertEqual(ac.ensure_exchange(ex), [])
 
     def test_main_reads_worker_env(self):
         with open(os.path.join(self.wd, ".env"), "w", encoding="utf-8") as f:
@@ -1237,12 +1386,12 @@ class TestCheck(unittest.TestCase):
         self.assertIn("fixed proxy node in Clash", text)
         self.assertNotIn("DIRECT", text)
 
-    def test_off_to_a_public_hub_warns(self):
+    def test_off_to_a_public_hub_notes_the_proxy_fallback(self):
         code, text, op = self.run_check({"ok": True, "version": "2.0.0"}, no_proxy=True)
         self.assertEqual(code, 0)
         self.assertIn("proxy:   none, direct connection", text)
-        self.assertIn("warning: DSH_HUB_PROXY=off but hub.example.com is a public address", text)
-        self.assertIn("only accepts traffic from outside", text)
+        self.assertIn("note:    DSH_HUB_PROXY=off and hub.example.com is a public address", text)
+        self.assertIn("try the proxy (DSH_HUB_PROXY=http://127.0.0.1:7890)", text)
         self.assertFalse(ac.is_public_host("127.0.0.1"))
         self.assertFalse(ac.is_public_host("10.0.0.5"))
         self.assertTrue(ac.is_public_host("8.8.8.8"))

@@ -56,3 +56,23 @@ credentials*
 !**/credentials.d.ts
 !**/Credentials.d.ts
 !**/credentials.js
+
+# ── 2026-11-23 追加：agent-hub / dsh-hub 运行态与临时产物 ─────────────────────
+# UI 改版前的源码备份目录、本地 Docker 联调生成的 CA/证书输出、临时 profile
+plugins/**/.ui-backup/
+services/dsh-hub/deploy/docker/out/
+tmp-profile/
+# Python 字节码缓存（agent_client.py 跑测试时生成）
+__pycache__/
+*.pyc
+
+# 任何 *.env 都可能装着令牌/口令（controller.env、secrets.env、worker/.env 的副本……）
+*.env
+controller.env
+secrets.env
+# 示例文件放行（只含占位值）
+!*.env.example
+!worker.env.example
+# worker 注册后写下的令牌文件与入网申请回执
+agent.token
+*.enroll.json

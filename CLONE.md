@@ -1,7 +1,8 @@
 # CLONE.md · 在 Windows / WSL 上克隆 dsh-warroom（tag v2026.11.21）
 
 本文只做一件事：把私有仓库 `dev/dsh-warroom` 安全地克隆到你的 Windows 或 WSL 机器上。
-装到 DSH 里是下一步的事，见仓库里的 `docs/README-MIGRATE.md` 与同目录的 `MANIFEST.md`。
+装到 DSH 里是下一步的事：先看根目录 `README.md` 的「从零开始」（6 个插件的安装顺序、每台机器要准备的配置文件），
+再按需查 `docs/README-MIGRATE.md` 与同目录的 `MANIFEST.md`；全部文档目录见 `docs/INDEX.md`。
 
 照抄规则：所有尖括号 `<...>` 都是占位符，**替换时连同尖括号一起删掉**；否则 bash 会把 `<`
 当成输入重定向。命令默认在 **Git Bash**（Windows）或 **WSL 的 bash** 里执行，只有标注
@@ -496,9 +497,9 @@ git ls-remote origin
 # 期望看到 refs/heads/main 和 refs/tags/v2026.11.21（会再问一次口令）
 
 git ls-files | wc -l
-# 期望 398 = 347（基线）+ 49（本次新增：dsh-secrets 22、vendor/exa 19、nginx 模板 5、
+# tag v2026.11.21 期望 398 = 347（基线）+ 49（dsh-secrets 22、vendor/exa 19、nginx 模板 5、
 #             scripts 2、docs/MANIFEST.md 1）+ 根目录 CLONE.md、MANIFEST.md 2
-# 以 tag 实际为准，不应低于 390
+# 之后的 main（加入 dsh-agent-hub、services/dsh-hub 等）约 550 个，以 MANIFEST.md 第 1.1 节和实际 tag 为准
 
 test -f plugins/dsh-secrets/packages/host-secrets/vault.js && echo 'OK: vault.js'
 # 平铺包（没有 plugins/ 前缀）就用：test -f dsh-secrets/packages/host-secrets/vault.js

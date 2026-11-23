@@ -17,7 +17,7 @@ const HUB_AGENT = {
   status: 'online', version: 'agent_client/2.1.0', left_at: undefined,
   tokenHash: 'ab'.repeat(32), token: 'dsha_quick-mydesk_SECRET', granted_workspaces: ['deepseek-harness'],
 }
-const AGENT_KEYS = ['agent_id', 'platform', 'mode', 'capabilities', 'max_concurrency', 'description', 'revoked', 'online', 'last_seen', 'reported_status', 'running_tasks', 'created_at', 'status', 'version']
+const AGENT_KEYS = ['agent_id', 'platform', 'mode', 'capabilities', 'max_concurrency', 'description', 'role', 'revoked', 'online', 'last_seen', 'reported_status', 'running_tasks', 'created_at', 'status', 'version']
 
 const HUB_TASK = {
   task_id: 't1', agent: 'pool:code', assigned_to: 'quick-mydesk', type: 'code', title: 'Fix it', status: 'completed', priority: 'high',
@@ -39,7 +39,7 @@ const HUB_REQUEST = {
   capabilities: ['code'], max_concurrency: 1, description: 'Kiro', from: '203.0.113.9', requested_at: '2026-11-22T09:00:00.000Z',
   decided_at: undefined, reason: undefined, secretHash: 'cd'.repeat(32), poll_secret: 'SECRET',
 }
-const REQUEST_KEYS = ['request_id', 'status', 'agent_id', 'platform', 'mode', 'capabilities', 'max_concurrency', 'description', 'from', 'requested_at', 'decided_at', 'reason']
+const REQUEST_KEYS = ['request_id', 'status', 'agent_id', 'platform', 'mode', 'capabilities', 'max_concurrency', 'description', 'role', 'from', 'requested_at', 'decided_at', 'reason']
 
 const HUB_OVERVIEW = {
   protocol: 'dsh-agent/2.0', agents: [HUB_AGENT], task_counts: { pending: 2, completed: 5, bogus: 9, running: -1 }, pending_requests: 1,
@@ -114,6 +114,7 @@ test('agents: { generated_at, online, agents } with the v1 whitelist, tokens mas
     agent_id: 'quick-mydesk', platform: 'aws-quick', mode: 'poll', capabilities: ['research', 'code'], max_concurrency: 2,
     description: 'Quick on MYDESK dsha_***', revoked: false, online: true, last_seen: '2026-11-22T12:00:00.000Z',
     reported_status: 'busy', running_tasks: ['t1'], created_at: '2026-11-01T00:00:00.000Z', status: 'online', version: 'agent_client/2.1.0',
+    role: 'worker',
   })
   const text = JSON.stringify(body)
   for (const secret of ['tokenHash', 'SECRET', 'abab', 'granted_workspaces']) assert.ok(!text.includes(secret), secret)

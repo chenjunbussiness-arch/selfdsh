@@ -2,7 +2,7 @@
   "name": "dsh-router-b",
   "version": "0.1.0",
   "private": true,
-  "description": "Partition router bundle for DeepSeek Harness: the host plugin that routes work into file partitions and the Web client panel that shows it, joined by a same-origin HTTP bridge",
+  "description": "Partition router for DeepSeek Harness: say a demand in the war-room chat, it is routed to a workspace (partition) and handed to a worker session; a right-sidebar task board keeps a worker's self-report apart from a verified result. Required: at least one workspace under host-router `partitions` (absolute root on this machine). See README.md",
   "type": "module",
   "icon": "./icon.svg",
   "main": "index.js",
@@ -19,7 +19,8 @@
     "icon.svg",
     "locale",
     "docs",
-    "packages"
+    "packages",
+    "README.md"
   ],
   "license": "MIT",
   "engines": {

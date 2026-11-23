@@ -1,5 +1,7 @@
 # MANIFEST — 发布内容 / 来源 / 路径映射
 
+> **2026-11-23 提示**：本文是 2026-11-21 的快照，不含 dsh-agent-hub、services/dsh-hub、client-ui-secrets。当前目录表和文件数见根目录 [MANIFEST.md](../MANIFEST.md)，全部文档目录见 [INDEX.md](INDEX.md)。
+
 生成时间：2026-11-21（任务 t20261121121422-376）。本文件回答四件事：
 
 1. `profile/package.json` 里的每个依赖从哪来、进没进仓库；

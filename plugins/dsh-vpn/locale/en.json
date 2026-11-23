@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "VPN",
-    "description": "Manages the VPN used to reach the internal git server: split-tunnel openfortivpn profiles (password or token URL), a connection watchdog, and a read-only status tool for agents.",
-    "detail": "docs/VPN.md"
+    "description": "Manages a split-tunnel openfortivpn VPN on a Linux server (password or token URL), with a connection watchdog and a read-only vpn_status tool. Required: openfortivpn and ppp installed on the server (1.18+ for token URLs), and one profile created on the VPN page.",
+    "detail": "README.md"
   }
 }
