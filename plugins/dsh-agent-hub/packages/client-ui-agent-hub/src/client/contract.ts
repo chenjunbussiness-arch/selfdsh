@@ -66,6 +66,8 @@ export interface Overview {
    */
   agent_counts?: Partial<Record<AgentStatus, number>>
   pending_requests: number
+  /** Tasks DSH may do itself now (no worker for them online, or busy too long). */
+  fallback_due?: number
 }
 
 /** `GET /api/agent-hub/admin/agents`. */
@@ -95,6 +97,9 @@ export interface TaskRow {
   task_id: string
   agent: string
   assigned_to?: string
+  /** Sticky routing: the worker this pool task goes to first. */
+  preferred_agent?: string
+  sticky_key?: string
   type: string
   title: string
   status: TaskStatus

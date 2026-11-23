@@ -81,6 +81,7 @@ curl -s https://127.0.0.1:7891/v1/health            # {"ok":true,"version":"2.0.
 | `sweepIntervalMs` | 整数 1000..3600000 | `15000` | 清扫间隔：处理过期租约、上游失败、过期的申请 | `15000` |
 | `maxResultBytes` | 整数 65536..1073741824 | `20971520`（20 MiB） | `POST /v1/result` 和 `POST /v1/ctl/dispatch`（输入文件是 inline 上传的）的请求体上限 | `20971520` |
 | `fallback` | 对象 `{enabled, noFallbackCapabilities}` | `{"enabled": true, "noFallbackCapabilities": ["quick"]}` | DSH 兜底（见第 6.2 节）。`enabled: false` 关掉兜底；`noFallbackCapabilities` 里的能力永远不兜底（例如只有 Quick 能做的活） | `{"enabled": true, "noFallbackCapabilities": ["quick", "gpu"]}` |
+| `sticky` | 对象 `{holdSeconds, ttlSeconds}` | `{"holdSeconds": 120, "ttlSeconds": 86400}` | 粘性路由（见第 6.3 节）。`holdSeconds`（0..3600）：别的 worker 让给首选 worker 多久，0 = 只排序不让；`ttlSeconds`（60..2592000）：记住「谁做过」多久 | `{"holdSeconds": 60}` |
 | `mcp` | 对象 `{enabled}` | `{"enabled": true}` | 是否开放 `/mcp` 和 `/oauth/token`（见第 5.4 节）。只用 REST 的部署可以关掉 | `{"enabled": false}` |
 
 其他请求体上限是固定的：`enroll`、`enroll/status`、`heartbeat` 16 KiB；`event` 和其他控制方 POST（cancel、retry、approve、reject、revoke、provision）64 KiB。
@@ -144,7 +145,7 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 
 | 方法 路径 | 请求 | 返回 |
 |---|---|---|
-| `POST /v1/ctl/dispatch?id=` | v1 的全部字段，再加 `workspace`（`code` 类型必填）、`node`、`ref`、`capability`、`require_online`（布尔）、`fallback`（默认 `dsh`，或 `none`）、`fallback_after_seconds`；`created_by` 由 hub 填写 | 任务对象（含 `workspace/node/ref/created_by`）；目标不在线时多一个 `warnings: ["agent-offline"]` 或 `["no-online-worker"]` |
+| `POST /v1/ctl/dispatch?id=` | v1 的全部字段，再加 `workspace`（`code` 类型必填）、`node`、`ref`、`capability`、`require_online`（布尔）、`fallback`（默认 `dsh`，或 `none`）、`fallback_after_seconds`、`sticky_key`、`sticky`（`false` 不要粘性）；`created_by` 由 hub 填写 | 任务对象（含 `workspace/node/ref/created_by/preferred_agent`）；目标不在线时多一个 `warnings: ["agent-offline"]` 或 `["no-online-worker"]`；会兜底的任务带 `fallback_in_seconds`（0 = DSH 现在就可以接） |
 | `GET /v1/ctl/tasks?id=&status=&agent=&workspace=&limit=` | `limit` 1..200，默认 50 | `{generated_at, filter:{status,agent,workspace,limit}, tasks}` |
 | `GET /v1/ctl/task?id=&task_id=` | | `{generated_at, task}`（task 含 instruction、inputs、history、result、context） |
 | `GET /v1/ctl/output?id=&task_id=&name=` | 只能下载 `result.outputs` 里列出的文件 | 文件字节 |
@@ -156,7 +157,7 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 | `POST /v1/ctl/reject?id=` | `{request_id, reason?}` | `{request_id, status}` |
 | `POST /v1/ctl/revoke?id=` | `{agent_id}`，被吊销 worker 正在执行的任务会回到队列 | worker 对象 |
 | `POST /v1/ctl/provision?id=` | `{agent_id, platform, mode, node, workspaces, capabilities, max_concurrency, description}` | `{agent, token, note}`，令牌只返回这一次 |
-| `GET /v1/ctl/fallback?id=[&workspaces=a,b]` | 等待兜底的任务（见第 6.2 节）；传了 `workspaces` 时只列 DSH 自己有这些工作区的代码任务 | `{generated_at, tasks[{…任务, waited_seconds}]}` |
+| `GET /v1/ctl/fallback?id=[&workspaces=a,b]` | 等待兜底的任务（见第 6.2 节）；传了 `workspaces` 时只列 DSH 自己有这些工作区的代码任务 | `{generated_at, tasks[{…任务, waited_seconds, fallback_reason}]}`，`fallback_reason` 是 `no-online-worker` 或 `workers-busy` |
 | `POST /v1/ctl/fallback/take?id=` | `{task_id?, workspaces?}`；不传 `task_id` 就取最急的一个。任务没到时间或不该兜底返回 409 `not-fallback` | `{task}`（含 instruction 和 inputs[{name, from_task}]）；没有可兜底的任务时 `{task:null}` |
 | `POST /v1/ctl/fallback/event?id=` | `{task_id, progress?, message?}`，同时续租 | `{ok, lease_until}` |
 | `POST /v1/ctl/fallback/result?id=` | 和 `/v1/result` 相同的结构 | `{ok, task_status}` |
@@ -231,14 +232,25 @@ Quick 这类 agent 一般按自己的计划定时跑一次「调 `next_task`，�
 
 ### 6.2 DSH 兜底
 
-没有合适的 worker 在规定时间内领走的任务，由 DSH 自己做（hub 里记为内置的 `dsh-self`，DSH 插件用 `fallback_list` / `fallback_take` / `fallback_submit` 三个工具来做）。
+没有 worker 能接、或者能接的都忙着的任务，由 DSH 自己做（hub 里记为内置的 `dsh-self`，DSH 插件用 `fallback_list` / `fallback_take` / `fallback_submit` 三个工具来做）。
 
-- **等多久**：任务的 `fallback_after_seconds`（60..604800 秒）；没写时默认 600 秒；派给某个定时拉取的 agent 时，取 600 秒和两倍拉取周期里大的那个（Quick 一小时拉一次，就等两小时）。依赖没完成之前不计时。
+- **没有能接的 worker 在线**：立即可以兜底，不等。「能接」= 目标、能力、角色、工作区、机器、effort 都对得上，且没有交还过这个任务；定时拉取的 agent 在两次拉取之间仍算在线。派活的返回里 `fallback_in_seconds` 为 0。
+- **有能接的 worker 在线但一直没领**（都在忙）：等任务的 `fallback_after_seconds`（60..604800 秒），没写时默认 600 秒；派给某个定时拉取的 agent 时，取 600 秒和两倍拉取周期里大的那个（Quick 一小时拉一次，就等两小时）。等待中途这些 worker 都下线了，立即可以兜底。
+- 依赖没完成之前不计时。
 - **哪些不兜底**：任务写了 `fallback: "none"`；任务的 `capability` 在 `fallback.noFallbackCapabilities` 里（默认 `quick`）；代码任务而 DSH 没有这个工作区。
 - **只试一次**：DSH 做失败，或者租约到期没交，任务就是 `failed`，`error.code` 为 `FALLBACK_TIMEOUT`（超时时）。要再来一次用 `retry`，会重新排队并清掉兜底记录。
 - DSH 接手后，原来的 worker 再报这个任务会收到 `abort`，交结果会被拒。
 - `overview` 里多一个 `fallback_due`：现在可以兜底的任务数。
 - `dsh-self` 是保留名字，注册和派活都不能用它。
+
+### 6.3 粘性路由
+
+`pool:` 任务优先给上次做过同一件事的 worker，让它的代码目录、浏览器登录、上下文接着用。只是优先，不是绑定。
+
+- **首选谁**（派活时定下，记在 `preferred_agent`）：任务带 `sticky_key`（1..128 个字母、数字或 `_ . : / -`，例如会话 id、浏览器账号、测试套件名）时，用上次完成同一个 key 的 worker；否则用完成它 `parent_task_id` 或 `depends_on` 里任务的 worker；再否则用上次完成同一个 `workspace` 的 worker。首选的 worker 必须还能接这个任务。`sticky: false` 不要首选。
+- **怎么优先**：首选 worker 领任务时这类任务排在同优先级的最前面。别的 worker 在任务排队后 `sticky.holdSeconds`（默认 120 秒）内不领它；但首选 worker 不在线、并发已满、或交还了这个任务时，立即放开。
+- **记住谁**：任务成功完成时，按 `sticky_key`（没有就按 `workspace`）记下完成它的 worker，保存 `sticky.ttlSeconds`（默认一天），最多 2000 条。DSH 兜底做的不记。
+- 指名派给某个 worker 的任务不受影响；粘性也不影响兜底判断（只要有能接的 worker 在线，就按忙碌规则等）。
 
 ## 7. 长轮询
 

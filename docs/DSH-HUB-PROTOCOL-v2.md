@@ -248,9 +248,16 @@ worker 客户端在 `task.json` 里写 `effort_resolved`：任务自己的 effor
 
 **做不了就交还**：`/v1/release`（MCP 里是 `release_task`）把任务放回队列，不计尝试次数，这个 agent 不会再领到它。
 
-**DSH 兜底**：任务在规定时间内没有合适的 worker 领走，DSH 自己做（hub 记为保留 id `dsh-self`）。
+**DSH 兜底**：没有 worker 能接、或者能接的都忙着，DSH 自己做（hub 记为保留 id `dsh-self`）。
 
-- 等待时间：任务的 `fallback_after_seconds`，否则 600 秒；派给定时拉取的 agent 时取 600 秒和两倍周期中较大者。依赖没完成不计时。
+- 没有能接的 worker 在线：立即兜底，不等（派活返回 `fallback_in_seconds: 0`，DSH 直接 `fallback_take`）。
+- 有能接的 worker 在线但一直没领（都在忙）：等任务的 `fallback_after_seconds`，否则 600 秒；派给定时拉取的 agent 时取 600 秒和两倍周期中较大者。等待中这些 worker 都下线了，立即兜底。依赖没完成不计时。
 - 不兜底：`fallback: "none"`；`capability` 在 `fallback.noFallbackCapabilities` 里（默认 `quick`）；代码任务而 DSH 没有这个工作区。
 - 只试一次：DSH 失败或超时（`FALLBACK_TIMEOUT`）任务就失败；要再来用 `retry`。
 - DSH 接手后原 worker 再报这个任务会收到 `abort`。
+
+**粘性路由**：`pool:` 任务优先给上次做过同一件事的 worker（`preferred_agent`）。
+
+- 首选：同一个 `sticky_key`（会话、浏览器账号、测试套件）的上次完成者；否则上游或父任务的完成者；否则同一工作区的上次完成者。`sticky: false` 关掉。
+- 别的 worker 让它 `sticky.holdSeconds`（默认 120 秒）；首选 worker 不在线、满了或交还了，立即放开。
+- 只记成功完成的 worker，DSH 兜底不记；记一天（`sticky.ttlSeconds`）。

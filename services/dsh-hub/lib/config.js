@@ -5,7 +5,7 @@
  *   { "port": 7891, "host": "0.0.0.0", "tls": { "cert": "...", "key": "..." },
  *     "allow": ["203.0.113.7/32", "10.0.0.0/8", "2001:db8::1"], "trustProxy": false,
  *     "maxRetries": 2, "offlineAfterMs": 90000, "sweepIntervalMs": 15000,
- *     "maxResultBytes": 20971520 }
+ *     "maxResultBytes": 20971520, "sticky": { "holdSeconds": 120, "ttlSeconds": 86400 } }
  *
  * The environment variable DSH_HUB_PORT overrides `port`.
  *
@@ -22,7 +22,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { compileAllow, DEFAULT_MAX_RESULT_BYTES, resolveListenHost } from './http.js'
 
 export const DEFAULT_PORT = 7891
-export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'mcp']
+export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'sticky', 'mcp']
 
 /** A configuration problem: the service must not start (exit code 78, EX_CONFIG). */
 export class ConfigError extends Error {}
@@ -81,11 +81,17 @@ export function resolveConfig(raw = {}, { env = {}, dir = '.' } = {}) {
   if (fb.noFallbackCapabilities !== undefined && (!Array.isArray(fb.noFallbackCapabilities) || fb.noFallbackCapabilities.some(c => typeof c !== 'string' || !/^[a-z][a-z0-9-]{0,47}$/.test(c)))) {
     throw new ConfigError('hub.json: fallback.noFallbackCapabilities must be a list of capability names')
   }
+  const st = raw.sticky ?? {}
+  if (typeof st !== 'object' || Array.isArray(st) || st === null) throw new ConfigError('hub.json: sticky must be an object')
   const mcp = raw.mcp ?? {}
   if (typeof mcp !== 'object' || Array.isArray(mcp) || mcp === null || (mcp.enabled !== undefined && typeof mcp.enabled !== 'boolean')) throw new ConfigError('hub.json: mcp must be {"enabled": true|false}')
 
   const config = {
     fallback: { enabled: fb.enabled !== false, noFallbackCapabilities: fb.noFallbackCapabilities ?? ['quick'] },
+    sticky: {
+      holdSeconds: integer(st.holdSeconds, 'sticky.holdSeconds', 0, 3600, 120),
+      ttlSeconds: integer(st.ttlSeconds, 'sticky.ttlSeconds', 60, 30 * 86400, 86400),
+    },
     mcp: { enabled: mcp.enabled !== false },
     port, host, tls, allow: [...allow], trustProxy: raw.trustProxy === true,
     maxRetries: integer(raw.maxRetries, 'maxRetries', 0, 20, 2),

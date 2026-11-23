@@ -175,7 +175,7 @@ export function createTools({ client }) {
 
   define({
     name: 'task_dispatch',
-    description: 'Send a task to a worker id or pool:<capability>. Queued if nobody is online (warnings say so). Instruction must stand alone. depends_on chains tasks; upstream outputs become inputs.',
+    description: 'Send a task to a worker id or pool:<capability>. Instruction must stand alone. depends_on chains tasks; upstream outputs become inputs. fallback_in_seconds 0 = nobody can take it now: do it yourself (fallback_take).',
     parameters: {
       required: ['agent', 'title', 'instruction'],
       properties: {
@@ -207,6 +207,8 @@ export function createTools({ client }) {
           },
         },
         require_online: { type: 'boolean', description: 'Refuse instead of queueing when nobody is online.' },
+        sticky_key: { type: 'string', description: 'Same key (session, browser login, test suite) goes back to the worker that handled it last.' },
+        sticky: { type: 'boolean', description: 'false: no preference for the last worker.' },
       },
     },
     async execute(raw) {
@@ -273,7 +275,7 @@ export function createTools({ client }) {
 
   define({
     name: 'fallback_list',
-    description: 'Tasks nobody took in time, for DSH to do itself. workspaces: skip code tasks you lack.',
+    description: 'Tasks for DSH to do itself: no worker for them is online, or all were busy too long. workspaces: skip code tasks you lack.',
     parameters: { properties: { workspaces: strList } },
     isConcurrencySafe: () => true,
     execute: async raw => ({ tasks: await client.fallbackList(raw.workspaces) }),

@@ -145,7 +145,7 @@ export function adminTaskRow(t) {
   const outputs = adminOutputs(t?.result)
   return {
     task_id: text(t?.task_id, 96), agent: text(t?.agent, 64), assigned_to: text(t?.assigned_to, 64), type: text(t?.type, 32), title: clean(t?.title, 300),
-    capability: text(t?.capability, 48),
+    capability: text(t?.capability, 48), preferred_agent: text(t?.preferred_agent, 64), sticky_key: text(t?.sticky_key, 128), fallback_by: text(t?.fallback_by, 64),
     status: text(t?.status, 32), priority: text(t?.priority, 16), attempts: int(t?.attempts) ?? 0, progress: num(t?.progress), message: clean(t?.message, 500),
     created_at: text(t?.created_at, 64), lease_until: text(t?.lease_until, 64), depends_on: strings(t?.depends_on),
     result: !plainObject(t?.result) ? undefined : {
@@ -202,6 +202,7 @@ export function adminOverview(o) {
     task_counts: counts,
     ...(Object.keys(agentCounts).length > 0 ? { agent_counts: agentCounts } : {}),
     pending_requests: Number.isInteger(o?.pending_requests) ? o.pending_requests : 0,
+    fallback_due: Number.isInteger(o?.fallback_due) ? o.fallback_due : 0,
   }
 }
 

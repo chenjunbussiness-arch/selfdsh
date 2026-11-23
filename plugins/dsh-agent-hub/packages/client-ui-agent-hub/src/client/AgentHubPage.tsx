@@ -741,6 +741,9 @@ function TaskDetailView({ detail, t, now, onClose, onTask }: {
             <dl className="dah-meta">
               <div><dt>{t('detail.meta.target')}</dt><dd className="dah-id">{task.agent}</dd></div>
               <div><dt>{t('detail.meta.assigned')}</dt><dd className="dah-id">{task.assigned_to ?? t('value.none')}</dd></div>
+              {task.preferred_agent !== undefined
+                ? <div><dt>{t('detail.meta.preferred')}</dt><dd className="dah-id">{task.sticky_key !== undefined ? `${task.preferred_agent} · ${task.sticky_key}` : task.preferred_agent}</dd></div>
+                : null}
               <div><dt>{t('detail.meta.type')}</dt><dd>{task.type}</dd></div>
               <div><dt>{t('detail.meta.priority')}</dt><dd>{t(`priority.${task.priority}`)}</dd></div>
               <div><dt>{t('detail.meta.attempts')}</dt><dd className="dah-num">{String(task.attempts)}</dd></div>

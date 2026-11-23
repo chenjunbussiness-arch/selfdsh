@@ -77,8 +77,17 @@ export const TASK_TYPES = ['research', 'document', 'data', 'code', 'review', 'cu
 export const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'dead'])
 /** The built-in executor: DSH itself, taking tasks nobody suitable picked up (fallback). */
 export const FALLBACK_AGENT = 'dsh-self'
-/** Default wait before DSH takes a task over: 10 min; a named scheduled puller gets two of its periods. */
+/**
+ * Wait before DSH takes a task over while a worker that could do it is online but
+ * busy: 10 min; a named scheduled puller gets two of its periods. With no such
+ * worker online DSH may take it at once.
+ */
 export const FALLBACK_MIN_WAIT_SECONDS = 600
+/** Sticky routing: how long other workers leave a task to its preferred worker, and how long a key is remembered. */
+export const STICKY_HOLD_SECONDS = 120
+export const STICKY_TTL_SECONDS = 86_400
+const MAX_STICKY_KEYS = 2000
+export const STICKY_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,127}$/
 /** Capabilities DSH never takes over by default (only that agent may touch the data). */
 export const DEFAULT_NO_FALLBACK = ['quick']
 export const MAX_WAIT_SECONDS = 55
@@ -334,6 +343,11 @@ export class AgentHub {
       enabled: fb.enabled !== false,
       noFallback: Array.isArray(fb.noFallbackCapabilities) ? fb.noFallbackCapabilities.filter(c => typeof c === 'string') : DEFAULT_NO_FALLBACK,
     }
+    const st = options.sticky ?? {}
+    this.sticky = {
+      holdSeconds: Number.isInteger(st.holdSeconds) && st.holdSeconds >= 0 ? st.holdSeconds : STICKY_HOLD_SECONDS,
+      ttlSeconds: Number.isInteger(st.ttlSeconds) && st.ttlSeconds > 0 ? st.ttlSeconds : STICKY_TTL_SECONDS,
+    }
     this.logger = options.logger
     this.clock = options.clock ?? Date.now
     this.state = undefined
@@ -356,7 +370,7 @@ export class AgentHub {
       state = JSON.parse(await readFile(this.statePath, 'utf8'))
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
-      state = { protocol: PROTOCOL, agents: {}, tasks: {}, requests: {}, seq: 0 }
+      state = { protocol: PROTOCOL, agents: {}, tasks: {}, requests: {}, sticky: {}, seq: 0 }
     }
     this.state = this.upgrade(state)
     return this.state
@@ -366,7 +380,7 @@ export class AgentHub {
   upgrade(state) {
     if (state === null || typeof state !== 'object' || Array.isArray(state)) throw new HubError(500, 'bad-state', 'state.json is not an object')
     state.protocol = PROTOCOL
-    for (const key of ['agents', 'tasks', 'requests']) if (state[key] === null || typeof state[key] !== 'object') state[key] = {}
+    for (const key of ['agents', 'tasks', 'requests', 'sticky']) if (state[key] === null || typeof state[key] !== 'object' || Array.isArray(state[key])) state[key] = {}
     state.seq = Number.isInteger(state.seq) ? state.seq : 0
     for (const agent of Object.values(state.agents)) {
       if (!Array.isArray(agent.workspaces)) agent.workspaces = []
@@ -803,6 +817,78 @@ export class AgentHub {
     for (const agent of Object.values(state.agents)) if (!agent.revoked && this.routable(task, agent)) this.wakes.add(agent.id)
   }
 
+  /** Is any worker that could take this task online now (busy or not)? */
+  anyOnlineFor(state, task) {
+    return Object.values(state.agents).some(a => !a.revoked && this.online(a) && this.routable(task, a))
+  }
+
+  // --- sticky routing ------------------------------------------------------------
+  //
+  // A pool task goes back to the worker that last handled the same work: the same
+  // sticky_key, else the worker that finished its parent / upstream task, else the
+  // last worker on its workspace. That worker keeps its checkout, browser session
+  // and context warm. It is a preference, not a pin: other workers leave the task
+  // alone for sticky.holdSeconds only while the preferred one is online, can take
+  // it and has room; after that (or at once if it cannot) anyone may lease it.
+
+  /** The keys a task is remembered under (explicit key, else its workspace). */
+  stickyKeys(task) {
+    if (task.sticky === false) return []
+    if (task.sticky_key !== undefined) return [`key:${task.sticky_key}`]
+    return task.workspace !== undefined ? [`ws:${task.workspace}`] : []
+  }
+
+  /** A worker that may be preferred for this task, or undefined. */
+  stickyCandidate(state, task, id) {
+    if (typeof id !== 'string' || id === FALLBACK_AGENT) return undefined
+    const agent = own(state.agents, id)
+    return agent !== undefined && !agent.revoked && this.routable(task, agent) ? agent.id : undefined
+  }
+
+  /** Pick the preferred worker of a new pool task. */
+  preferredFor(state, task) {
+    if (task.sticky === false || !task.agent.startsWith('pool:')) return undefined
+    const now = this.clock()
+    const fresh = e => e !== undefined && now - Date.parse(e.at) <= this.sticky.ttlSeconds * 1000
+    if (task.sticky_key !== undefined) {
+      const e = own(state.sticky, `key:${task.sticky_key}`)
+      const hit = fresh(e) ? this.stickyCandidate(state, task, e.agent) : undefined
+      if (hit !== undefined) return hit
+    }
+    for (const id of [task.parent_task_id, ...task.depends_on]) {
+      const hit = this.stickyCandidate(state, task, own(state.tasks, id)?.result?.agent)
+      if (hit !== undefined) return hit
+    }
+    if (task.sticky_key === undefined && task.workspace !== undefined) {
+      const e = own(state.sticky, `ws:${task.workspace}`)
+      if (fresh(e)) return this.stickyCandidate(state, task, e.agent)
+    }
+    return undefined
+  }
+
+  /** Remember who handled a task (a finished result; DSH itself is not remembered). */
+  rememberSticky(state, task, agentId) {
+    if (agentId === FALLBACK_AGENT) return
+    const at = nowIso(this.clock())
+    for (const key of this.stickyKeys(task)) state.sticky[key] = { agent: agentId, at }
+    const keys = Object.keys(state.sticky)
+    if (keys.length > MAX_STICKY_KEYS) {
+      keys.sort((a, b) => state.sticky[a].at.localeCompare(state.sticky[b].at))
+      for (const key of keys.slice(0, keys.length - MAX_STICKY_KEYS)) delete state.sticky[key]
+    }
+  }
+
+  /** Does the preferred worker still hold this task back from `agentId`? */
+  stickyHolds(state, task, agentId) {
+    const preferred = task.preferred
+    if (preferred === undefined || preferred === agentId || this.sticky.holdSeconds === 0) return false
+    if (this.clock() - Date.parse(task.pendingSince ?? task.created_at) >= this.sticky.holdSeconds * 1000) return false
+    const agent = own(state.agents, preferred)
+    if (agent === undefined || agent.revoked || !this.online(agent) || !this.routable(task, agent)) return false
+    const held = Object.values(state.tasks).filter(t => t.assignedTo === preferred && isActive(t)).length
+    return held < agent.maxConcurrency
+  }
+
   // --- tasks (controllers only) -----------------------------------------------
 
   /** A controller creates a task. Inputs are files given inline (text or base64). */
@@ -844,6 +930,9 @@ export class AgentHub {
     if (fallback !== 'dsh' && fallback !== 'none') throw new HubError(400, 'bad-task', 'fallback must be dsh or none')
     const fallbackAfter = t.fallback_after_seconds ?? undefined
     if (fallbackAfter !== undefined && (!Number.isInteger(fallbackAfter) || fallbackAfter < 60 || fallbackAfter > 7 * 86400)) throw new HubError(400, 'bad-task', 'fallback_after_seconds must be 60..604800')
+    const stickyKey = t.sticky_key ?? undefined
+    if (stickyKey !== undefined && (typeof stickyKey !== 'string' || !STICKY_KEY_RE.test(stickyKey))) throw new HubError(400, 'bad-task', 'sticky_key must be 1-128 letters, digits or _ . : / -')
+    if (t.sticky !== undefined && typeof t.sticky !== 'boolean') throw new HubError(400, 'bad-task', 'sticky must be true or false')
     let capability = t.capability ?? undefined
     if (capability !== undefined && (typeof capability !== 'string' || !CAP_RE.test(capability))) throw new HubError(400, 'bad-task', 'capability must be a capability name')
     if (POOL_RE.test(target)) {
@@ -915,15 +1004,20 @@ export class AgentHub {
         parent_task_id: t.parent_task_id, depends_on: deps, context: t.context ?? {},
         created_by: creator, created_at: nowIso(this.clock()), pendingSince: nowIso(this.clock()),
         fallback, fallback_after_seconds: fallbackAfter,
+        sticky_key: stickyKey, sticky: t.sticky === false ? false : undefined,
         status: 'pending', attempts: 0, assignedTo: undefined, leaseUntil: undefined,
         progress: undefined, message: undefined, result: undefined, history: [],
       }
       this.event(task, 'created', `${creator} -> ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''}`)
       state.tasks[id] = task
+      task.preferred = this.preferredFor(state, task)
+      if (task.preferred !== undefined) this.event(task, 'sticky', `prefers ${task.preferred}`)
       this.wakeFor(state, task)
       this.log(`dsh-hub: ${creator} dispatched ${id} to ${target}${warnings.length ? ` (${warnings.join(', ')})` : ''}`)
       const out = this.publicTask(task)
       if (warnings.length > 0) out.warnings = warnings
+      const due = this.fallbackDueAt(state, task)
+      if (due !== undefined) out.fallback_in_seconds = Math.max(0, Math.ceil((due - this.clock()) / 1000))
       return out
     })
   }
@@ -1027,6 +1121,7 @@ export class AgentHub {
       status: task.status, priority: task.priority, attempts: task.attempts, progress: task.progress, message: task.message,
       created_at: task.created_at, lease_until: task.leaseUntil, depends_on: task.depends_on,
       fallback: task.fallback ?? 'dsh', fallback_after_seconds: task.fallback_after_seconds, fallback_by: task.fallbackBy,
+      sticky_key: task.sticky_key, sticky: task.sticky, preferred_agent: task.preferred,
       result: task.result === undefined ? undefined : { status: task.result.status, summary: task.result.summary, outputs: task.result.outputs, error: task.result.error, needs_input: task.result.needs_input },
     }
     if (full) { out.instruction = task.instruction; out.inputs = task.inputs; out.output = task.output; out.history = task.history; out.context = task.context }
@@ -1215,7 +1310,10 @@ export class AgentHub {
         .filter(t => t.status === 'pending')
         .filter(t => this.routable(t, agent))
         .filter(t => t.depends_on.every(d => own(state.tasks, d)?.status === 'completed'))
-        .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority] || a.created_at.localeCompare(b.created_at))) {
+        .filter(t => !this.stickyHolds(state, t, agentId))
+        .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority]
+          || Number(b.preferred === agentId) - Number(a.preferred === agentId)
+          || a.created_at.localeCompare(b.created_at))) {
         if (candidates.length >= room) break
         const lane = t.capability
         if (lane !== undefined && limits[lane] !== undefined && (inLane[lane] ?? 0) >= limits[lane]) continue
@@ -1346,7 +1444,7 @@ export class AgentHub {
         finished_at: nowIso(this.clock()), agent: agentId,
       }
       task.leaseUntil = undefined
-      if (status === 'completed') { task.status = 'completed'; task.progress = 1 }
+      if (status === 'completed') { task.status = 'completed'; task.progress = 1; this.rememberSticky(state, task, agentId) }
       else if (status === 'partial') { task.status = 'failed'; task.result.error = task.result.error ?? { code: 'NEEDS_HUMAN', message: task.result.needs_input ?? '', retryable: false } }
       else if (error?.retryable && retry) { this.requeue(state, task, `retryable failure: ${error.code}`) }
       else task.status = 'failed'
@@ -1369,7 +1467,11 @@ export class AgentHub {
     return every === undefined ? FALLBACK_MIN_WAIT_SECONDS : Math.max(FALLBACK_MIN_WAIT_SECONDS, 2 * every)
   }
 
-  /** When a pending task becomes due for the fallback (ms), or undefined when it never will. */
+  /**
+   * When a pending task becomes due for the fallback (ms), or undefined when it never will.
+   * No worker that could take it online: due as soon as it is ready. One is online but
+   * nobody took it: due after fallbackWait (it is busy; give it time).
+   */
   fallbackDueAt(state, task) {
     if (!this.fallback.enabled || task.status !== 'pending' || (task.fallback ?? 'dsh') !== 'dsh') return undefined
     if (task.capability !== undefined && this.fallback.noFallback.includes(task.capability)) return undefined
@@ -1381,7 +1483,7 @@ export class AgentHub {
       const done = Date.parse(dep.result?.finished_at ?? '')
       if (Number.isFinite(done) && done > ready) ready = done
     }
-    return ready + this.fallbackWait(state, task) * 1000
+    return this.anyOnlineFor(state, task) ? ready + this.fallbackWait(state, task) * 1000 : ready
   }
 
   /** Tasks DSH may take over now (optionally only those whose workspace DSH has). */
@@ -1393,7 +1495,11 @@ export class AgentHub {
         .map(task => ({ task, due: this.fallbackDueAt(state, task) }))
         .filter(({ task, due }) => due !== undefined && due <= now && fallbackWorkspaceOk(task, workspaces))
         .sort((a, b) => PRIORITY[a.task.priority] - PRIORITY[b.task.priority] || a.task.created_at.localeCompare(b.task.created_at))
-        .map(({ task, due }) => ({ ...this.publicTask(task), waited_seconds: Math.round((now - due) / 1000) + this.fallbackWait(state, task) }))
+        .map(({ task }) => ({
+          ...this.publicTask(task),
+          waited_seconds: Math.max(0, Math.round((now - Date.parse(task.pendingSince ?? task.created_at)) / 1000)),
+          fallback_reason: this.anyOnlineFor(state, task) ? 'workers-busy' : 'no-online-worker',
+        }))
     })
   }
 
@@ -1428,7 +1534,8 @@ export class AgentHub {
       task.leaseUntil = nowIso(now + task.lease_seconds * 1000)
       task.leasedAt = nowIso(now)
       task.lastHolder = undefined
-      this.event(task, 'fallback', `nobody took it in time; DSH (${controllerId}) does it itself`)
+      const why = this.anyOnlineFor(state, task) ? 'nobody took it in time' : 'no worker for it is online'
+      this.event(task, 'fallback', `${why}; DSH (${controllerId}) does it itself`)
       this.log(`dsh-hub: ${controllerId} took ${task.task_id} over as ${FALLBACK_AGENT}`)
       const upstream = task.depends_on.flatMap(d => (own(state.tasks, d).result?.outputs ?? []).map(o => ({ from_task: d, name: o.name })))
       return {

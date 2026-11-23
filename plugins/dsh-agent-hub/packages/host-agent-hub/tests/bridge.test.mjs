@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ADMIN_BASE, BRIDGE_BASE, REQUEST_STATUSES, TASK_STATUSES, adminFailure, createRoutes, requireLogin } from '../bridge.js'
+import { ADMIN_BASE, BRIDGE_BASE, REQUEST_STATUSES, TASK_STATUSES, adminFailure, adminTaskRow, createRoutes, requireLogin } from '../bridge.js'
 import { HubError } from '../hub-client.js'
 import { CONTROLLER, TOKEN, assertNoToken, callRoute, fakeLogger, findRoute, jsonHeaders, makeClient } from './helpers.mjs'
 
@@ -90,7 +90,7 @@ test('overview: forwarded to GET /v1/ctl/overview and re-projected (contract.ts 
   assert.equal(res.headers['x-content-type-options'], 'nosniff')
   assert.equal(res.headers['content-length'], res.body.length)
   const body = res.json()
-  assert.deepEqual(keys(body), ['agents', 'pending_requests', 'protocol', 'task_counts'])
+  assert.deepEqual(keys(body), ['agents', 'fallback_due', 'pending_requests', 'protocol', 'task_counts'])
   assert.equal(body.protocol, 'dsh-agent/2.0')
   assert.deepEqual(body.task_counts, { pending: 2, completed: 5 }, 'unknown statuses and bad numbers dropped')
   assert.equal(body.pending_requests, 1)
@@ -343,10 +343,16 @@ test('presence fields: agent left_at and overview agent_counts pass the whitelis
   const res = await get(A('overview'))
   assert.equal(res.statusCode, 200)
   const body = res.json()
-  assert.deepEqual(keys(body), ['agent_counts', 'agents', 'pending_requests', 'protocol', 'task_counts'])
+  assert.deepEqual(keys(body), ['agent_counts', 'agents', 'fallback_due', 'pending_requests', 'protocol', 'task_counts'])
   assert.deepEqual(body.agent_counts, { online: 1, offline: 0, left: 1 }, 'negative, fractional and unknown counts dropped')
   assert.equal(body.agents[1].left_at, '2026-11-22T13:00:00.000Z')
   assert.equal(body.agents[1].status, 'left')
   assert.deepEqual(keys(body.agents[1]), [...AGENT_KEYS, 'left_at'].sort())
   assertNoToken(res.text)
+})
+
+test('task rows carry the sticky preference and who did a fallback, nothing else new', () => {
+  const row = adminTaskRow({ task_id: 't1', agent: 'pool:browser', preferred_agent: 'aa', sticky_key: 'session-42', fallback_by: 'dsh-cloud', status: 'pending', secret: 'x' })
+  assert.deepEqual([row.preferred_agent, row.sticky_key, row.fallback_by], ['aa', 'session-42', 'dsh-cloud'])
+  assert.equal(row.secret, undefined)
 })
