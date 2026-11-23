@@ -97,20 +97,14 @@ export function parseWorkerReport(text: string): WorkerReport | undefined {
 
 /** The instruction a worker receives, kept next to the parser it feeds. */
 export const REPORT_INSTRUCTION: readonly string[] = [
-  'Your final message is delivered back to the dispatcher, which relays it to the human in a chat. Write it',
-  'for that human, in the language of the task (Chinese when the task is Chinese), with these parts:',
-  '- 做了什么 / What you did: the outcome in one or two sentences.',
-  '- 怎么做的 / How: the key steps or commands, briefly.',
-  '- 结果 / Result: the concrete findings or output (for a page: its title and main text).',
-  '- 产物 / Artifacts: absolute paths of files you created or changed, and of every screenshot.',
-  'Keep it short and factual; no acceptance or verification step follows, this report is the answer.',
-  '',
-  'Then end your answer with exactly this machine-readable block, one key per line, and nothing after it:',
+  'Your final message is relayed to the human. Write it in the task\'s language, short and factual:',
+  '做了什么 (outcome), 怎么做的 (key steps), 结果 (concrete findings), 产物 (absolute paths, screenshots included).',
+  'No acceptance step follows; this report is the answer. End with exactly this block and nothing after it:',
   REPORT_MARKER,
   'summary: what you actually did, one sentence, past tense',
   'touched: comma-separated paths you changed or created, or "none"',
   'left: anything still open, or "none"',
-  'Keep each line short. Do not repeat this block, and do not restate the task above it.',
+  'One short line each; do not repeat the block.',
   'The dispatcher decides whether to reuse this session or start a fresh one from these three fields, so '
     + 'a vague line costs the next task its context. Paths are what it matches on: write them out.',
 ]
