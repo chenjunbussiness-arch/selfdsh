@@ -59,6 +59,8 @@ import { EventEmitter } from 'node:events'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
+import { DEFAULT_ROLE, ROLES, agentRole, roleAccepts, roleOf, roleRefusal, roleTakesWork, roleWidening } from './roles.js'
+
 export const PROTOCOL = 'dsh-agent/2.0'
 export const VERSION = '2.0.0'
 export const AGENT_ID_RE = /^[a-z][a-z0-9-]{1,47}$/
@@ -81,6 +83,11 @@ export const DEFAULT_OFFLINE_AFTER_MS = 90_000
 /** A lease younger than this is never treated as lost by heartbeat reconciliation (poll answer may still be in flight). */
 export const RECONCILE_GRACE_MS = 30_000
 export const AGENT_STATUSES = ['pending', 'online', 'offline', 'left', 'revoked']
+/** A scheduled puller (AWS Quick, a cron job) declares how often it comes back: 60 s .. 1 day. */
+export const MIN_PULL_EVERY_SECONDS = 60
+export const MAX_PULL_EVERY_SECONDS = 86_400
+/** Prefix of `created_by` for tasks dispatched by a dispatcher-role worker (controllers have none). */
+export const AGENT_CREATOR_PREFIX = 'agent:'
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9 ._+\/()-]{0,63}$/
 export const EFFORT_MODES = ['fast', 'balanced', 'smart']
 export const EFFORT_THINKING = ['off', 'low', 'medium', 'high']
@@ -122,6 +129,22 @@ function nameList(value, re, code, message, max) {
 }
 
 const isPlainObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+/**
+ * `pull_every_seconds`: how often a scheduled worker (AWS Quick, cron `bridge --once`)
+ * comes back to pull. undefined = not declared, null = clear (heartbeat only).
+ */
+export function validatePullEvery(value, { allowNull = false } = {}) {
+  if (value === undefined) return undefined
+  if (value === null) {
+    if (allowNull) return null
+    return undefined
+  }
+  if (!Number.isInteger(value) || value < MIN_PULL_EVERY_SECONDS || value > MAX_PULL_EVERY_SECONDS) {
+    throw new HubError(400, 'bad-schedule', `pull_every_seconds must be an integer ${MIN_PULL_EVERY_SECONDS}..${MAX_PULL_EVERY_SECONDS} (how often this worker comes back to pull)`)
+  }
+  return value
+}
 
 /** Validate a task's `effort` ({ mode, thinking, agent }, all optional). Returns a clean copy or undefined. */
 export function validateEffort(raw, code = 'bad-task') {
@@ -430,8 +453,11 @@ export class AgentHub {
     const node = input.node ?? undefined
     if (node !== undefined && (typeof node !== 'string' || !NODE_RE.test(node))) throw new HubError(400, 'bad-node', 'node must match /^[a-z][a-z0-9-]{0,47}$/')
     const workspaces = nameList(input.workspaces, WORKSPACE_RE, 'bad-workspaces', `workspaces must be a list of at most ${MAX_WORKSPACES} workspace names`, MAX_WORKSPACES)
+    const role = roleOf(input.role)
+    if (role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')} (default ${DEFAULT_ROLE})`)
+    const pullEverySeconds = validatePullEvery(input.pull_every_seconds)
     return {
-      id, mode, maxConcurrency, capabilities: [...new Set(caps)], node, workspaces,
+      id, mode, maxConcurrency, capabilities: [...new Set(caps)], node, workspaces, role, pullEverySeconds,
       platform: String(input.platform ?? 'custom').slice(0, 64),
       description: String(input.description ?? '').slice(0, 500),
       runtime: validateRuntime(input.runtime),
@@ -446,6 +472,7 @@ export class AgentHub {
       id: v.id, platform: v.platform, mode: v.mode, node: v.node, capabilities: v.capabilities,
       workspaces: v.workspaces, reportedWorkspaces: reported.filter(w => v.workspaces.includes(w)),
       maxConcurrency: v.maxConcurrency, description: v.description, runtime: v.runtime, tokenHash,
+      role: v.role ?? DEFAULT_ROLE, pullEverySeconds: v.pullEverySeconds,
       createdAt: previous?.createdAt ?? nowIso(this.clock()),
       rekeyedAt: previous === undefined ? undefined : nowIso(this.clock()),
       lastSeen: undefined, reportedStatus: undefined, revoked: false,
@@ -524,7 +551,7 @@ export class AgentHub {
       .map(r => ({
         request_id: r.request_id, status: r.status, agent_id: r.agent.id, platform: r.agent.platform, mode: r.agent.mode,
         node: r.agent.node, workspaces: r.agent.workspaces ?? [], capabilities: r.agent.capabilities, max_concurrency: r.agent.maxConcurrency,
-        description: r.agent.description, runtime: r.agent.runtime, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
+        description: r.agent.description, runtime: r.agent.runtime, role: agentRole(r.agent), pull_every_seconds: r.agent.pullEverySeconds, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
       })))
   }
 
@@ -537,13 +564,19 @@ export class AgentHub {
       if (request.status !== 'pending') throw new HubError(409, 'request-decided', `request is ${request.status}`)
       const asked = request.agent
       const o = overrides ?? {}
+      const askedRole = agentRole(asked)
       const v = this.validateAgent({
         agent_id: asked.id, platform: asked.platform, mode: asked.mode, description: asked.description, node: asked.node,
         runtime: asked.runtime,
         capabilities: o.capabilities ?? asked.capabilities,
         workspaces: o.workspaces ?? asked.workspaces,
         max_concurrency: o.max_concurrency ?? asked.maxConcurrency,
+        role: o.role ?? askedRole,
+        // Descriptive (how often it comes back), not a grant: the controller may set it.
+        pull_every_seconds: o.pull_every_seconds ?? asked.pullEverySeconds,
       })
+      const widened = roleWidening(askedRole, v.role)
+      if (widened !== undefined) throw new HubError(400, widened.code, widened.message)
       if (v.capabilities.some(c => !asked.capabilities.includes(c))) throw new HubError(400, 'grant-widened', 'capabilities can only be narrowed at approval')
       if (v.workspaces.some(w => !(asked.workspaces ?? []).includes(w))) throw new HubError(400, 'grant-widened', 'workspaces can only be narrowed at approval')
       if (v.maxConcurrency > asked.maxConcurrency) throw new HubError(400, 'grant-widened', 'max_concurrency can only be lowered at approval')
@@ -602,7 +635,18 @@ export class AgentHub {
     if (agent.revoked) return 'revoked'
     if (agent.leftAt !== undefined) return 'left'
     if (agent.lastSeen === undefined) return agent.tokenHash === '' ? 'pending' : 'offline'
-    return this.clock() - Date.parse(agent.lastSeen) <= this.offlineAfterMs ? 'online' : 'offline'
+    return this.clock() - Date.parse(agent.lastSeen) <= this.offlineWindow(agent) ? 'online' : 'offline'
+  }
+
+  /**
+   * How long this worker may stay silent before it counts as offline: offlineAfterMs,
+   * plus its declared pull interval for a scheduled puller (AWS Quick every 15 min,
+   * a cron `bridge --once`), so it is not marked offline, and its tasks are not
+   * requeued, between two of its scheduled visits.
+   */
+  offlineWindow(agent) {
+    const every = Number.isInteger(agent?.pullEverySeconds) ? agent.pullEverySeconds * 1000 : 0
+    return this.offlineAfterMs + every
   }
 
   /** The worker showed up (heartbeat, poll, event, result): online again, also after a leave. */
@@ -620,6 +664,7 @@ export class AgentHub {
       max_concurrency: agent.maxConcurrency, description: agent.description, runtime: agent.runtime, revoked: agent.revoked,
       status, online: status === 'online', last_seen: agent.lastSeen, left_at: agent.leftAt, version: agent.clientVersion,
       reported_status: agent.reportedStatus, running_tasks: running, created_at: agent.createdAt,
+      role: agentRole(agent), pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
     }
   }
 
@@ -630,7 +675,7 @@ export class AgentHub {
       return {
         ...this.publicAgent(agent, state),
         ignored_workspaces: agent.ignoredWorkspaces ?? [],
-        offline_after_ms: this.offlineAfterMs, server_time: nowIso(this.clock()),
+        offline_after_ms: this.offlineWindow(agent), server_time: nowIso(this.clock()),
       }
     })
   }
@@ -673,6 +718,7 @@ export class AgentHub {
   /** Conditions 1-3 (4 = depends_on and room, checked when leasing). */
   routable(task, agent) {
     if (!this.targets(task, agent)) return false
+    if (!roleAccepts(agentRole(agent), task)) return false // dispatcher / observer never, tester only tests
     if (task.workspace !== undefined && !(agent.workspaces.includes(task.workspace) && agent.reportedWorkspaces.includes(task.workspace))) return false
     if (task.node !== undefined && task.node !== agent.node) return false
     if (effortProblem(agent.runtime, task.effort) !== null) return false
@@ -732,6 +778,8 @@ export class AgentHub {
           throw new HubError(404, 'agent-not-found', `agent not registered: ${target}`)
         }
         if (agent.revoked) throw new HubError(409, 'agent-revoked', `${target} is revoked`)
+        const refused = roleRefusal({ type, title: t.title }, agentRole(agent), target)
+        if (refused !== undefined) throw new HubError(400, refused.code, refused.message)
         // Fail fast instead of leaving a task no one can ever lease.
         if (workspace !== undefined && !agent.workspaces.includes(workspace)) throw new HubError(409, 'unroutable', `${target} was not granted workspace ${workspace}`)
         if (node !== undefined && agent.node !== node) throw new HubError(409, 'unroutable', `${target} is not on node ${node}`)
@@ -744,8 +792,13 @@ export class AgentHub {
           warnings.push('agent-offline')
         }
       } else {
-        const probe = { agent: target, workspace, node }
-        const ready = Object.values(state.agents).some(a => this.agentStatus(a) === 'online' && this.targets(probe, a)
+        const probe = { agent: target, workspace, node, type, title: t.title }
+        const members = Object.values(state.agents).filter(a => !a.revoked && this.targets(probe, a))
+        if (members.length > 0 && members.every(a => !roleAccepts(agentRole(a), probe))) {
+          const refused = roleRefusal(probe, agentRole(members[0]), members[0].id)
+          throw new HubError(400, refused?.code ?? 'role-not-dispatchable', `no agent in ${target} may take this task by its role: ${refused?.message ?? ''}`)
+        }
+        const ready = members.some(a => this.agentStatus(a) === 'online' && roleAccepts(agentRole(a), probe)
           && (workspace === undefined || (a.workspaces.includes(workspace) && a.reportedWorkspaces.includes(workspace)))
           && (node === undefined || a.node === node)
           && effortProblem(a.runtime, effort) === null)
@@ -821,6 +874,8 @@ export class AgentHub {
         if (target && task.node !== undefined && target.node !== task.node) throw new HubError(409, 'unroutable', `${agent} is not on node ${task.node}`)
         const why = target ? effortProblem(target.runtime, task.effort) : null
         if (why !== null) throw new HubError(409, 'unsupported-effort', `${agent} ${why}`)
+        const refused = target ? roleRefusal(task, agentRole(target), agent) : undefined
+        if (refused !== undefined) throw new HubError(400, refused.code, refused.message)
         task.agent = agent
       }
       task.status = 'pending'; task.assignedTo = undefined; task.leaseUntil = undefined; task.attempts = 0; task.result = undefined
@@ -877,8 +932,26 @@ export class AgentHub {
     task.assignedTo = undefined
     task.leaseUntil = undefined
     task.leasedAt = undefined
-    if (holder !== undefined) this.wakes.add(holder)
+    // Remember who had it: a scheduled puller that comes back still working on it
+    // (or with its result) may take it back while nobody else has leased it.
+    if (holder !== undefined) { task.lastHolder = holder; this.wakes.add(holder) }
     this.wakeFor(state, task)
+  }
+
+  /** A requeued task its last holder may take back: still pending, nobody else has it. */
+  reclaimable(task, agentId) {
+    return task !== undefined && task.status === 'pending' && task.assignedTo === undefined && task.lastHolder === agentId
+  }
+
+  /** Give a requeued task back to the worker that was still on it (no new attempt). */
+  reclaim(state, task, agentId) {
+    task.status = 'running'
+    task.assignedTo = agentId
+    task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000)
+    task.leasedAt = nowIso(this.clock())
+    task.lastHolder = undefined
+    this.event(task, 'reclaimed', `${agentId} came back still working on it`)
+    this.log(`dsh-hub: ${agentId} reclaimed ${task.task_id}`)
   }
 
   // --- worker side (token-scoped) ----------------------------------------------
@@ -902,9 +975,15 @@ export class AgentHub {
     const running = b.running === undefined || b.running === null ? undefined : nameList(b.running, TASK_ID_RE, 'bad-running', `running must be a list of at most ${MAX_RUNNING} task ids`, MAX_RUNNING)
     const version = typeof b.client_version === 'string' && VERSION_RE.test(b.client_version) ? b.client_version : undefined
     const runtime = b.runtime === undefined ? undefined : validateRuntime(b.runtime) // descriptive, not a grant: may change
+    // Its own schedule, not a grant: it only widens the silence allowed before it counts as offline.
+    const pullEvery = b.pull_every_seconds === undefined ? undefined : validatePullEvery(b.pull_every_seconds, { allowNull: true })
     return this.mutate((state) => {
       const agent = this.liveAgent(state, agentId)
       this.seen(agent)
+      if (b.pull_every_seconds !== undefined && (pullEvery ?? undefined) !== agent.pullEverySeconds) {
+        agent.pullEverySeconds = pullEvery ?? undefined
+        this.log(`dsh-hub: ${agentId} pulls ${agent.pullEverySeconds === undefined ? 'continuously' : `every ${agent.pullEverySeconds} s`}`)
+      }
       if (b.runtime !== undefined && JSON.stringify(runtime) !== JSON.stringify(agent.runtime)) {
         agent.runtime = runtime
         this.wakes.add(agentId) // pool tasks it can now take
@@ -925,9 +1004,11 @@ export class AgentHub {
       // Reconciliation: only when the worker says what it holds.
       const abort = []
       const requeued = []
+      const reclaimed = []
       if (running !== undefined) {
         for (const id of running) {
           const task = own(state.tasks, id)
+          if (this.reclaimable(task, agentId)) { this.reclaim(state, task, agentId); reclaimed.push(id); continue }
           if (task === undefined || task.assignedTo !== agentId || !isActive(task)) abort.push(id)
         }
         const now = this.clock()
@@ -943,7 +1024,8 @@ export class AgentHub {
       }
       return {
         ok: true, agent_id: agentId, status: 'online', server_time: agent.lastSeen,
-        workspaces: agent.reportedWorkspaces, ignored_workspaces: ignored, abort, requeued,
+        workspaces: agent.reportedWorkspaces, ignored_workspaces: ignored, abort, requeued, reclaimed,
+        pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
       }
     })
   }
@@ -1057,9 +1139,10 @@ export class AgentHub {
   }
 
   /** The task must be leased by this very worker. */
-  owned(state, agentId, taskId) {
+  owned(state, agentId, taskId, { reclaim = false } = {}) {
     this.seen(this.liveAgent(state, agentId))
     const task = own(state.tasks, taskId)
+    if (reclaim && this.reclaimable(task, agentId)) this.reclaim(state, task, agentId) // late progress or result after a requeue (mutations only)
     if (task === undefined || task.assignedTo !== agentId) throw new HubError(404, 'task-not-found', 'no such task leased by this agent')
     if (!isActive(task)) throw new HubError(409, 'task-not-active', `task is ${task.status}`)
     return task
@@ -1068,7 +1151,7 @@ export class AgentHub {
   progress(agentId, body = {}) {
     const b = body ?? {}
     return this.mutate((state) => {
-      const task = this.owned(state, agentId, b.task_id)
+      const task = this.owned(state, agentId, b.task_id, { reclaim: true })
       task.status = 'running'
       if (typeof b.progress === 'number' && b.progress >= 0 && b.progress <= 1) task.progress = b.progress
       if (typeof b.message === 'string') task.message = b.message.slice(0, 1000)
@@ -1088,7 +1171,7 @@ export class AgentHub {
     const names = files.map(file => safeFileName(file?.name)) // all names checked before anything is written
     if (new Set(names).size !== names.length) throw new HubError(400, 'bad-result', 'duplicate output file name')
     return this.mutate(async (state) => {
-      const task = this.owned(state, agentId, b.task_id)
+      const task = this.owned(state, agentId, b.task_id, { reclaim: true })
       const dir = join(this.artifactDir, task.task_id, 'outputs')
       await mkdir(dir, { recursive: true })
       const outputs = []

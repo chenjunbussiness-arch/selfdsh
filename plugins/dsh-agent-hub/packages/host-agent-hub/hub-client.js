@@ -520,7 +520,6 @@ export function createHubClient(options = {}) {
         try { req?.destroy?.(error) } catch { /* ignore */ }
         fail(error)
       }, config.timeoutMs)
-      timer.unref?.()
       const opts = { method, headers, timeout: config.timeoutMs, ...extra }
       if (ca !== undefined) opts.ca = ca
       try {
@@ -664,7 +663,7 @@ export function createHubClient(options = {}) {
     listAgents: async () => asList(await ctlGet('agents'), 'agents'),
     listRequests: async status => asList(await ctlGet('requests', { status }), 'requests'),
     /** `role` is additive: a hub that does not know roles ignores it (and reports `worker`). */
-    approve: async ({ request_id, capabilities, workspaces, max_concurrency, role }) => asObject(await ctlPost('approve', { request_id, capabilities, workspaces, max_concurrency, role })),
+    approve: async ({ request_id, capabilities, workspaces, max_concurrency, role, pull_every_seconds }) => asObject(await ctlPost('approve', { request_id, capabilities, workspaces, max_concurrency, role, pull_every_seconds })),
     reject: async (requestId, reason) => asObject(await ctlPost('reject', { request_id: requestId, reason })),
     revoke: async agentId => asObject(await ctlPost('revoke', { agent_id: agentId })),
     provision: async body => asObject(await ctlPost('provision', body)),

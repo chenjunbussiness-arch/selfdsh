@@ -203,7 +203,6 @@ export function openTunnel({ proxy, target, timeoutMs, ca, deps = {} }) {
       const what = stageNow === 'tls' ? `TLS handshake with ${hostLabel} through proxy ${proxy.display}` : `proxy ${proxy.display} (CONNECT ${hostLabel})`
       fail('timeout', `timed out after ${timeoutMs} ms waiting for ${what}`, 'ETIMEDOUT_HUB')
     }, timeoutMs)
-    timer.unref?.()
 
     const onTunnel = (res, sock, head) => {
       if (settled) { try { sock?.destroy?.() } catch { /* ignore */ } return }

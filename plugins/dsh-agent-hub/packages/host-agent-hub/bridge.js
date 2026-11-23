@@ -115,6 +115,8 @@ export function adminAgent(a) {
     online: a?.online === true, last_seen: text(a?.last_seen, 64), reported_status: oneOf(a?.reported_status, ['idle', 'busy']),
     status: oneOf(a?.status, ['pending', 'online', 'offline', 'left', 'revoked']), version: text(a?.version, 64), left_at: text(a?.left_at, 64),
     running_tasks: strings(a?.running_tasks), created_at: text(a?.created_at, 64),
+    // Additive: scheduled pullers (AWS Quick, cron) say how often they come back.
+    pull_every_seconds: int(a?.pull_every_seconds), offline_after_ms: int(a?.offline_after_ms),
   }
 }
 

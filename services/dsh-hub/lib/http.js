@@ -405,7 +405,7 @@ export const ROUTES = {
   },
   '/v1/ctl/approve': {
     method: 'POST', auth: 'controller', body: 'event',
-    run: ({ hub, id, body }) => hub.approveRequest(id, body.request_id, { capabilities: body.capabilities, workspaces: body.workspaces, max_concurrency: body.max_concurrency }),
+    run: ({ hub, id, body }) => hub.approveRequest(id, body.request_id, { capabilities: body.capabilities, workspaces: body.workspaces, max_concurrency: body.max_concurrency, role: body.role, pull_every_seconds: body.pull_every_seconds }),
   },
   '/v1/ctl/reject': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.rejectRequest(id, body.request_id, body.reason) },
   '/v1/ctl/revoke': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.revokeAgent(id, body.agent_id) },

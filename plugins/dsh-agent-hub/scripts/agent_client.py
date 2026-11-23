@@ -120,6 +120,13 @@ An empty value (DSH_HUB_CAFILE=) counts as not set.
   DSH_HEARTBEAT_SECONDS  --heartbeat-seconds  heartbeat period of run, 5..3600 seconds; the hub
                                               marks a worker offline after 90 s without a
                                               heartbeat / poll. Default: 30.
+  DSH_ROLE               --role               worker | tester | dispatcher | observer, asked at
+                                              register (approval may narrow it). Default: worker.
+  DSH_PULL_EVERY_SECONDS --pull-every-seconds how often this worker comes back when it is not
+                                              always on (cron / scheduled `bridge --once`),
+                                              60..86400; the hub then waits 90 s + this long
+                                              before it counts the worker offline. Empty = an
+                                              always-on worker (`run`). Default: empty.
   DSH_PATH_MAP           (environment / .env) host path prefixes -> local prefixes, for a worker
                                               in a container reading the HOST profile.json /
                                               dshProfile: "E:/=/host/e;C:/Users/me/.dsh=/host/dsh"
@@ -187,7 +194,8 @@ ABORT_MARK = "ABORTED.json"
 DEFAULT_HEARTBEAT = 30
 ENV_KEYS = ("DSH_HUB_URL", "DSH_HUB_PROXY", "DSH_HUB_CAFILE", "DSH_AGENT_ID", "DSH_NODE", "DSH_PLATFORM",
             "DSH_CAPABILITIES", "DSH_MAX_CONCURRENCY", "DSH_AGENT_TOKEN_FILE", "DSH_EXCHANGE", "DSH_HEARTBEAT_SECONDS",
-            "DSH_PATH_MAP")
+            "DSH_ROLE", "DSH_PULL_EVERY_SECONDS", "DSH_PATH_MAP")
+ROLES = ("worker", "tester", "dispatcher", "observer")
 PROXY_OFF = ("off", "direct", "none", "false", "no")
 EFFORT_MODES = ("fast", "balanced", "smart")
 EFFORT_THINKING = ("off", "low", "medium", "high")
@@ -327,9 +335,12 @@ class HubClient:
     """Worker side of /v1/*. Token-less calls (enroll) work with token=None."""
 
     def __init__(self, url, token=None, insecure=False, cafile=None, timeout=60, *, agent_id=None,
-                 proxy=None, no_proxy=False, workspaces=(), opener=None, ctx=None, runtime=None):
+                 proxy=None, no_proxy=False, workspaces=(), opener=None, ctx=None, runtime=None,
+                 role=None, pull_every_seconds=None):
         self.url = hub_url(url)
         self.runtime = runtime
+        self.role = role
+        self.pull_every_seconds = pull_every_seconds
         self.token = token
         derived = agent_id_from_token(token)
         if agent_id is None:
@@ -376,6 +387,10 @@ class HubClient:
                 "capabilities": list(capabilities), "max_concurrency": max_concurrency, "description": description}
         if self.runtime is not None:
             body["runtime"] = self.runtime
+        if self.role is not None:
+            body["role"] = self.role
+        if self.pull_every_seconds is not None:
+            body["pull_every_seconds"] = self.pull_every_seconds
         return self._req("POST", "enroll", body, auth=False)
 
     def enroll_status(self, request_id, poll_secret):
@@ -388,6 +403,8 @@ class HubClient:
         body = {"status": status, "workspaces": names, "client_version": CLIENT_VERSION}
         if self.runtime is not None:
             body["runtime"] = self.runtime  # descriptive: the hub keeps the latest one
+        if self.pull_every_seconds is not None:
+            body["pull_every_seconds"] = self.pull_every_seconds  # so the hub does not count us offline between visits
         if running is not None:
             body["running"] = list(running)
         return self._req("POST", "heartbeat", body)
@@ -1075,6 +1092,12 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
     st["runtime"] = check_runtime(wm.runtime, f"{wm.config_path}: runtime") if wm.has_runtime else platform_runtime(st["platform"])
     st["heartbeat_seconds"] = _int_setting(pick("heartbeat_seconds", "DSH_HEARTBEAT_SECONDS", cli.get("heartbeat_seconds"), None,
                                                 DEFAULT_HEARTBEAT), "DSH_HEARTBEAT_SECONDS", 5, 3600)
+    role = pick("role", "DSH_ROLE", cli.get("role"), None, "worker")
+    if role not in ROLES:
+        raise ConfigError(f"DSH_ROLE / --role must be one of {', '.join(ROLES)} (from {sources['role']})")
+    st["role"] = role
+    every = pick("pull_every_seconds", "DSH_PULL_EVERY_SECONDS", cli.get("pull_every_seconds"), None, None)
+    st["pull_every_seconds"] = None if every is None else _int_setting(every, "DSH_PULL_EVERY_SECONDS", 60, 86400)
     return st
 
 
@@ -1090,6 +1113,7 @@ def settings_summary(st):
             "platform": st["platform"], "capabilities": st["capabilities"], "max_concurrency": st["max_concurrency"],
             "token_file": st["token_file"], "token_file_exists": bool(st["token_file"]) and os.path.isfile(st["token_file"]),
             "exchange": st["exchange"], "heartbeat_seconds": st["heartbeat_seconds"],
+            "role": st.get("role"), "pull_every_seconds": st.get("pull_every_seconds"),
             "runtime": st.get("runtime")}
 
 
@@ -1217,8 +1241,33 @@ class Bridge:
             self.aborted += len(set(done))
         return sorted(set(done))
 
+    def _live(self, box, name):
+        d = os.path.join(self.root, box, name)
+        return (not name.startswith(".") and os.path.isdir(d)
+                and not os.path.exists(os.path.join(d, ABORT_MARK)))
+
+    def _busy(self):
+        """Tasks taking a slot: in inbox / working and not aborted (an aborted copy left in working/
+        must not stop this worker from ever pulling again)."""
+        return sum(1 for box in ("inbox", "working")
+                   for name in os.listdir(os.path.join(self.root, box)) if self._live(box, name))
+
     def _known(self, task_id):
-        return any(os.path.exists(os.path.join(self.root, d, task_id)) for d in EXCHANGE_DIRS)
+        """Already held here. Only archive/ (done or aborted earlier) does not count: the hub leasing
+        the same id again means it wants it worked on again. An aborted copy still in working/ that
+        the hub hands back is un-aborted: its executor may still be on it."""
+        w = os.path.join(self.root, "working", task_id)
+        mark = os.path.join(w, ABORT_MARK)
+        if os.path.isdir(w) and os.path.exists(mark):
+            os.remove(mark)
+            self.log(f"{task_id}: the hub gave it back; no longer marked aborted")
+            return True
+        if any(os.path.exists(os.path.join(self.root, d, task_id)) for d in ("inbox", "working", "outbox", "failed")):
+            return True
+        stale = os.path.join(self.root, "archive", task_id)
+        if os.path.exists(stale):  # keep the earlier copy, deliver this one fresh
+            os.replace(stale, f"{stale}.prev-{int(time.time())}")
+        return False
 
     def _reject_missing(self, task):
         tid, ws = task["task_id"], task.get("workspace")
@@ -1233,8 +1282,7 @@ class Bridge:
         self.rejected += 1
 
     def pull(self):
-        busy = len(os.listdir(os.path.join(self.root, "inbox"))) + len(os.listdir(os.path.join(self.root, "working")))
-        room = max(0, self.max - busy)
+        room = max(0, self.max - self._busy())
         self.full = room == 0
         if room == 0:
             self.heartbeat("busy")
@@ -1447,7 +1495,8 @@ def _client(st, token, workspaces, a, agent_id=None):
     if u.scheme == "http" and u.hostname not in LOOPBACK_HOSTS:
         warn("plain http to a non-loopback hub: the token would cross the network in clear text")
     return HubClient(url, token, a.insecure, st["cafile"], a.timeout, agent_id=agent_id or st["agent_id"] or None,
-                     proxy=st["proxy"], no_proxy=st["no_proxy"], workspaces=workspaces, runtime=st.get("runtime"))
+                     proxy=st["proxy"], no_proxy=st["no_proxy"], workspaces=workspaces, runtime=st.get("runtime"),
+                     role=st.get("role"), pull_every_seconds=st.get("pull_every_seconds"))
 
 
 def check_settings(st):
@@ -1720,6 +1769,11 @@ DSH_AGENT_TOKEN_FILE=agent.token
 DSH_EXCHANGE=E:/dsh-exchange
 # Heartbeat period of `run` in seconds (the hub marks a worker offline after 90 s of silence)
 DSH_HEARTBEAT_SECONDS=30
+# worker | tester | dispatcher | observer (approval may narrow it)
+DSH_ROLE=worker
+# Only for a worker that is NOT always on (cron / scheduled `bridge --once`): how often it runs, 60..86400 s.
+# The hub then waits 90 s + this long before it counts the worker offline. Empty = always on (`run`).
+DSH_PULL_EVERY_SECONDS=
 # Only for a worker in a container that reads the host profile: host prefix=container prefix;...
 # e.g. E:/=/host/e  (empty on the host itself)
 DSH_PATH_MAP=
@@ -1860,6 +1914,8 @@ def build_parser():
     e.add_argument("--capabilities", help="comma separated; overrides DSH_CAPABILITIES")
     e.add_argument("--max-concurrency", type=int, help="overrides DSH_MAX_CONCURRENCY (default 1)")
     e.add_argument("--description", default="")
+    e.add_argument("--role", choices=list(ROLES), help="overrides DSH_ROLE (default worker); approval may narrow it")
+    e.add_argument("--pull-every-seconds", type=int, help="overrides DSH_PULL_EVERY_SECONDS (scheduled pullers)")
     e.add_argument("--no-wait", action="store_true", help="ask (or check the pending request) once and exit")
     e.add_argument("--interval", type=int, default=30, help="seconds between approval checks")
     r = add("run", "stay online: heartbeat + long poll, sync tasks with the exchange folder")
@@ -1873,6 +1929,7 @@ def build_parser():
     b = add("bridge", "sync this worker's tasks with the exchange folder (--once for schedulers)")
     b.add_argument("--exchange", help="overrides DSH_EXCHANGE")
     b.add_argument("--once", action="store_true")
+    b.add_argument("--pull-every-seconds", type=int, help="overrides DSH_PULL_EVERY_SECONDS: how often cron runs this (--once)")
     b.add_argument("--interval", type=int, default=60)
     b.add_argument("--max", type=int, default=1)
     b.add_argument("--wait", type=int, default=DEFAULT_WAIT, help=f"long-poll seconds (0..{MAX_WAIT}, default {DEFAULT_WAIT})")
@@ -1893,7 +1950,8 @@ def main(argv=None, env=None):
         wm = resolve_workspaces(a.profile_file, a.node, required=a.profile_file is not None, worker_dir=wd,
                                 path_map=parse_path_map(raw_map))
         cli = {k: getattr(a, k, None) for k in ("cafile", "agent_id", "node", "platform", "capabilities",
-                                                "max_concurrency", "exchange", "heartbeat_seconds")}
+                                                "max_concurrency", "exchange", "heartbeat_seconds",
+                                                "role", "pull_every_seconds")}
         st = resolve_settings(wm, getattr(a, "url", None), getattr(a, "token_file", None), getattr(a, "proxy", None),
                               getattr(a, "no_proxy", False), env=env, dotenv=dotenv, worker_dir=wd, cli=cli)
         wm.node = st["node"]

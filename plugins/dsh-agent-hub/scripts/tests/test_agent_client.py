@@ -790,6 +790,76 @@ class TestBridge(TempCase):
 
 # --- worker dir: .env, profile.json, priorities ---------------------------------------------
 
+class TestBridgeAfterAbort(TempCase):
+    """A scheduled worker the hub once told to abort must keep pulling and take a re-leased task again."""
+
+    def setUp(self):
+        super().setUp()
+        self.ex = self.path("exchange")
+
+    def bridge(self, hub, max_tasks=1):
+        return ac.Bridge(hub, self.ex, max_tasks, log=Logs(), node="mydesk", wait=0)
+
+    def test_an_aborted_copy_in_working_does_not_take_a_slot(self):
+        hub = FakeHub([task("t1", type="research")])
+        br = self.bridge(hub)
+        os.makedirs(os.path.join(self.ex, "working", "t0"))
+        br.abort(["t0"])
+        self.assertEqual(br.pull(), 1)
+        self.assertTrue(os.path.isdir(os.path.join(self.ex, "inbox", "t1")))
+
+    def test_a_task_only_in_archive_is_delivered_again(self):
+        hub = FakeHub([task("t1", type="research")])
+        br = self.bridge(hub)
+        os.makedirs(os.path.join(self.ex, "outbox", "t1"))
+        br.abort(["t1"])
+        self.assertTrue(os.path.isdir(os.path.join(self.ex, "archive", "t1")))
+        self.assertEqual(br.pull(), 1)
+        self.assertTrue(os.path.isdir(os.path.join(self.ex, "inbox", "t1")))
+        self.assertTrue(any(n.startswith("t1.prev-") for n in os.listdir(os.path.join(self.ex, "archive"))))
+
+    def test_an_aborted_working_copy_handed_back_is_unmarked_not_duplicated(self):
+        hub = FakeHub([task("t1", type="research")])
+        br = self.bridge(hub, max_tasks=2)
+        os.makedirs(os.path.join(self.ex, "working", "t1"))
+        br.abort(["t1"])
+        self.assertEqual(br.pull(), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.ex, "working", "t1", ac.ABORT_MARK)))
+        self.assertFalse(os.path.exists(os.path.join(self.ex, "inbox", "t1")))
+        self.assertEqual(br.running_ids(), ["t1"])
+
+
+class TestScheduleSettings(TempCase):
+    def test_role_and_schedule_go_to_enroll_and_heartbeat(self):
+        sent = []
+
+        class Spy(ac.HubClient):
+            def _req(self, method, path, body=None, **kw):
+                sent.append((path, body))
+                return {}
+
+        c = Spy("https://hub.example:7891", None, agent_id="quick-mydesk", role="tester", pull_every_seconds=900)
+        c.enroll_request("aws-quick", "poll", "mydesk", [], ["report"], 1, "")
+        c.token = "dsha_quick-mydesk_x"
+        c.heartbeat("idle", [], running=[])
+        self.assertEqual((sent[0][1]["role"], sent[0][1]["pull_every_seconds"]), ("tester", 900))
+        self.assertEqual(sent[1][1]["pull_every_seconds"], 900)
+        plain = Spy("https://hub.example:7891", None, agent_id="quick-mydesk")
+        plain.heartbeat("idle", [])
+        self.assertNotIn("pull_every_seconds", sent[2][1])
+
+    def test_settings_validate_role_and_schedule(self):
+        wm = ac.resolve_workspaces(None, "mydesk", worker_dir=self.path("w", make=True))
+        st = ac.resolve_settings(wm, env={"DSH_ROLE": "tester", "DSH_PULL_EVERY_SECONDS": "900"}, worker_dir=self.path("w"))
+        self.assertEqual((st["role"], st["pull_every_seconds"]), ("tester", 900))
+        st = ac.resolve_settings(wm, env={}, worker_dir=self.path("w"))
+        self.assertEqual((st["role"], st["pull_every_seconds"]), ("worker", None))
+        with self.assertRaises(ac.ConfigError):
+            ac.resolve_settings(wm, env={"DSH_ROLE": "boss"}, worker_dir=self.path("w"))
+        with self.assertRaises(ac.ConfigError):
+            ac.resolve_settings(wm, env={"DSH_PULL_EVERY_SECONDS": "10"}, worker_dir=self.path("w"))
+
+
 class TestEnvFile(TempCase):
     def test_parse_rules_match_the_plugin(self):
         text = ("\ufeff# comment\r\nDSH_HUB_URL=https://h:7891\r\nexport DSH_AGENT_ID=\"quick-mydesk\"\n"

@@ -63,6 +63,8 @@ v1 时 hub 运行在 DSH web server 里；v2 把 hub 拆成**独立服务 dsh-hu
 | 同上 | | `DSH_HUB_PROXY` | 可选 | 同上 | `off`（模板默认） | `env`（读 HTTPS_PROXY / 系统代理） |
 | 同上 | | `DSH_EXCHANGE` | 建议 | 交换目录 | `E:/dsh-exchange` | worker 目录下的 `exchange/` |
 | 同上 | | `DSH_PLATFORM` / `DSH_CAPABILITIES` / `DSH_NODE` | 建议 | 平台、能力（给 `pool:<capability>` 抢单用）、机器名 | `aws-quick` / `code,document` / `mydesk` | `custom` / 无 / 主机名 |
+| 同上 | | `DSH_ROLE` | 可选 | 申请的角色：`worker` 接任何活 / `tester` 只接测试类 / `dispatcher` 只派活不接活 / `observer` 只读；批准时只能收窄 | `worker` | `worker` |
+| 同上 | | `DSH_PULL_EVERY_SECONDS` | 定时运行时必填 | 不常驻、靠 cron / 计划任务跑 `bridge --once` 的 worker 多久来一次（60～86400 秒）。hub 等「90 秒 + 这个周期」没来才判离线，免得干活途中任务被收回 | `900` | 空 = 常驻（`run`），90 秒没来就算离线 |
 | `<DSH home>/worker/profile.json`（模板 `scripts/profile.example.json`） | 每台 worker 机器 | `workspaces` | 派 `code` 任务时必填 | 工作区名 → 本机路径（名字和 router-b 一致） | `{"deepseek-harness": "E:/PythonProject/dsh-warroom"}` | 没映射的工作区任务直接失败 `WORKSPACE_MISSING` |
 
 - `<DSH home>` = 环境变量 `DSH_HOME`，没设就是 `~/.dsh`（Windows：`C:\Users\<你>\.dsh`）。
@@ -333,4 +335,4 @@ worker 目录固定是 `<DSH home>/worker/`（DSH home = `$DSH_HOME` 或 `~/.dsh
    ```
 
    然后 `python agent_client.py check`：确认经代理能到 hub，并记下 `seen as:` 后面的出口 IP（它要在服务器 `hub.json` 的 `allow` 里；Clash 里 hub 地址要固定走一个代理节点，见协议第 8 节）。旧的 `workspaces.json` 仍然能用（`profile.json` 不存在时读它，并提示迁移）。
-3. **注册并上线**：`python agent_client.py register` → 在 DSH 对话里 `agent_requests` 看到申请、`agent_approve`（可以收窄 workspaces / capabilities / max_concurrency）→ register 自动领到令牌并写入 `agent.token` → `python agent_client.py run` 常驻（心跳 + 长轮询）。之后 `status` 查看 hub 眼里的自己，`leave` 主动下线（持有的任务立即重排）。只能定时运行的 agent（AWS Quick）用 `bridge --once`。
+3. **注册并上线**：`python agent_client.py register` → 在 DSH 对话里 `agent_requests` 看到申请、`agent_approve`（可以收窄 workspaces / capabilities / max_concurrency）→ register 自动领到令牌并写入 `agent.token` → `python agent_client.py run` 常驻（心跳 + 长轮询）。之后 `status` 查看 hub 眼里的自己，`leave` 主动下线（持有的任务立即重排）。只能定时运行的 agent（AWS Quick）用 `bridge --once`，并在 `worker/.env` 里填 `DSH_PULL_EVERY_SECONDS`（和定时周期一致）。被判离线后它带着结果回来，hub 会把任务还给它、照收结果，不会再叫它停。
