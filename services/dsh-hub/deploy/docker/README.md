@@ -54,7 +54,7 @@ Remove-Variable t
 
 ## 3. 把本地 DSH 指向这个 hub
 
-编辑 `C:\Users\13558\.dsh\profiles\desktop\cordis.patch.yml` 里的 `host-agent-hub` 段，改之前先备份：
+编辑 `C:\Users\<你>\.dsh\profiles\desktop\cordis.patch.yml` 里的 `host-agent-hub` 段，改之前先备份：
 
 ```yaml
 - id: host-agent-hub
@@ -65,11 +65,11 @@ Remove-Variable t
     caFile: E:/PythonProject/dsh-warroom/services/dsh-hub/deploy/docker/out/hub-ca.pem
     timeoutMs: 15000
     tokenEnv: DSH_HUB_TOKEN
-    envFile: C:/Users/13558/.dsh/agent-hub/controller.local.env
+    envFile: C:/Users/<你>/.dsh/agent-hub/controller.local.env
     # 不写 proxy：本机回环地址直连
 ```
 
-原来连服务器的配置是 `hubUrl: https://8.134.170.38:7891`。可以先注释掉留着，测完再改回去。这个 profile 不会热加载，改完要**重启 DSH**。
+原来连服务器的配置是 `hubUrl: https://<server>:7891`。可以先注释掉留着，测完再改回去。这个 profile 不会热加载，改完要**重启 DSH**。
 
 在 DSH 对话里验证：让它调用 `agent_list`、`task_list`，结果应为空列表，并且不报错。
 

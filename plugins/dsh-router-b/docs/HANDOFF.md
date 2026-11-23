@@ -143,8 +143,8 @@ pnpm install --lockfile-only --registry=https://registry.npmmirror.com
 ```powershell
 # 1. 停用 bundle：从 profile package.json 的 dsh.profile.bundles 移除 "dsh-router-b"
 # 2. 或直接恢复备份：
-$bak = "C:\Users\13558\.dsh\_profile-backups\desktop-20261118-231935"
-Copy-Item "$bak\*" "C:\Users\13558\.dsh\profiles\desktop\" -Force
+$bak = "C:\Users\<你>\.dsh\_profile-backups\desktop-20261118-231935"
+Copy-Item "$bak\*" "C:\Users\<你>\.dsh\profiles\desktop\" -Force
 # 3. 重启应用
 ```
 

@@ -32,8 +32,8 @@
 # controller.env.example。controller.env 每次调用都重新读取，改完不用重启 DSH。
 #
 #   setting        controller.env / 环境变量     含义                                   默认
-#   hubUrl         DSH_HUB_URL                 hub 地址；裸地址 8.134.170.38 会补成        无（必填）
-#                                              https://8.134.170.38:7891；http:// 只允许
+#   hubUrl         DSH_HUB_URL                 hub 地址；裸地址 203.0.113.10 会补成        无（必填）
+#                                              https://203.0.113.10:7891；http:// 只允许
 #                                              127.0.0.1 / localhost / [::1]；不能带账号密码、
 #                                              query、fragment；结尾的 /v1 会被去掉
 #   controllerId   DSH_HUB_CONTROLLER_ID       本 DSH 在 hub 上的控制方 id，                无（必填）

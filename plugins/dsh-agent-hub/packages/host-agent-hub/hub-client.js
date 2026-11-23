@@ -27,7 +27,7 @@
  *   controller.env, can configure the whole controller; editing it needs no DSH
  *   restart. A lower layer that is shadowed gets a one-time warning ("controller.env
  *   里的 X 被 cordis.patch.yml 覆盖了"). A bare address is completed like the worker
- *   does (`8.134.170.38` -> `https://8.134.170.38:7891`); a trailing `/v1` (worker
+ *   does (`203.0.113.10` -> `https://203.0.113.10:7891`); a trailing `/v1` (worker
  *   form) is dropped. Missing hubUrl / controllerId: the plugin still loads and
  *   every call answers hub-not-configured naming the file and the two keys.
  *   DSH_HUB_* settings are NEVER read from <DSH home>/.env (see below).
@@ -178,7 +178,7 @@ export const CONFIG_ENV_KEYS = Object.freeze({
 
 /**
  * Complete a bare hub address the way the worker does: no scheme -> https://,
- * no port -> 7891 (`8.134.170.38` -> `https://8.134.170.38:7891`). An address
+ * no port -> 7891 (`203.0.113.10` -> `https://203.0.113.10:7891`). An address
  * WITH a scheme is kept as written (a reverse proxy on 443 stays on 443).
  * Never throws; an unparsable value is returned for the validator to reject.
  */
@@ -321,7 +321,7 @@ function resolveState(config = {}, deps = {}) {
   if (!envFileExists && !isDshEnv && (url.from === 'default' || id.from === 'default')) sources.envFile = `${envFile} (not found)`
   const missing = url.value === undefined || id.value === undefined
   const setupHint = missing
-    ? `在 ${setupFile} 写上 DSH_HUB_URL=...（例如 https://8.134.170.38:7891）和 DSH_HUB_CONTROLLER_ID=...（例如 dsh-local），保存即可，不用重启 DSH（示例：插件目录里的 controller.env.example）`
+    ? `在 ${setupFile} 写上 DSH_HUB_URL=...（例如 https://hub.example.com:7891，服务器 IP 会变时优先写域名）和 DSH_HUB_CONTROLLER_ID=...（例如 dsh-local），保存即可，不用重启 DSH（示例：插件目录里的 controller.env.example）`
     : undefined
 
   const basePath = base === undefined ? '' : base.pathname.replace(/\/+$/, '')

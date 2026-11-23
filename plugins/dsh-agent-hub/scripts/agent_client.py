@@ -1747,8 +1747,9 @@ ENV_TEMPLATE = """\
 # Priority: command line > process environment > this file > profile.json > default.
 # Relative paths are relative to this folder. Reference: python agent_client.py --help
 
-# Hub address: host, host:port or URL (default port 7891, path /v1). The warroom hub runs on 8.134.170.38
-DSH_HUB_URL=https://8.134.170.38:7891
+# Hub address: host, host:port or URL (default port 7891, path /v1), e.g. https://hub.example.com:7891.
+# Required. Prefer a domain name: the server IP may change. Never commit the real address.
+DSH_HUB_URL=
 # Way out to the hub: off = direct (default of this template), env = HTTPS_PROXY / system proxy,
 # http://host:port = this HTTP proxy. Only when the direct connection fails: http://127.0.0.1:7890 (Clash/mihomo)
 DSH_HUB_PROXY=off
@@ -1833,7 +1834,7 @@ def cmd_init(worker_dir, node=None, out=print, exchange=False, env=None, exchang
     if exchange:
         init_exchange(worker_dir, env, exchange_dir, out)
     out("next:")
-    out("  1. check .env: DSH_HUB_URL (template: https://8.134.170.38:7891), DSH_AGENT_ID, DSH_NODE, DSH_PLATFORM,")
+    out("  1. check .env: DSH_HUB_URL (your hub, e.g. https://hub.example.com:7891), DSH_AGENT_ID, DSH_NODE, DSH_PLATFORM,")
     out("     DSH_CAPABILITIES, DSH_EXCHANGE; DSH_HUB_PROXY=off (direct); only if check fails: http://127.0.0.1:7890 (Clash)")
     out("  2. edit profile.json: workspaces {name: local path} (names as in router-b), or dshProfile")
     out("  3. python agent_client.py check      (reachable through the proxy? which IP does the hub see?)")

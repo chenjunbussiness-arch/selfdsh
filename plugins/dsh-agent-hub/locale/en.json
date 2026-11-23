@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Agent hub",
-    "description": "DSH dispatches tasks to external agents (AWS Quick, Claude Code, Kiro, ...) through the standalone dsh-hub service; a read-only \"Agent\" tab of the task board shows tasks, agents and pending requests. Required: DSH_HUB_URL (e.g. https://8.134.170.38:7891), DSH_HUB_CONTROLLER_ID and DSH_HUB_TOKEN (issued on the hub with controller add) in <DSH home>/agent-hub/controller.env (not <DSH home>/.env) (DSH_HUB_PROXY optional, direct by default). Workers run scripts/agent_client.py init / register / run.",
+    "description": "DSH dispatches tasks to external agents (AWS Quick, Claude Code, Kiro, ...) through the standalone dsh-hub service; a read-only \"Agent\" tab of the task board shows tasks, agents and pending requests. Required: DSH_HUB_URL (e.g. https://<hub-host>:7891), DSH_HUB_CONTROLLER_ID and DSH_HUB_TOKEN (issued on the hub with controller add) in <DSH home>/agent-hub/controller.env (not <DSH home>/.env) (DSH_HUB_PROXY optional, direct by default). Workers run scripts/agent_client.py init / register / run.",
     "detail": "README.md"
   }
 }

@@ -7,11 +7,11 @@
 > 未 restart / enable / disable 任何服务，未改动 unit、nginx 配置，未 reload nginx，未 kill 进程。
 > 除本报告外无任何写操作。
 > 主机：Ubuntu 22.04.5 LTS（jammy），kernel `5.15.0-198-generic`，hostname `iZ7xv8t4x0ib6a8rktjo0eZ`，
-> 网卡地址 `<内网地址>/20`（eth0），公网入口 `8.134.170.38`（见下）。
+> 网卡地址 `<内网地址>/20`（eth0），公网入口 `<server>`（见下）。
 > 审计时间：2026-11-20 15:17–15:30 CST。
 
 **一句话结论**：这台机器上 DSH 的入口是四层叠加的
-`浏览器 → https://8.134.170.38:8443 (nginx, basic auth) → 127.0.0.1:42444 (dsh-web-gate) → 127.0.0.1:42443 (dsh web, systemd)`，
+`浏览器 → https://<server>:8443 (nginx, basic auth) → 127.0.0.1:42444 (dsh-web-gate) → 127.0.0.1:42443 (dsh web, systemd)`，
 链路上有 **2 个自建 systemd unit、3 个自建脚本、1 份 nginx 站点配置、1 套自签 TLS 证书、1 个 basic auth 文件**，
 再加上 `/root/.dsh` 的 root 专属状态目录。这些都必须在新机器上手工复刻，`pnpm install` 不会带来。
 
@@ -49,7 +49,7 @@ enabled
 
 ```
 432879 node /usr/local/pnpm-global/bin/../global/v11/49f9775095df6513e8ea2f08355f3462023a1e0be26574192d0f5326d06d8439/node_modules/@deepseek-ai/dsh/lib/bin.js \
-  --profile web --no-open --host 127.0.0.1 --port 42443 --trusted-host 8.134.170.38:8443
+  --profile web --no-open --host 127.0.0.1 --port 42443 --trusted-host <server>:8443
 ```
 
 ### 1.3 dsh-web-gate.service
@@ -107,7 +107,7 @@ ls: cannot access '/usr/lib/systemd/system/dsh-web*': No such file or directory
 | Environment | `PNPM_HOME=/usr/local/pnpm-global`；`PATH=/usr/local/pnpm-global/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin` | `GATE_PORT=42444`；`GATE_UPSTREAM_HOST=127.0.0.1`；`GATE_UPSTREAM_PORT=42443`；`GATE_TOKEN_LOG=/var/log/dsh-web.log` |
 | EnvironmentFile | 无 | 无 |
 | ExecStartPre | `/usr/local/bin/dsh-fix-zod` | — |
-| ExecStart | `/usr/local/pnpm-global/bin/dsh --profile web --no-open --host 127.0.0.1 --port 42443 --trusted-host 8.134.170.38:8443` | `/usr/local/bin/node /usr/local/bin/dsh-web-gate.mjs` |
+| ExecStart | `/usr/local/pnpm-global/bin/dsh --profile web --no-open --host 127.0.0.1 --port 42443 --trusted-host <server>:8443` | `/usr/local/bin/node /usr/local/bin/dsh-web-gate.mjs` |
 | Restart / RestartSec | `on-failure` / 5 | `always` / 3 |
 | After / Wants | `After=network-online.target` / `Wants=network-online.target` | `After=network-online.target dsh-web.service` / `Wants=dsh-web.service` |
 | StandardOutput / StandardError | 均 `append:/var/log/dsh-web.log` | 未设置（走 journal） |
@@ -119,7 +119,7 @@ ls: cannot access '/usr/lib/systemd/system/dsh-web*': No such file or directory
 **本机绝对路径清单（换机必须逐条对上）**：
 `/usr/local/pnpm-global`（PNPM_HOME + dsh shim）、`/usr/local/pnpm-global/bin/dsh`、
 `/usr/local/bin/dsh-fix-zod`、`/usr/local/bin/dsh-web-gate.mjs`、`/usr/local/bin/node`、
-`/var/log/dsh-web.log`、`/root/.dsh`、`8.134.170.38:8443`（trusted-host，写死在命令行里）。
+`/var/log/dsh-web.log`、`/root/.dsh`、`<server>:8443`（trusted-host，写死在命令行里）。
 
 ### 1.6 两个必须一起搬的脚本
 
@@ -204,7 +204,7 @@ LISTEN 0 128       [::]:22         [::]:*  users:(("sshd",pid=849,fd=4))
 **回答任务里的疑问**：
 - 42443 = DSH Web 本体，**只听 127.0.0.1**，没有直接对外。
 - 42444 = 自建 `dsh-web-gate`（node 脚本），**不是** DSH 的一部分，是额外加的稳定入口层。
-- 8443 = **nginx HTTPS 反代**，绑 `0.0.0.0`，是用户实际访问的地址（`https://8.134.170.38:8443`）。
+- 8443 = **nginx HTTPS 反代**，绑 `0.0.0.0`，是用户实际访问的地址（`https://<server>:8443`）。
 
 ### 2.1 防火墙
 
@@ -229,7 +229,7 @@ $ /usr/sbin/nft list ruleset
 **结论**：**OS 层没有任何防火墙**——ufw、firewalld 均未安装，iptables 三条链全 `ACCEPT` 且**零条规则**，
 nft 规则集为空。也就是说 8443 在主机层是**完全开放**的，唯一的访问控制是 nginx 的 `auth_basic`。
 
-> **未确认**：云厂商安全组（这台是阿里云 `iZ...` 实例风格 hostname，公网 IP `8.134.170.38` 不在任何本机网卡上，
+> **未确认**：云厂商安全组（这台是阿里云 `iZ...` 实例风格 hostname，公网 IP `<server>` 不在任何本机网卡上，
 > 应为 EIP/NAT 映射）无法从机器内部查询。**8443 的对外放行极可能是安全组规则，换机必须在新云控制台单独放行 8443/TCP**，
 > 这条无法用命令验证，请人工在控制台核对。
 
@@ -287,7 +287,7 @@ lrwxrwxrwx 1 root root 34 Nov 19 00:27 dsh-web -> /etc/nginx/sites-available/dsh
 $ /usr/sbin/nginx -T | grep -nE 'configuration file|listen|server_name|proxy_pass|ssl_certificate'
 197:# configuration file /etc/nginx/sites-enabled/dsh-web:
 204:    listen 8443 ssl;
-205:    server_name 8.134.170.38;
+205:    server_name <server>;
 207:    ssl_certificate     /etc/nginx/tls/dsh.crt;
 208:    ssl_certificate_key /etc/nginx/tls/dsh.key;
 232:        proxy_pass http://127.0.0.1:7993/;
@@ -300,7 +300,7 @@ $ /usr/sbin/nginx -T | grep -nE 'configuration file|listen|server_name|proxy_pas
 | 项 | 值 |
 |---|---|
 | `listen` | `8443 ssl`（绑 0.0.0.0，IPv4+IPv6 由 nginx 默认行为决定） |
-| `server_name` | `8.134.170.38`（公网 IP，不是本机网卡地址） |
+| `server_name` | `<server>`（公网 IP，不是本机网卡地址） |
 | `ssl_certificate` | `/etc/nginx/tls/dsh.crt`（自签，1172 B，`-rw-r--r--`） |
 | `ssl_certificate_key` | `/etc/nginx/tls/dsh.key`（1704 B，`-rw------- root`，**内容未打印**） |
 | `ssl_protocols` | `TLSv1.2 TLSv1.3` |
@@ -348,8 +348,8 @@ ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters
 ```
 
-只有系统默认内容，**没有** `dsh` / `8.134.170.38` 相关映射。
-所以 `server_name 8.134.170.38` 与 `--trusted-host 8.134.170.38:8443` 都是硬编码公网 IP，换机若公网 IP 变化**必须同步改这两处**（改完 nginx 要 reload、DSH 要重启）。
+只有系统默认内容，**没有** `dsh` / `<server>` 相关映射。
+所以 `server_name <server>` 与 `--trusted-host <server>:8443` 都是硬编码公网 IP，换机若公网 IP 变化**必须同步改这两处**（改完 nginx 要 reload、DSH 要重启）。
 
 ### 4.2 systemd timer / cron —— 无 DSH 相关
 
@@ -431,7 +431,7 @@ drwx------  vpn/
 | **Gate unit** | `/etc/systemd/system/dsh-web-gate.service` | node 跑 `dsh-web-gate.mjs`，42444→42443，`GATE_TOKEN_LOG=/var/log/dsh-web.log`，`Restart=always/3` | **必须**（否则书签 token 每次重启失效） | 见 5.2 骨架 → `systemctl daemon-reload && systemctl enable --now dsh-web-gate` |
 | **gate 脚本** | `/usr/local/bin/dsh-web-gate.mjs` | 6616 B / 179 行，零依赖，从日志尾部取 launch token 并代理 | **必须** | `install -m 0755 dsh-web-gate.mjs /usr/local/bin/`（整文件复制） |
 | **zod 修复脚本** | `/usr/local/bin/dsh-fix-zod` | bash，把 store 里的 zod 软链进 dsh-web 依赖链；**路径写死 `store/v11`** | **必须** | `install -m 0755 dsh-fix-zod /usr/local/bin/`；若新机 pnpm store 不是 `v11` 需改脚本内路径；不需要就删掉 ExecStartPre 行 |
-| **nginx 站点** | `/etc/nginx/sites-available/dsh-web`（enable 符号链接 `/etc/nginx/sites-enabled/dsh-web`） | `listen 8443 ssl`，`server_name 8.134.170.38`，`proxy_pass http://127.0.0.1:42444`，Upgrade/Connection、`proxy_buffering off`、`client_max_body_size 512m`、`auth_basic` | **必须** | 见 5.3 骨架 → `ln -s ../sites-available/dsh-web /etc/nginx/sites-enabled/dsh-web && nginx -t && systemctl reload nginx` |
+| **nginx 站点** | `/etc/nginx/sites-available/dsh-web`（enable 符号链接 `/etc/nginx/sites-enabled/dsh-web`） | `listen 8443 ssl`，`server_name <server>`，`proxy_pass http://127.0.0.1:42444`，Upgrade/Connection、`proxy_buffering off`、`client_max_body_size 512m`、`auth_basic` | **必须** | 见 5.3 骨架 → `ln -s ../sites-available/dsh-web /etc/nginx/sites-enabled/dsh-web && nginx -t && systemctl reload nginx` |
 | **TLS 证书** | `/etc/nginx/tls/dsh.crt` / `/etc/nginx/tls/dsh.key` | 自签，TLS1.2/1.3；key 权限 600 | **必须**（可复用，也可重签） | 复制两个文件并 `chmod 600 dsh.key`；重签见 5.3 备注 |
 | **basic auth 文件** | `/etc/nginx/.dsh-auth` | 44 B，1 行 `user:bcrypt`，`root:www-data 640` | **必须** | 复制并 `chown root:www-data && chmod 640`；或 `htpasswd -c /etc/nginx/.dsh-auth <用户名>` |
 | **防火墙 / 安全组** | 无本机规则（iptables 全 ACCEPT，无 ufw/firewalld） | OS 层不拦；**云安全组放行 8443/TCP**（未确认，需控制台核） | **必须**（云侧） | 新机安全组入方向放行 `8443/tcp`；若改用 ufw：`ufw allow 8443/tcp`（本机未装 ufw，保持现状即可） |
@@ -597,8 +597,8 @@ EOF
 
 | 项 | 原因 |
 |---|---|
-| 云安全组是否放行 8443 | 控制台信息，机器内部无 API/凭据可查；`8.134.170.38` 不在任何本机网卡上，判断为 EIP/NAT |
-| `8.134.170.38` 的绑定方式（EIP / NAT / SLB） | 同上，仅从 `ip addr` 看到内网 `<内网地址>` |
+| 云安全组是否放行 8443 | 控制台信息，机器内部无 API/凭据可查；`<server>` 不在任何本机网卡上，判断为 EIP/NAT |
+| `<server>` 的绑定方式（EIP / NAT / SLB） | 同上，仅从 `ip addr` 看到内网 `<内网地址>` |
 | `dsh-fix-zod` 在新机的必要性 | 取决于新机 pnpm store 版本与 @deepseek-ai/dsh-web 的依赖布局，需装完实测 |
 | `.credentials.yaml` / `.env` 的具体密钥值 | 按只读与脱敏要求未读取/未打印 |
 | `dsh-web-gate.mjs` 是否会随 DSH 升级失效 | 它依赖 dsh web 日志格式（`dsh web: http://...?token=...`）；DSH 若改日志格式，gate 需同步改 |

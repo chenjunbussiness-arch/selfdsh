@@ -24,14 +24,14 @@ v1 时 hub 运行在 DSH web server 里；v2 把 hub 拆成**独立服务 dsh-hu
 
 - **任务板（router-b 右侧工作板）多一个「Agent」tab**：在线 agent、待审批的加入申请、任务列表和详情，只读。没装 router-b 时改为**左侧栏一行「Agent 调度」**，点开是整页。
 - **DSH 模型多 11 个工具**（只有 DSH 能调用）：`task_dispatch` / `task_list` / `task_get` / `task_cancel` / `task_retry`，`agent_list` / `agent_requests` / `agent_approve` / `agent_reject` / `agent_revoke` / `agent_provision`。
-- **DSH 启动日志**：`agent-hub: config hubUrl=https://8.134.170.38:7891 (C:\Users\<你>\.dsh\agent-hub\controller.env (DSH_HUB_URL)), controllerId=…`（每项后面括号里是它的来源） 和 `agent-hub: controller token from …`（只写来源，不写令牌）。
+- **DSH 启动日志**：`agent-hub: config hubUrl=https://<server>:7891 (C:\Users\<你>\.dsh\agent-hub\controller.env (DSH_HUB_URL)), controllerId=…`（每项后面括号里是它的来源） 和 `agent-hub: controller token from …`（只写来源，不写令牌）。
 
 ## 快速上手（6 步）
 
-以 MYDESK 上的 DSH（控制方 `dsh-local`）连服务器 `8.134.170.38` 上的 hub 为例：
+以 MYDESK 上的 DSH（控制方 `dsh-local`）连服务器 `<server>` 上的 hub 为例：
 
 1. **服务器上 hub 要先跑起来**：按 [`services/dsh-hub/README.md`](../../services/dsh-hub/README.md) 部署。在 MYDESK 上验证：
-   `curl -k https://8.134.170.38:7891/v1/health`（直连；不通再试 `curl -k -x http://127.0.0.1:7890 …` 走本机 Clash，7891 才是 hub）。
+   `curl -k https://<server>:7891/v1/health`（直连；不通再试 `curl -k -x http://127.0.0.1:7890 …` 走本机 Clash，7891 才是 hub）。
 2. **在服务器上签发控制方令牌**（只显示一次，马上复制）：
    `node services/dsh-hub/server.mjs controller add dsh-local`　→　`dshc_dsh-local_…`
 3. **装插件**：`node plugins/dsh-agent-hub/scripts/install.mjs --profile <DSH profile 目录> --dry-run`，确认后去掉 `--dry-run` 再跑一次，然后重启 DSH 一次。
@@ -53,12 +53,12 @@ v1 时 hub 运行在 DSH web server 里；v2 把 hub 拆成**独立服务 dsh-hu
 
 | 文件 | 在哪台机器 | 键 | 必填 | 含义 | 示例（MYDESK） | 不配 / 默认 |
 |---|---|---|---|---|---|---|
-| `<DSH home>/agent-hub/controller.env`（模板 `controller.env.example`） | 跑 DSH 的机器 | `DSH_HUB_URL` | ✅ | hub 地址；裸 IP 自动补成 `https://IP:7891` | `https://8.134.170.38:7891` | 工具和面板报 `hub-not-configured` |
+| `<DSH home>/agent-hub/controller.env`（模板 `controller.env.example`） | 跑 DSH 的机器 | `DSH_HUB_URL` | ✅ | hub 地址；裸 IP 自动补成 `https://IP:7891` | `https://<server>:7891` | 工具和面板报 `hub-not-configured` |
 | 同上 | | `DSH_HUB_CONTROLLER_ID` | ✅ | 本 DSH 的控制方 id，和第 2 步 `controller add` 的一致 | `dsh-local`（服务器同机 DSH 用 `dsh-cloud`） | `hub-not-configured` |
 | 同上 | | `DSH_HUB_TOKEN` | ✅ | 控制方令牌 `dshc_<id>_…` | 第 2 步得到的令牌 | `hub-token-missing` |
 | 同上 | | `DSH_HUB_PROXY` | 可选 | 怎么连 hub：`off` 直连 / `env` 用环境变量 / `http://host:port` 代理 | `off`；直连不通时 `http://127.0.0.1:7890` | 直连 |
 | 同上 | | `DSH_HUB_CAFILE` | 自签证书时必填 | hub 证书或 CA 的 PEM 路径 | 留空（正规证书） | 系统 CA；自签却不填 → `hub-unreachable`（TLS） |
-| `<DSH home>/worker/.env`（模板 `scripts/worker.env.example`，`init` 生成） | 每台 worker 机器 | `DSH_HUB_URL` | ✅ | 同上 | `https://8.134.170.38:7891` | `check` / `register` / `run` 报错 |
+| `<DSH home>/worker/.env`（模板 `scripts/worker.env.example`，`init` 生成） | 每台 worker 机器 | `DSH_HUB_URL` | ✅ | 同上 | `https://<server>:7891` | `check` / `register` / `run` 报错 |
 | 同上 | | `DSH_AGENT_ID` | ✅ | worker 名，`^[a-z][a-z0-9-]{1,47}$` | `quick-mydesk` | `register` 报错 |
 | 同上 | | `DSH_HUB_PROXY` | 可选 | 同上 | `off`（模板默认） | `env`（读 HTTPS_PROXY / 系统代理） |
 | 同上 | | `DSH_EXCHANGE` | 建议 | 交换目录 | `E:/dsh-exchange` | worker 目录下的 `exchange/` |
@@ -162,7 +162,7 @@ node plugins/dsh-agent-hub/scripts/install.mjs --profile /root/.dsh/profiles/web
 #      agent-hub: controller token from environment variable DSH_HUB_TOKEN   （或 from /root/.dsh/agent-hub/controller.env (DSH_HUB_TOKEN)）
 #      agent-hub: mounted /api/agent-hub/admin/* (login, read-only, forwarded to the hub)
 #      agent-hub: 11 control tools registered (agent_*, task_*); controller of https://127.0.0.1:7891 as dsh-cloud
-#      （MYDESK 上的 dsh-local：controller of https://8.134.170.38:7891 as dsh-local via proxy http://127.0.0.1:7890）
+#      （MYDESK 上的 dsh-local：controller of https://<server>:7891 as dsh-local via proxy http://127.0.0.1:7890）
 ```
 
 配置或令牌缺失时，插件**照常加载**，日志中会给出 warning；此时每个工具调用和面板请求都会返回明确的错误码（`hub-not-configured` / `hub-token-missing`），不会导致 DSH 启动失败。
@@ -175,7 +175,7 @@ node plugins/dsh-agent-hub/scripts/install.mjs --profile /root/.dsh/profiles/web
 
 | 键 | 含义 | 默认值 |
 |---|---|---|
-| `hubUrl` | hub 的基础地址。远程 hub 用 `https://<hub-host>:7891`；只有 `127.0.0.1` / `localhost` / `[::1]` 才允许用 `http://`（没有配置 TLS 的 hub 只监听回环地址）。地址里不能带用户名密码、query 或 fragment；可以带路径前缀（`https://proxy/hub` 会请求 `/hub/v1/ctl/...`）。 | 无（必填）。MYDESK：`https://8.134.170.38:7891`（裸写 `8.134.170.38` 会自动补全）；hub 和 DSH 在同一台机器（dsh-cloud）时用 `https://127.0.0.1:7891`。hub 配了 TLS 后只提供 https，所以同机也要用 https 并配 `caFile`（证书 SAN 要包含 127.0.0.1）；只有 hub 不配 TLS、只监听回环时才用 `http://` |
+| `hubUrl` | hub 的基础地址。远程 hub 用 `https://<hub-host>:7891`；只有 `127.0.0.1` / `localhost` / `[::1]` 才允许用 `http://`（没有配置 TLS 的 hub 只监听回环地址）。地址里不能带用户名密码、query 或 fragment；可以带路径前缀（`https://proxy/hub` 会请求 `/hub/v1/ctl/...`）。 | 无（必填）。MYDESK：`https://<server>:7891`（裸写 `<server>` 会自动补全）；hub 和 DSH 在同一台机器（dsh-cloud）时用 `https://127.0.0.1:7891`。hub 配了 TLS 后只提供 https，所以同机也要用 https 并配 `caFile`（证书 SAN 要包含 127.0.0.1）；只有 hub 不配 TLS、只监听回环时才用 `http://` |
 | `controllerId` | 这个 DSH 在 hub 上的控制方 id，需匹配 `/^[a-z][a-z0-9-]{1,47}$/`，例如 `dsh-cloud`、`dsh-local`。每个请求都会带上 `?id=<controllerId>`。 | 无（必填） |
 | `caFile` | hub 证书（自签）或其 CA 的 PEM 文件。配置后它是验证 hub 证书的**唯一**信任根；不配置时使用系统 CA。只对 `https://` 生效。 | 不设置 |
 | `timeoutMs` | 单次请求 hub 的超时时间，取值为 1000..120000 的整数。配置非法时给出 warning 并使用默认值。 | `15000` |
@@ -317,7 +317,7 @@ worker 目录固定是 `<DSH home>/worker/`（DSH home = `$DSH_HOME` 或 `~/.dsh
 
    ```dotenv
    # C:/Users/<you>/.dsh/worker/.env（MYDESK）
-   DSH_HUB_URL=https://8.134.170.38:7891
+   DSH_HUB_URL=https://<server>:7891
    DSH_HUB_PROXY=http://127.0.0.1:7890     # 本机 Clash/mihomo；off = 直连；env = 系统 / 环境变量代理
    DSH_HUB_CAFILE=                          # 自签证书时填 CA 路径
    DSH_AGENT_ID=quick-mydesk

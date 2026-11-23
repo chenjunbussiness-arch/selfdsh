@@ -3,7 +3,7 @@
 用户要的三件事里，只有「任务面板」需要新代码；另外三个入口 rc.3 全都有官方落点。
 **本文只写路径与证据，插件不重复实现**——重造一套只会和原生入口抢位置、抢凭据来源。
 
-证据路径均相对 `C:\Users\13558\AppData\Local\Programs\DeepSeek Harness\resources\app.asar\dsh\node_modules\@deepseek-ai\`。
+证据路径均相对 `C:\Users\<你>\AppData\Local\Programs\DeepSeek Harness\resources\app.asar\dsh\node_modules\@deepseek-ai\`。
 
 ---
 
@@ -37,7 +37,7 @@ $DSH_HOME/.env                ← 只读 fallback，provider 永不写
 ```
 
 ⇒ **绝对不要手写 `.env` 或 `.credentials.yaml`**：会被下一次 `set/unset` 的原子重写覆盖，
-或造成分层歧义。另外本任务明确不动 `C:\Users\13558\.dsh\`。
+或造成分层歧义。另外本任务明确不动 `C:\Users\<你>\.dsh\`。
 
 ---
 

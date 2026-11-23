@@ -8,23 +8,26 @@
 当成输入重定向。命令默认在 **Git Bash**（Windows）或 **WSL 的 bash** 里执行，只有标注
 PowerShell 的才在 PowerShell 里跑。
 
+`<server>` 是服务器的域名或公网 IP，`<旧地址>` 是证书里留下的旧地址，`<gitea-user>` 是你的 Gitea 账号名。
+仓库里不写真实地址：服务器 IP 可能会变，以管理员当前给的为准。
+
 ---
 
 ## 0. 先记住这几个事实
 
 | 项 | 值 |
 |---|---|
-| 仓库地址 | `https://8.134.170.38:8444/dev/dsh-warroom.git` |
-| Gitea 用户名 | `ops1e5d1a` |
+| 仓库地址 | `https://<server>:8444/dev/dsh-warroom.git` |
+| Gitea 用户名 | `<gitea-user>` |
 | 仓库 | `dev/dsh-warroom`（私有） |
 | 发布 tag | `v2026.11.21` |
 | 访问方式 | HTTPS **8444**，强制 mTLS（必须带客户端证书） |
-| 服务器证书（叶子） | **2026-11-21 已重签**：CN=`gitea-8444`，签发者 `CN=8.163.126.253`（旧自签根），SAN 含 `8.134.170.38`、`127.0.0.1`、`8.163.126.253`、`localhost`，有效期至 **2036-11-18**，SHA256 指纹 `5E:44:48:C6:…:4C:6E:50`，序列号 `035845556CB710B5D2FE270DF319273F` |
-| 客户端信任锚 | 分发的 `gitea.crt` = **旧自签根**（CN=`8.163.126.253`，sha256 `6458b34e…626e9d`），本次**未变**；它是 CA，不是服务器叶子证书 |
+| 服务器证书（叶子） | **2026-11-21 已重签**：CN=`gitea-8444`，签发者 `CN=<旧地址>`（旧自签根），SAN 含 `<server>`、`127.0.0.1`、`<旧地址>`、`localhost`，有效期至 **2036-11-18**，SHA256 指纹 `5E:44:48:C6:…:4C:6E:50`，序列号 `035845556CB710B5D2FE270DF319273F` |
+| 客户端信任锚 | 分发的 `gitea.crt` = **旧自签根**（CN=`<旧地址>`，sha256 `6458b34e…626e9d`），本次**未变**；它是 CA，不是服务器叶子证书 |
 | 客户端证书 | `client.p12`（PKCS#12，CN=`warroom-client`，颁发者 `DSH Client CA (gitea-8444)`，有效期至 2035-12-03） |
 | p12 口令 | 服务器上的 `client-p12-password.txt`（单行） |
 | Gitea 登录口令 | 服务器 `/root/.gitea-admin.cred`，**由管理员线下提供**；不要写进 URL、文档、脚本或聊天 |
-| 旧地址 | 已废弃，**一律用 `8.134.170.38`**；旧地址只作为证书里的 CN/SAN 出现（见 2.5），不要用它连接 |
+| 旧地址 | 已废弃，**一律用 `<server>`**；旧地址只作为证书里的 CN/SAN 出现（见 2.5），不要用它连接 |
 
 证书源目录（服务器上，只读）：
 
@@ -43,9 +46,9 @@ PowerShell 的才在 PowerShell 里跑。
 
 ```bash
 # Git Bash / WSL / macOS 都自带 openssl；能打印出下面的 subject/issuer 就说明端口通
-openssl s_client -connect 8.134.170.38:8444 -servername 8.134.170.38 -brief </dev/null 2>&1 | head -20
+openssl s_client -connect <server>:8444 -servername <server> -brief </dev/null 2>&1 | head -20
 # Windows PowerShell 也可以只探端口：
-#   Test-NetConnection 8.134.170.38 -Port 8444
+#   Test-NetConnection <server> -Port 8444
 ```
 
 能连上（`CONNECTION ESTABLISHED` / 打印出 `subject=`）就说明 TCP 与 TLS 正常；此时不带客户端证书
@@ -57,14 +60,14 @@ openssl s_client -connect 8.134.170.38:8444 -servername 8.134.170.38 -brief </de
 ## 1. 从服务器取证书三件套
 
 > 前提：你有服务器 SSH 账号（`<user>`，通常是 `root`），并且能登录 `<server>`
-> （就是 `8.134.170.38`）。没有 SSH 权限时，让管理员把这三个文件线下给你，放到同一个目录即可。
+> （就是 `<server>`）。没有 SSH 权限时，让管理员把这三个文件线下给你，放到同一个目录即可。
 
 ### 1.1 Git Bash / WSL / macOS
 
 ```bash
 # 把这两个占位符换成实际值（尖括号一起删掉）
 SCP_USER='<user>'       # 例：root
-SCP_HOST='<server>'     # 例：8.134.170.38
+SCP_HOST='<server>'     # 例：<server>
 
 mkdir -p "$HOME/gitea-mtls" && chmod 700 "$HOME/gitea-mtls"
 
@@ -88,7 +91,7 @@ scp "$SCP_USER@$SCP_HOST:/srv/workspace/.dsh-artifacts/gitea-mtls/client.crt" \
 
 ```powershell
 # 替换尖括号内容
-$S = "<user>@<server>"          # 例：root@8.134.170.38
+$S = "<user>@<server>"          # 例：root@<server>
 New-Item -ItemType Directory -Force "$HOME\gitea-mtls" | Out-Null
 
 scp "${S}:/srv/workspace/.dsh-artifacts/gitea-mtls/client.p12"            "$HOME\gitea-mtls\"
@@ -114,7 +117,7 @@ openssl x509 -in gitea.crt -noout -subject -issuer -dates
 ```
 
 预期能看到 `client.p12`、`client-p12-password.txt`、`gitea.crt` 三个文件；
-`gitea.crt` 是**客户端信任锚（旧自签根 CA）**，subject/issuer 都是 `CN = 8.163.126.253`，到期 2036-11-17。
+`gitea.crt` 是**客户端信任锚（旧自签根 CA）**，subject/issuer 都是 `CN = <旧地址>`，到期 2036-11-17。
 想确认服务器当前用的是哪张叶子证书，再看 `gitea-server.crt`（新叶子 CN=`gitea-8444`，到期 2036-11-18）：
 
 ```bash
@@ -220,9 +223,9 @@ Windows 路径统一用**正斜杠** `C:/...`，不要用 `~`：
 
 ```bash
 # 把 <你> 换成你的 Windows 用户名
-git config --global http."https://8.134.170.38:8444/".sslCAInfo "C:/Users/<你>/gitea-mtls/gitea.crt"
-git config --global http."https://8.134.170.38:8444/".sslCert   "C:/Users/<你>/gitea-mtls/client.crt"
-git config --global http."https://8.134.170.38:8444/".sslKey    "C:/Users/<你>/gitea-mtls/client.key"
+git config --global http."https://<server>:8444/".sslCAInfo "C:/Users/<你>/gitea-mtls/gitea.crt"
+git config --global http."https://<server>:8444/".sslCert   "C:/Users/<你>/gitea-mtls/client.crt"
+git config --global http."https://<server>:8444/".sslKey    "C:/Users/<你>/gitea-mtls/client.key"
 ```
 
 核对（应看到三行，键名里带 `:8444`）：
@@ -239,36 +242,36 @@ git config --global --get-regexp '^http\.'
 3. **不要**把 Git Bash 的 `/c/Users/...` 写进配置给原生 `git.exe` 用；用
    `cygpath -w "$HOME/gitea-mtls/client.crt"` 看真正的 Windows 路径，再改写成 `C:/...`。
 
-### 2.5 证书已重签（SAN 已含 8.134.170.38）：按正常配置即可，无需关校验
+### 2.5 证书已重签（SAN 已含 <server>）：按正常配置即可，无需关校验
 
 **2026-11-21 服务端证书已重签并 reload 完成**，新叶子证书：
 
 | 项 | 值 |
 |---|---|
 | subject | `CN = gitea-8444` |
-| issuer | `CN = 8.163.126.253`（旧自签根，未变） |
-| SAN | `DNS:localhost`、`DNS:iZ7xvbde054g23c5jfv4jqZ`、`IP:127.0.0.1`、`IP:8.134.170.38`、`IP:8.163.126.253` |
+| issuer | `CN = <旧地址>`（旧自签根，未变） |
+| SAN | `DNS:localhost`、`DNS:<主机名>`、`IP:127.0.0.1`、`IP:<server>`、`IP:<旧地址>` |
 | 有效期 | 2026-11-21 → 2036-11-18 |
 | SHA256 指纹 | `5E:44:48:C6:CB:90:84:37:43:E5:EE:FB:06:15:76:FB:73:81:20:BE:7C:90:B4:15:AA:96:87:D6:A0:4C:6E:50` |
 | 序列号 | `035845556CB710B5D2FE270DF319273F` |
 
-也就是说，之前那条“certificate subject name (8.163.126.253) does not match target host name
-'8.134.170.38'”的报错**已经不存在了**。用 `8.134.170.38` 连接时，主机名校验能正常通过。
+也就是说，之前那条“certificate subject name (<旧地址>) does not match target host name
+'<server>'”的报错**已经不存在了**。用 `<server>` 连接时，主机名校验能正常通过。
 
 自己确认一遍（看服务器实际下发的叶子，不看信任锚）：
 
 ```bash
-openssl s_client -connect 8.134.170.38:8444 -servername 8.134.170.38 \
+openssl s_client -connect <server>:8444 -servername <server> \
   -CAfile "$HOME/gitea-mtls/gitea.crt" -brief </dev/null 2>&1 | head -20
 # 期望：Verification: OK / Verify return code: 0 (ok)
 # 想直接看 SAN 就用交付目录里的 gitea-server.crt：
 openssl x509 -in "$HOME/gitea-mtls/gitea-server.crt" -noout -ext subjectAltName
-# 期望输出里含 IP Address:8.134.170.38
+# 期望输出里含 IP Address:<server>
 ```
 
 三条边界，出错前先看这三条：
 
-1. **CA 信任锚没变**：`gitea.crt` 仍然是那张旧自签根（CN=`8.163.126.253`，sha256
+1. **CA 信任锚没变**：`gitea.crt` 仍然是那张旧自签根（CN=`<旧地址>`，sha256
    `6458b34e…626e9d`）。老用户手里的 `gitea.crt` **继续有效，不用更换**；重新下载也无害
    （内容逐字节相同）。反过来说，**不要**拿 `gitea-server.crt` / `gitea-server-chain.crt`
    当 `sslCAInfo`——它们只是排障副本，会随叶子重签而变化。
@@ -281,12 +284,12 @@ openssl x509 -in "$HOME/gitea-mtls/gitea-server.crt" -noout -ext subjectAltName
    | 现象 | 含义 | 处理 |
    |---|---|---|
    | `400 No required SSL certificate was sent` | 客户端证书没发出去（不是服务器证书问题） | 看 6.4 |
-   | `certificate subject name ... does not match` | 主机名/SAN 不匹配 | 确认连的是 `8.134.170.38`，并确认 `gitea.crt` 是新的信任锚；不要用 `-k` 绕过 |
+   | `certificate subject name ... does not match` | 主机名/SAN 不匹配 | 确认连的是 `<server>`，并确认 `gitea.crt` 是新的信任锚；不要用 `-k` 绕过 |
    | `unable to get local issuer certificate` / `unknown CA` | `sslCAInfo` 指错或没配 | 指回 `$HOME/gitea-mtls/gitea.crt`（见 6.1） |
    | `401` / `Authentication failed` | TLS 已通过，账号问题 | 看 6.2 |
 
 > **不需要 `http.sslVerify=false`，也不要 `GIT_SSL_NO_VERIFY=1`。**
-> 证书已经包含 `8.134.170.38`，按 2.4 正常配好 `sslCAInfo` / `sslCert` / `sslKey` 即可；
+> 证书已经包含 `<server>`，按 2.4 正常配好 `sslCAInfo` / `sslCert` / `sslKey` 即可；
 > 更不要执行 `git config --global http.sslVerify false`（那会对所有仓库永久关闭校验）。
 > 本文任何章节都不会让你用“关校验”来换连通性。
 
@@ -342,9 +345,9 @@ chmod 600 client.key
 ### 3.2 配置
 
 ```bash
-git config --global http."https://8.134.170.38:8444/".sslCAInfo "$HOME/.gitea-mtls/gitea.crt"
-git config --global http."https://8.134.170.38:8444/".sslCert   "$HOME/.gitea-mtls/client.crt"
-git config --global http."https://8.134.170.38:8444/".sslKey    "$HOME/.gitea-mtls/client.key"
+git config --global http."https://<server>:8444/".sslCAInfo "$HOME/.gitea-mtls/gitea.crt"
+git config --global http."https://<server>:8444/".sslCert   "$HOME/.gitea-mtls/client.crt"
+git config --global http."https://<server>:8444/".sslKey    "$HOME/.gitea-mtls/client.key"
 git config --global --get-regexp '^http\.'
 ```
 
@@ -352,12 +355,12 @@ git config --global --get-regexp '^http\.'
 
 ### 3.3 证书相关报错时
 
-证书已于 2026-11-21 重签，SAN 已含 `8.134.170.38`，**按 3.2 配好即可，不需要关校验**。
+证书已于 2026-11-21 重签，SAN 已含 `<server>`，**按 3.2 配好即可，不需要关校验**。
 真报错时按 2.5 的“三条边界 + 分类表”处理，不要用 `-k` / `GIT_SSL_NO_VERIFY=1` 绕过：
 
 ```bash
 # 先看服务端信任链是否 OK（不下载代码）
-openssl s_client -connect 8.134.170.38:8444 -servername 8.134.170.38 \
+openssl s_client -connect <server>:8444 -servername <server> \
   -CAfile "$HOME/.gitea-mtls/gitea.crt" -brief </dev/null 2>&1 | head -20
 ```
 
@@ -377,7 +380,7 @@ export GIT_SSL_KEY="$HOME/.gitea-mtls/client.key"
 
 ```bash
 GIT_SSL_CERT=/nonexistent.pem GIT_TERMINAL_PROMPT=0 \
-  git ls-remote https://8.134.170.38:8444/dev/dsh-warroom.git 2>&1 | head -3
+  git ls-remote https://<server>:8444/dev/dsh-warroom.git 2>&1 | head -3
 ```
 
 这些变量只对当前 shell 生效；别写进 `~/.bashrc` 当成永久配置（容易和 git config 打架）。
@@ -393,7 +396,7 @@ Gitea 登录口令在服务器 `/root/.gitea-admin.cred`，由管理员**线下*
 
 | 口令 | 用途 | 来源 |
 |---|---|---|
-| Gitea 登录口令 | HTTPS 认证（用户名 `ops1e5d1a`） | `/root/.gitea-admin.cred`，管理员线下给 |
+| Gitea 登录口令 | HTTPS 认证（用户名 `<gitea-user>`） | `/root/.gitea-admin.cred`，管理员线下给 |
 | p12 口令 | 解锁 `client.p12` | `client-p12-password.txt`（第 1 节已取） |
 
 **红线**：不要把口令写进 URL（`https://user:pass@...` 会把口令留在 shell 历史、git remote
@@ -402,10 +405,10 @@ Gitea 登录口令在服务器 `/root/.gitea-admin.cred`，由管理员**线下*
 ### 4.2 先做一次“只握手、不拉代码”的自检
 
 ```bash
-GIT_TERMINAL_PROMPT=0 git ls-remote https://8.134.170.38:8444/dev/dsh-warroom.git
+GIT_TERMINAL_PROMPT=0 git ls-remote https://<server>:8444/dev/dsh-warroom.git
 ```
 
-- 输出 `fatal: could not read Username for 'https://8.134.170.38:8444': terminal prompts disabled`
+- 输出 `fatal: could not read Username for 'https://<server>:8444': terminal prompts disabled`
   → **TLS 和 mTLS 都通了**，只差账号认证，可以继续 clone。
 - 输出 `remote: Verify` + `fatal: Authentication failed`
   → 同样是**证书已通过**（服务器已经进到 HTTP 认证阶段），只是该账号需要二次验证/令牌；
@@ -417,13 +420,13 @@ GIT_TERMINAL_PROMPT=0 git ls-remote https://8.134.170.38:8444/dev/dsh-warroom.gi
 
 ```bash
 mkdir -p "$HOME/src" && cd "$HOME/src"
-git clone https://ops1e5d1a@8.134.170.38:8444/dev/dsh-warroom.git
+git clone https://<gitea-user>@<server>:8444/dev/dsh-warroom.git
 ```
 
 首次会提示一次（用户名已经在 URL 里，所以只问口令）：
 
 ```text
-Password for 'https://ops1e5d1a@8.134.170.38:8444':
+Password for 'https://<gitea-user>@<server>:8444':
 ```
 
 把管理员给你的登录口令粘贴进去（输入不回显），回车。
@@ -541,9 +544,9 @@ Problem with the SSL CA cert (path? access rights?)
 ```bash
 # 1) 后端是不是 OpenSSL、CA 路径是否真的配了
 git config --show-origin --get http.sslBackend
-git config --get http."https://8.134.170.38:8444/".sslCAInfo
+git config --get http."https://<server>:8444/".sslCAInfo
 
-# 2) 文件在不在、能不能被 openssl 读（这是信任锚 = 旧自签根，subject=issuer=CN=8.163.126.253）
+# 2) 文件在不在、能不能被 openssl 读（这是信任锚 = 旧自签根，subject=issuer=CN=<旧地址>）
 openssl x509 -in "$HOME/gitea-mtls/gitea.crt" -noout -subject -dates
 
 # 3) 信任锚自校验（期望 "gitea.crt: OK"）
@@ -561,31 +564,31 @@ openssl verify -CAfile "$HOME/gitea-mtls/gitea.crt" \
   `gitea-server.crt` / `gitea-server-chain.crt` 是排障副本，链文件里虽然也含根、能“碰巧”验过，
   但会随叶子重签失效，**不要**用它当 `sslCAInfo`。
 - 如果报的是 `certificate subject name ... does not match target host name`，那不是 CA 问题；
-  2026-11-21 重签后 SAN 已含 `8.134.170.38`，出现这个错多半是本地还放着**旧叶子**或连错地址，见 2.5。
+  2026-11-21 重签后 SAN 已含 `<server>`，出现这个错多半是本地还放着**旧叶子**或连错地址，见 2.5。
 
 ### 6.2 401 / 403 / Authentication failed
 
 先分清是“TLS 没过（400）”还是“TLS 过了、账号不对（401/403）”：
 
 ```bash
-GIT_TERMINAL_PROMPT=0 git ls-remote https://8.134.170.38:8444/dev/dsh-warroom.git
+GIT_TERMINAL_PROMPT=0 git ls-remote https://<server>:8444/dev/dsh-warroom.git
 ```
 
 - `400` → 客户端证书没发出去，看 6.4，不是账号问题。
 - `401` / `403` / `Authentication failed` → 账号或口令问题，按下面查：
 
 ```bash
-# 1) 用户名必须是 Gitea 账号名 ops1e5d1a，不是邮箱
+# 1) 用户名必须是 Gitea 账号名 <gitea-user>，不是邮箱
 git config --get credential.username
 git config --global --get credential.helper
 
 # 2) 清掉缓存的旧凭据后重试
-#    Windows：控制面板 → 凭据管理器 → Windows 凭据 → 删除 git:https://8.134.170.38
-cmdkey /list | findstr 8.134.170.38
+#    Windows：控制面板 → 凭据管理器 → Windows 凭据 → 删除 git:https://<server>
+cmdkey /list | findstr <server>
 #    Git Bash 里也可以：
 git credential-manager erase <<'EOF'
 protocol=https
-host=8.134.170.38:8444
+host=<server>:8444
 EOF
 ```
 
@@ -603,25 +606,25 @@ openssl pkcs12 -in "$HOME/gitea-mtls/client.p12" \
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' --max-time 10 \
-  --cacert "$HOME/gitea-mtls/gitea.crt" https://8.134.170.38:8444/
+  --cacert "$HOME/gitea-mtls/gitea.crt" https://<server>:8444/
 # 期望 400（mTLS 拦截，说明 TLS 已通、只差客户端证书）；000 表示没连上
 ```
 
 Windows PowerShell：
 
 ```powershell
-Test-NetConnection 8.134.170.38 -Port 8444
-curl.exe -m 10 -o NUL -w "%{http_code}`n" --cacert "$HOME\gitea-mtls\gitea.crt" https://8.134.170.38:8444/
+Test-NetConnection <server> -Port 8444
+curl.exe -m 10 -o NUL -w "%{http_code}`n" --cacert "$HOME\gitea-mtls\gitea.crt" https://<server>:8444/
 ```
 
 WSL：
 
 ```bash
-nc -vz -w 5 8.134.170.38 8444
+nc -vz -w 5 <server> 8444
 ```
 
 如果 `Test-NetConnection` 的 `TcpTestSucceeded` 是 `False`：阿里云安全组放行 TCP **8444** 入方向，
-并确认实例公网 IP 确实是 `8.134.170.38`。如果只有旧地址能连，说明你用的是过期资料，换回 `8.134.170.38`。
+并确认实例公网 IP 确实是 `<server>`。如果只有旧地址能连，说明你用的是过期资料，换回 `<server>`。
 
 ### 6.4 mTLS handshake 失败（400 / No required SSL certificate was sent / 495）
 
@@ -638,13 +641,13 @@ git config --global --get-regexp '^http\.https://8\.134\.170\.38:8444/'
 curl -sS -o /dev/null -w '%{http_code}\n' \
   --cacert "$HOME/gitea-mtls/gitea.crt" \
   --cert "$HOME/gitea-mtls/client.crt" --key "$HOME/gitea-mtls/client.key" \
-  'https://8.134.170.38:8444/dev/dsh-warroom.git/info/refs?service=git-upload-pack'
+  'https://<server>:8444/dev/dsh-warroom.git/info/refs?service=git-upload-pack'
 # 期望 401（mTLS 与服务器证书校验都通过、只差账号）；400 = 证书没被接受
 ```
 
 ```bash
 # 3) 看 TLS 握手细节
-openssl s_client -connect 8.134.170.38:8444 -servername 8.134.170.38 \
+openssl s_client -connect <server>:8444 -servername <server> \
   -cert "$HOME/gitea-mtls/client.crt" -key "$HOME/gitea-mtls/client.key" \
   -CAfile "$HOME/gitea-mtls/gitea.crt" -brief </dev/null
 ```
@@ -672,7 +675,7 @@ cygpath -w "$HOME/gitea-mtls/client.crt"
 ls -l "$HOME/gitea-mtls/client.crt" "$HOME/gitea-mtls/client.key"
 
 # 3) 路径有空格时必须带引号
-git config --global http."https://8.134.170.38:8444/".sslCert "C:/Users/Zhang San/gitea-mtls/client.crt"
+git config --global http."https://<server>:8444/".sslCert "C:/Users/Zhang San/gitea-mtls/client.crt"
 ```
 
 规则回顾：
@@ -680,7 +683,7 @@ git config --global http."https://8.134.170.38:8444/".sslCert "C:/Users/Zhang Sa
 - 用 `C:/Users/<你>/...`（正斜杠）；用反斜杠就要写成 `C:\\Users\\...`（双反斜杠）。
 - 不要用 `~`、不要用 `%USERPROFILE%`（git 不展开）。
 - 在 Git Bash 里 `cd` 到目录后用 `pwd -W` 可以得到 `C:/...` 形式。
-- 配置写错后，`git config --global --unset http."https://8.134.170.38:8444/".sslCert` 可撤销单条。
+- 配置写错后，`git config --global --unset http."https://<server>:8444/".sslCert` 可撤销单条。
 
 ---
 
@@ -690,7 +693,7 @@ git config --global http."https://8.134.170.38:8444/".sslCert "C:/Users/Zhang Sa
    不要进仓库、不要进网盘、不要发群。
 2. Gitea 登录口令只从管理员线下拿，只在 `Password:` 提示处输入；不要写进 URL、脚本、
    `.git-credentials`、issue、聊天记录。
-3. **不需要关 `http.sslVerify`**：证书已重签，SAN 含 `8.134.170.38`，按第 2、3 节正常配置
+3. **不需要关 `http.sslVerify`**：证书已重签，SAN 含 `<server>`，按第 2、3 节正常配置
    即可。任何情况下都不要 `git config --global http.sslVerify false`，也不要用
    `-c http.sslVerify=false` / `GIT_SSL_NO_VERIFY=1` 去换连通性；报错时按 6.x 先看错误类型。
 4. 证书/口令一旦疑似泄露，找管理员重签客户端证书并改 Gitea 口令；旧证书在到期前技术上仍有效

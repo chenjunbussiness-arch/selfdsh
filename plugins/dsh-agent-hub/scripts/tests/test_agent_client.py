@@ -892,7 +892,7 @@ class TestEnvFile(TempCase):
         self.assertEqual(text, ac.ENV_TEMPLATE, "worker.env.example is what `init` writes")
         self.assertEqual(tuple(ac.parse_env_text(text)), ac.ENV_KEYS)
         values = ac.parse_env_text(text)
-        self.assertEqual((values["DSH_HUB_PROXY"], values["DSH_HUB_URL"]), ("off", "https://8.134.170.38:7891"))
+        self.assertEqual((values["DSH_HUB_PROXY"], values["DSH_HUB_URL"]), ("off", ""))
         with open(prof_example, encoding="utf-8") as f:
             self.assertEqual(set(json.load(f)), set(ac.profile_template()))
 
