@@ -9,7 +9,7 @@
 v1 时 hub 运行在 DSH web server 里；v2 把 hub 拆成**独立服务 dsh-hub**（`services/dsh-hub`，端口 7891，部署方法见 [`services/dsh-hub/README.md`](../../services/dsh-hub/README.md)）。这个插件现在只是 hub 的**控制方客户端**：
 
 - 插件**不保存任何任务状态，也不运行租约清扫**。任务、租约、重试、产物都由 hub 负责。
-- 插件把 11 个 DSH 专用工具转成对 hub `/v1/ctl/*` 的调用。
+- 插件把 14 个 DSH 专用工具转成对 hub `/v1/ctl/*` 的调用。
 - 插件保留调度面板的只读接口 `/api/agent-hub/admin/*`（路径和返回字段与 v1 相同），数据从 hub 获取，再按原来的白名单整理后返回。
 - worker（AWS Quick、Claude Code、Kiro……）**直接连接 hub**，不再经过 DSH。原来的 `/api/agent-hub/v1/*` worker 路由已经删除。
 
@@ -23,7 +23,7 @@ v1 时 hub 运行在 DSH web server 里；v2 把 hub 拆成**独立服务 dsh-hu
 ## 装好后在哪里看到
 
 - **任务板（router-b 右侧工作板）多一个「Agent」tab**：在线 agent、待审批的加入申请、任务列表和详情，只读。没装 router-b 时改为**左侧栏一行「Agent 调度」**，点开是整页。
-- **DSH 模型多 11 个工具**（只有 DSH 能调用）：`task_dispatch` / `task_list` / `task_get` / `task_cancel` / `task_retry`，`agent_list` / `agent_requests` / `agent_approve` / `agent_reject` / `agent_revoke` / `agent_provision`。
+- **DSH 模型多 14 个工具**（只有 DSH 能调用）：`task_dispatch` / `task_list` / `task_get` / `task_cancel` / `task_retry`，`agent_list` / `agent_requests` / `agent_approve` / `agent_reject` / `agent_revoke` / `agent_provision`，以及兜底用的 `fallback_list` / `fallback_take` / `fallback_submit`。
 - **DSH 启动日志**：`agent-hub: config hubUrl=https://<server>:7891 (C:\Users\<你>\.dsh\agent-hub\controller.env (DSH_HUB_URL)), controllerId=…`（每项后面括号里是它的来源） 和 `agent-hub: controller token from …`（只写来源，不写令牌）。
 
 ## 快速上手（6 步）
@@ -137,11 +137,11 @@ DSH_PATH_MAP: E:/PythonProject=/host/e/PythonProject;${USERPROFILE}/.dsh/profile
 plugins/dsh-agent-hub/
 ├── index.js / package.json / cordis.patch.yml / icon.svg / locale/
 ├── packages/host-agent-hub/
-│   ├── index.js       挂载：读配置 → 注册 11 个工具 + 面板路由；配置缺失时只给 warning
+│   ├── index.js       挂载：读配置 → 注册 14 个工具 + 面板路由；配置缺失时只给 warning
 │   ├── hub-client.js  /v1/ctl/* 客户端（node:https request + ca、?id=、X-DSH-Token、超时、错误映射、脱敏）
 │   ├── proxy.js       HTTP 代理：CONNECT 隧道 + TLS（parseProxyUrl / shouldBypass / buildConnectRequest / openTunnel）
 │   ├── env-file.js    .env 解析（不依赖第三方库）
-│   ├── tools.js       11 个 DSH 专用工具
+│   ├── tools.js       14 个 DSH 专用工具
 │   ├── bridge.js      /api/agent-hub/admin/*（requireLogin + 白名单整形 + 503 hub-unreachable）
 │   ├── hub.js         v1 本地 hub，仅保留作参考；插件已不再加载（v2 实现在 services/dsh-hub）
 │   └── tests/         node:test 测试（不依赖真实 hub，使用假的 request 和假的 fs）
@@ -162,7 +162,7 @@ node plugins/dsh-agent-hub/scripts/install.mjs --profile /root/.dsh/profiles/web
 #    第一次装插件要重启 DSH 一次（由运维决定何时）；之后改 controller.env 不用重启。日志里应该能看到：
 #      agent-hub: controller token from environment variable DSH_HUB_TOKEN   （或 from /root/.dsh/agent-hub/controller.env (DSH_HUB_TOKEN)）
 #      agent-hub: mounted /api/agent-hub/admin/* (login, read-only, forwarded to the hub)
-#      agent-hub: 11 control tools registered (agent_*, task_*); controller of https://127.0.0.1:7891 as dsh-cloud
+#      agent-hub: 14 control tools registered (agent_*, task_*, fallback_*); controller of https://127.0.0.1:7891 as dsh-cloud
 #      （MYDESK 上的 dsh-local：controller of https://<server>:7891 as dsh-local via proxy http://127.0.0.1:7890）
 ```
 
@@ -227,11 +227,11 @@ DSH_HUB_TOKEN='dshc_dsh-cloud_xxxxxxxxxxxxxxxx'   # 行尾注释
 
 ## 4. 工具（只有 DSH 模型能调用）
 
-工具名称与 v1 完全一致，每个工具对应一次 `/v1/ctl/*` 调用：
+v1 的 11 个工具名称不变，另加 3 个兜底工具。每个工具对应一次 `/v1/ctl/*` 调用：
 
 | 工具 | hub 接口 | 说明 |
 |---|---|---|
-| `task_dispatch` | `POST /v1/ctl/dispatch` | **新增** `require_online`：目标不在线时 409 拒绝而不是入队；默认入队，hub 返回的 `warnings`（`agent-offline` / `no-online-worker`）原样带回给 DSH。参数与 v1 相同，并**新增** `workspace`（工作区**名**，不是路径；`type: "code"` 时必填，插件会在本地先检查）、`node`（限定在哪台机器执行）、`ref`（git 分支或 commit）。`created_by` 由 hub 填写。 |
+| `task_dispatch` | `POST /v1/ctl/dispatch` | **新增** `require_online`：目标不在线时 409 拒绝而不是入队；默认入队，hub 返回的 `warnings`（`agent-offline` / `no-online-worker`）原样带回给 DSH。参数与 v1 相同，并**新增** `workspace`（工作区**名**，不是路径；`type: "code"` 时必填，插件会在本地先检查）、`node`（限定在哪台机器执行）、`ref`（git 分支或 commit）、`capability`（走 worker 的哪条能力线）。`created_by` 由 hub 填写。 |
 | `task_list` | `GET /v1/ctl/tasks?status=&agent=&workspace=&limit=` | **新增** `workspace` 筛选 |
 | `task_get` | `GET /v1/ctl/task` (+ `GET /v1/ctl/output`) | 传入 `output_name` 时，同时读取产出文件的前 60000 个字符 |
 | `task_cancel` / `task_retry` | `POST /v1/ctl/cancel` / `retry` | 只有创建这个任务的控制方才能操作（由 hub 检查，否则返回 403 `not-creator`） |
@@ -241,6 +241,9 @@ DSH_HUB_TOKEN='dshc_dsh-cloud_xxxxxxxxxxxxxxxx'   # 行尾注释
 | `agent_reject` | `POST /v1/ctl/reject` | |
 | `agent_revoke` | `POST /v1/ctl/revoke` | |
 | `agent_provision` | `POST /v1/ctl/provision` | 直接签发 worker。额外支持 `node` 和 `workspaces` 参数（契约里没有写明这部分，见第 7 节）。返回的 `endpoint` 是 `<hubUrl>/v1`，worker 直接连接 hub |
+| `fallback_list` | `GET /v1/ctl/fallback` | 没有合适的 worker 按时领走、等 DSH 自己做的任务。传本机的工作区名可以跳过做不了的代码任务 |
+| `fallback_take` | `POST /v1/ctl/fallback/take` | 接手一个（指定 `task_id`，或最急的一个），文本输入直接带回（共 60000 字符以内）。DSH 用自己的工具做完后调 `fallback_submit`。只试一次 |
+| `fallback_submit` | `POST /v1/ctl/fallback/result` | 交兜底任务的结果：`completed` 或 `failed`、摘要、可选文本文件 |
 
 出错时工具抛出 `HubError`，消息格式为 `[code] 说明`，例如 `[hub-token-missing] DSH_HUB_TOKEN is not set (neither in the environment nor in /root/.dsh/agent-hub/controller.env): …`。hub 返回的错误（`404 task-not-found`、`403 not-creator`、`400 bad-task` 等）会保留原来的状态码和 code。
 
@@ -297,9 +300,9 @@ node --test packages/host-agent-hub/tests/*.test.mjs
 | `hub-client.test.mjs` | URL 和路径前缀、`?id=` 必须是第一个 query 参数、`X-DSH-Token` 头、令牌不进 URL、POST 的 body 和 content-type、`health` 不带令牌、`timeout` / `ca` 选项、`caFile` 缓存与读取失败后重试、hub 返回结构的兼容、错误映射（hub 4xx/5xx、ECONNREFUSED、TLS、socket 超时、整体超时、`request()` 直接抛异常）、缺令牌 / 令牌不匹配 / 未配置时不发请求、令牌不进日志和错误信息；令牌优先级（环境变量 > envFile）、`DSH_HOME` 与 `~/.dsh` 的默认值（`agent-hub/controller.env`）、`<DSH home>/.env` 保护（`DSH_*` 不读、Windows 路径大小写与反斜杠、非 `DSH_` 变量名只给弱 warning）、`tokenEnv` 改名、轮换令牌无需重启、.env 权限 warning 只出现一次且不含令牌值 |
 | `proxy.test.mjs` | `parseProxyUrl`（只收 http://、默认端口 80、凭据转 Basic、显示脱敏）、`buildConnectRequest`（`CONNECT host:port HTTP/1.1`、Host、Proxy-Authorization 只在有凭据时）、`buildTlsOptions`（IP 不发 SNI）、`shouldBypass`（`*`、主机名、后缀、端口）、`proxySetting` / `resolveProxy`（off、URL、env 的顺序与 NO_PROXY、http 回环永远直连）；用假的 `node:http` / `node:tls` 跑 `openTunnel`：成功、代理连不上、CONNECT 403 / 502、407（以 response 形式）、TLS 证书失败、两段超时，消息里都没有代理凭据；hub 客户端经隧道发请求（`createConnection`、令牌不出现在 CONNECT 里、日志脱敏）、隧道失败映射为 503 `hub-unreachable`、env 模式每次重读 |
 | `env-file.test.mjs` | `.env` 解析（注释、export、单双引号、行尾注释、CRLF、BOM、格式错误的行、同名键以最后一次为准、`__proto__`），文件不存在静默跳过，640/604/644/666 给出 warning、600/700 不给，Windows 不检查，目录或不可读文件给出 warning 且不泄露内容 |
-| `tools.test.mjs` | 11 个工具名、schema（不接受未知参数）、新增参数、并发安全标记、每个工具对应的 hub 调用、`code` 类型必须带 workspace、错误格式为 `[code]`、令牌不进工具输出 |
+| `tools.test.mjs` | 14 个工具名、schema（不接受未知参数）、新增参数、并发安全标记、每个工具对应的 hub 调用、`code` 类型必须带 workspace、错误格式为 `[code]`、令牌不进工具输出、兜底工具（输入转文本、文件转 base64） |
 | `bridge.test.mjs` | 只剩 5 个 admin 路由、各接口的白名单整形与令牌遮蔽、query 校验、405、503 `hub-unreachable`、本地配置错误时返回 503、401/403 映射为 502 `hub-unauthorized`、500 不返回细节、`requireLogin` |
-| `index.test.mjs` | 注册 11 个工具和 5 个路由、没有 `/v1` 路由、warning（缺配置、缺令牌、不安全的 http、v1 配置项、非法超时）、hub 不可用（`127.0.0.1:1`）时返回 503、从真实 .env 文件读取令牌、`envFile` 指向真实的 `<DSH home>/.env` 时不读取并给出迁移 warning、dispose 后全部注销 |
+| `index.test.mjs` | 注册 14 个工具和 5 个路由、没有 `/v1` 路由、warning（缺配置、缺令牌、不安全的 http、v1 配置项、非法超时）、hub 不可用（`127.0.0.1:1`）时返回 503、从真实 .env 文件读取令牌、`envFile` 指向真实的 `<DSH home>/.env` 时不读取并给出迁移 warning、dispose 后全部注销 |
 
 测试不会访问真实 hub，也不会读取真实的 `~/.dsh/agent-hub/controller.env` 或 `~/.dsh/.env`：`hub-client` 注入假的 `request` 和假的 `fs`；`index.test.mjs` 的 `envFile` 指向一个不存在的路径，或者指向测试中创建的临时文件。
 
@@ -337,3 +340,15 @@ worker 目录固定是 `<DSH home>/worker/`（DSH home = `$DSH_HOME` 或 `~/.dsh
 
    然后 `python agent_client.py check`：确认经代理能到 hub，并记下 `seen as:` 后面的出口 IP（它要在服务器 `hub.json` 的 `allow` 里；Clash 里 hub 地址要固定走一个代理节点，见协议第 8 节）。旧的 `workspaces.json` 仍然能用（`profile.json` 不存在时读它，并提示迁移）。
 3. **注册并上线**：`python agent_client.py register` → 在 DSH 对话里 `agent_requests` 看到申请、`agent_approve`（可以收窄 workspaces / capabilities / max_concurrency）→ register 自动领到令牌并写入 `agent.token` → `python agent_client.py run` 常驻（心跳 + 长轮询）。之后 `status` 查看 hub 眼里的自己，`leave` 主动下线（持有的任务立即重排）。只能定时运行的 agent（AWS Quick）用 `bridge --once`，并在 `worker/.env` 里填 `DSH_PULL_EVERY_SECONDS`（和定时周期一致）。被判离线后它带着结果回来，hub 会把任务还给它、照收结果，不会再叫它停。
+
+   **一台机器干多种活**：在 `profile.json` 里写这台机器的能力和并发，例如本地 DSH 同时跑浏览器、测试和写代码（样例 `scripts/profile.local-dsh.example.json`）：
+
+   ```json
+   { "node": "mydesk", "agentId": "dsh-mydesk", "platform": "dsh",
+     "workspaces": { "deepseek-harness": "E:/PythonProject/dsh-warroom" },
+     "capabilities": { "browser": 1, "test": 2, "code": 2 }, "maxConcurrency": 4 }
+   ```
+
+   `browser: 1` 表示浏览器任务一次只跑一个。每台机器各写各的 `profile.json`，工作区路径也写在这里，不入库。
+
+   **AWS Quick 这类只能当 MCP 客户端的 agent**：不用跑 `agent_client.py`。先用 `agent_provision`（或注册后 `agent_approve`）拿到 `dsha_` 令牌，然后在 Quick 里加一个 MCP 服务器：地址 `https://<hub-host>:7891/mcp`，认证选 OAuth client credentials，令牌地址 `https://<hub-host>:7891/oauth/token`，`client_id` 填 agent id，`client_secret` 填令牌。Quick 按计划定时调 `next_task`，做完调 `submit_result`。细节见 `services/dsh-hub/README.md` 第 5.4 节。
