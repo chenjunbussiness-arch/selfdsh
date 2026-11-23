@@ -54,7 +54,7 @@ import { randomUUID } from 'node:crypto';
 import { TIERS, TierStore, classifyTier, defaultTiers, isTier, managerRouteOf, normaliseManager, normaliseSettings } from "./tier.js";
 import { MemoryStore, entryOf, memoryBrief, renderTranscript, sessionRoster, workLine } from "./memory.js";
 import { DEFAULT_POLICY, OutletStore, classifyCommand, gitFacts, hostAllowed, pushableBranch, run, runShell } from "./outlets.js";
-import { createScmClient, envToken } from "./scm.js";
+import { createScmClient, defaultTokenEnv, envToken } from "./scm.js";
 import { liveSegments } from "./live.js";
 /** Stable plugin name. */
 export const name = 'host-router';
@@ -2428,7 +2428,24 @@ export async function apply(ctx, config) {
             throw new Error(`partition "${partition.name}" has no code host configured (git.scm)`);
         let client = scmClients.get(partition.name);
         if (client === undefined) {
-            client = createScmClient(scm, () => envToken(scm), ...scmFetch === undefined ? [] : [scmFetch]);
+            // Process environment first (as before), then DSH's credential store, so a
+            // token saved from the secrets page works without restarting DSH.
+            const tokenOf = async () => {
+                const fromEnv = envToken(scm);
+                if (fromEnv !== undefined)
+                    return fromEnv;
+                const service = ctx.get('credentials');
+                if (typeof service?.resolve !== 'function')
+                    return undefined;
+                try {
+                    const found = await service.resolve(scm.tokenEnv ?? defaultTokenEnv(scm.provider));
+                    return typeof found?.value === 'string' && found.value.trim() !== '' ? found.value.trim() : undefined;
+                }
+                catch {
+                    return undefined;
+                }
+            };
+            client = createScmClient(scm, tokenOf, ...scmFetch === undefined ? [] : [scmFetch]);
             scmClients.set(partition.name, client);
         }
         return client;

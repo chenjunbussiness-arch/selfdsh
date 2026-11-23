@@ -116,11 +116,14 @@ function forbiddenForms() {
   ])
 }
 
-test('mounts exactly the two read-only routes and logs where', async (t) => {
+test('mounts the read-only routes plus the management routes and logs where', async (t) => {
   const plugin = mountWeb(await tempHome(t))
-  assert.deepEqual([...plugin.routes.keys()].sort(), [LIST_PATH, SUMMARY_PATH].sort())
+  const paths = [...plugin.routes.keys()]
+  assert.ok(paths.includes(LIST_PATH) && paths.includes(SUMMARY_PATH))
+  assert.ok(paths.every(path => path.startsWith('/api/secrets/')))
+  assert.equal(paths.length, 12)
   for (const route of plugin.routes.values()) assert.equal(route.kind, 'exact')
-  assert.ok(plugin.logs.some(line => line.includes('read-only dashboard bridge mounted at /api/secrets')))
+  assert.ok(plugin.logs.some(line => line.includes('dashboard bridge mounted at /api/secrets')))
   // The tools are still all there: the bridge is additive.
   assert.equal(plugin.tools.size, 10)
 })

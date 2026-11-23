@@ -73,7 +73,7 @@ import { TIERS, TierStore, classifyTier, defaultTiers, isTier, managerRouteOf, n
 import { MemoryStore, entryOf, memoryBrief, renderTranscript, sessionRoster, workLine } from './memory.ts'
 import { DEFAULT_POLICY, OutletStore, classifyCommand, gitFacts, hostAllowed, pushableBranch, run, runShell } from './outlets.ts'
 import type { Approval, OutletKind, OutletMode } from './outlets.ts'
-import { createScmClient, envToken } from './scm.ts'
+import { createScmClient, defaultTokenEnv, envToken } from './scm.ts'
 import type { ScmClient } from './scm.ts'
 import { liveSegments } from './live.ts'
 import type { ModelOption, Tier, TierDecision, TierRoute } from './tier.ts'
@@ -2513,7 +2513,21 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
     if (scm === undefined) throw new Error(`partition "${partition.name}" has no code host configured (git.scm)`)
     let client = scmClients.get(partition.name)
     if (client === undefined) {
-      client = createScmClient(scm, () => envToken(scm), ...scmFetch === undefined ? [] : [scmFetch])
+      // Process environment first (as before), then DSH's credential store, so a
+      // token saved from the secrets page works without restarting DSH.
+      const tokenOf = async (): Promise<string | undefined> => {
+        const fromEnv = envToken(scm)
+        if (fromEnv !== undefined) return fromEnv
+        const service = ctx.get('credentials') as CredentialsServiceLike | undefined
+        if (typeof service?.resolve !== 'function') return undefined
+        try {
+          const found = await service.resolve(scm.tokenEnv ?? defaultTokenEnv(scm.provider))
+          return typeof found?.value === 'string' && found.value.trim() !== '' ? found.value.trim() : undefined
+        } catch {
+          return undefined
+        }
+      }
+      client = createScmClient(scm, tokenOf, ...scmFetch === undefined ? [] : [scmFetch])
       scmClients.set(partition.name, client)
     }
     return client
