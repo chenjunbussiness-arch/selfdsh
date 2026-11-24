@@ -78,6 +78,11 @@ export const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'dead'])
 /** The built-in executor: DSH itself, taking tasks nobody suitable picked up (fallback). */
 export const FALLBACK_AGENT = 'dsh-self'
 /**
+ * `decided_by` of an enrollment approved by `hub.json` "autoApprove": no
+ * controller token and no human were involved (see requestEnrollment).
+ */
+export const AUTO_APPROVED_BY = 'auto-approve'
+/**
  * Wait before DSH takes a task over while a worker that could do it is online but
  * busy: 10 min; a named scheduled puller gets two of its periods. With no such
  * worker online DSH may take it at once.
@@ -325,7 +330,7 @@ export class AgentHub {
   /**
    * @param {{ dataDir: string, offlineAfterMs?: number, maxRetries?: number, maxPendingRequests?: number,
    *           requestTtlMs?: number, maxWaitSeconds?: number, maxWaitersPerAgent?: number,
-   *           logger?: any, clock?: () => number }} options
+   *           autoApprove?: boolean, logger?: any, clock?: () => number }} options
    */
   constructor(options) {
     this.dataDir = options.dataDir
@@ -338,6 +343,8 @@ export class AgentHub {
     this.requestTtlMs = options.requestTtlMs ?? 24 * 3600 * 1000
     this.maxWaitSeconds = Math.min(options.maxWaitSeconds ?? MAX_WAIT_SECONDS, MAX_WAIT_SECONDS)
     this.maxWaitersPerAgent = options.maxWaitersPerAgent ?? 8
+    // Off unless hub.json says so (config.js refuses autoApprove without an allow list).
+    this.autoApprove = options.autoApprove === true
     const fb = options.fallback ?? {}
     this.fallback = {
       enabled: fb.enabled !== false,
@@ -583,6 +590,13 @@ export class AgentHub {
    * Unauthenticated: a worker asks to join. Nothing is granted: the request
    * only shows up for controllers until one approves or rejects it.
    * Returns a poll secret (kept only as a hash) for checking the outcome.
+   *
+   * With `autoApprove` (hub.json) the request is granted on the spot, exactly
+   * as a controller approving it WITHOUT overrides would be: the stored grant
+   * is the validated request itself (platform, capabilities, workspaces,
+   * concurrency, role), so nothing is added or widened. The HTTP allow list ran
+   * before this route (http.js createHandler: clientAddress -> ipAllowed), so
+   * only allow-listed peers can reach it.
    */
   requestEnrollment(input) {
     const v = this.validateAgent(input)
@@ -593,13 +607,20 @@ export class AgentHub {
       if (pending.some(r => r.agent.id === v.id)) throw new HubError(409, 'request-pending', `a request for ${v.id} is already pending`)
       if (pending.length >= this.maxPendingRequests) throw new HubError(429, 'too-many-requests', 'too many pending enrollment requests')
       const requestId = `req_${randomBytes(9).toString('base64url')}`
+      const from = String(input.from ?? '').slice(0, 100)
       state.requests[requestId] = {
         request_id: requestId, agent: v, status: 'pending', secretHash: sha256(pollSecret).toString('hex'),
-        requested_at: nowIso(this.clock()), from: String(input.from ?? '').slice(0, 100),
-        decided_at: undefined, decided_by: undefined, reason: undefined, tokenIssued: false,
+        requested_at: nowIso(this.clock()), from,
+        decided_at: undefined, decided_by: undefined, reason: undefined, tokenIssued: false, auto_approved: false,
       }
-      this.log(`dsh-hub: enrollment request ${requestId} for ${v.id} (${v.platform}, node ${v.node ?? '-'}) awaiting approval`)
-      return { request_id: requestId, poll_secret: pollSecret, status: 'pending' }
+      this.log(`dsh-hub: enrollment request ${requestId} for ${v.id} (${v.platform}, node ${v.node ?? '-'}) from ${from || '-'} awaiting approval`)
+      if (this.autoApprove !== true) return { request_id: requestId, poll_secret: pollSecret, status: 'pending' }
+      const request = state.requests[requestId]
+      this.grantRequest(state, request, v, AUTO_APPROVED_BY)
+      request.auto_approved = true
+      const granted = v.capabilities.map(c => (v.capabilityLimits?.[c] === undefined ? c : `${c}:${v.capabilityLimits[c]}`)).join(',')
+      this.log(`dsh-hub: AUTO-APPROVE ${requestId} agent=${v.id} at=${request.decided_at} from=${from || '-'} platform=${v.platform} node=${v.node ?? '-'} role=${v.role} capabilities=[${granted}] workspaces=[${(v.workspaces ?? []).join(',')}] max_concurrency=${v.maxConcurrency} decided_by=${AUTO_APPROVED_BY} (hub.json autoApprove: no controller token, no human)`)
+      return { request_id: requestId, poll_secret: pollSecret, status: 'approved', auto_approved: true }
     })
   }
 
@@ -633,8 +654,24 @@ export class AgentHub {
       .map(r => ({
         request_id: r.request_id, status: r.status, agent_id: r.agent.id, platform: r.agent.platform, mode: r.agent.mode,
         node: r.agent.node, workspaces: r.agent.workspaces ?? [], capabilities: r.agent.capabilities, capability_limits: r.agent.capabilityLimits ?? {}, max_concurrency: r.agent.maxConcurrency,
-        description: r.agent.description, runtime: r.agent.runtime, role: agentRole(r.agent), pull_every_seconds: r.agent.pullEverySeconds, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
+        description: r.agent.description, runtime: r.agent.runtime, role: agentRole(r.agent), pull_every_seconds: r.agent.pullEverySeconds, auto_approved: r.auto_approved === true, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
       })))
+  }
+
+  /**
+   * Store the grant of one decided request: `v` is the already validated and
+   * never-widened worker record. No usable token yet — the requester collects
+   * it through /v1/enroll/status. Shared by a controller approval and by
+   * autoApprove so both grant exactly the same shape.
+   */
+  grantRequest(state, request, v, decidedBy) {
+    // The enrollment itself reported the requested names; what is granted of them counts as reported.
+    this.writeAgent(state, v, '', request.agent.workspaces ?? [])
+    request.status = 'approved'
+    request.decided_at = nowIso(this.clock())
+    request.decided_by = decidedBy
+    request.agent = v
+    return request
   }
 
   /** A controller approves; it may only NARROW capabilities, workspaces and concurrency. */
@@ -665,12 +702,7 @@ export class AgentHub {
       if (v.workspaces.some(w => !(asked.workspaces ?? []).includes(w))) throw new HubError(400, 'grant-widened', 'workspaces can only be narrowed at approval')
       if (v.maxConcurrency > asked.maxConcurrency) throw new HubError(400, 'grant-widened', 'max_concurrency can only be lowered at approval')
       if (own(state.agents, v.id) !== undefined && !own(state.agents, v.id).revoked) throw new HubError(409, 'agent-exists', `agent already registered: ${v.id}`)
-      // The enrollment itself reported the requested names; what is granted of them counts as reported.
-      this.writeAgent(state, v, '', asked.workspaces ?? []) // no usable token until the requester collects it
-      request.status = 'approved'
-      request.decided_at = nowIso(this.clock())
-      request.decided_by = controllerId
-      request.agent = v
+      this.grantRequest(state, request, v, controllerId)
       this.log(`dsh-hub: ${controllerId} approved ${requestId} -> worker ${v.id}`)
       return { request_id: requestId, status: 'approved', agent: this.publicAgent(own(state.agents, v.id), state) }
     })

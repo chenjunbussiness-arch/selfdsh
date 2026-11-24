@@ -12,6 +12,7 @@
     "10.8.0.0/24"
   ],
   "trustProxy": false,
+  "autoApprove": false,
   "maxRetries": 2,
   "offlineAfterMs": 90000,
   "sweepIntervalMs": 15000,

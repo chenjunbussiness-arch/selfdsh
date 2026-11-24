@@ -1419,6 +1419,63 @@ class TestRun(TempCase):
         self.assertIn("retrying in 5 s", self.logs.joined())
         self.assertEqual(runner.backoff, 5, "reset after a good cycle")
 
+    def test_403_ip_not_allowed_backs_off_and_recovers_while_403_forbidden_is_fatal(self):
+        clock = FakeClock()
+
+        class IpDrift(FakeHub):
+            fails = 3
+
+            def heartbeat(self, *a, **kw):
+                if self.fails > 0:
+                    self.fails -= 1
+                    raise ac.HubError(403, "ip-not-allowed", "client address is not allowed")
+                return FakeHub.heartbeat(self, *a, **kw)
+        hub = IpDrift()
+        runner = ac.Runner(self.bridge(hub), 30, 25, log=self.logs, sleep=clock.sleep, clock=clock)
+        runner.start()
+        self.assertEqual(clock.sleeps, [5, 10, 20])
+        self.assertEqual(runner.heartbeats, 1)
+
+        class Forbidden(FakeHub):
+            def heartbeat(self, *a, **kw):
+                raise ac.HubError(403, "forbidden", "wrong role")
+        with self.assertRaises(ac.HubError):
+            ac.Runner(self.bridge(Forbidden()), 30, 25, log=self.logs, sleep=clock.sleep, clock=clock).start()
+
+    def test_busy_deduplicates_inbox_and_working(self):
+        hub = FakeHub()
+        br = self.bridge(hub, max_tasks=2)
+        os.makedirs(os.path.join(self.ex, "inbox", "t1"))
+        os.makedirs(os.path.join(self.ex, "working", "t1"))
+        self.assertEqual(br._busy(), 1)
+
+    def test_claim_task_atomic_rename_and_concurrent_race(self):
+        import concurrent.futures
+        ac.ensure_exchange(self.ex)
+        tid = "task_atomic_01"
+        tdir = os.path.join(self.ex, "inbox", tid)
+        os.makedirs(tdir)
+        with open(os.path.join(tdir, "task.json"), "w", encoding="utf-8") as f:
+            json.dump({"task_id": tid, "effort_resolved": {"mode": "fast", "thinking": "off"}}, f)
+
+        def racer(idx):
+            return ac.claim_task(self.ex, tid, by=f"routine-{idx}", nonce=f"n-{idx}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+            results = list(pool.map(racer, range(16)))
+        winners = [r for r in results if r["claimed"]]
+        losers = [r for r in results if not r["claimed"]]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(losers), 15)
+        self.assertFalse(os.path.exists(tdir))
+        self.assertTrue(os.path.isfile(os.path.join(self.ex, "working", tid, "claim.json")))
+        # Cannot re-claim once in working/ or outbox/
+        again = ac.claim_task(self.ex, tid, by="late")
+        self.assertFalse(again["claimed"])
+        os.makedirs(os.path.join(self.ex, "outbox", "task_done"))
+        os.makedirs(os.path.join(self.ex, "inbox", "task_done"))
+        self.assertFalse(ac.claim_task(self.ex, "task_done", by="late")["claimed"])
+
 
 # --- check -----------------------------------------------------------------------------------------
 

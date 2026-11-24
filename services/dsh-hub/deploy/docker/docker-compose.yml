@@ -1,4 +1,4 @@
-# Local end-to-end test of dsh-hub on MYDESK (Docker Desktop).
+# Local end-to-end test of dsh-hub on a local workstation (Docker Desktop).
 #
 #   hub     dsh-hub with a self-signed TLS cert, published ONLY on 127.0.0.1:7891.
 #           The local DSH (dsh-local) connects to https://127.0.0.1:7891 with caFile = ./out/hub-ca.pem.
@@ -57,7 +57,7 @@ services:
     entrypoint: ["/bin/sh", "/opt/demo/worker-entrypoint.sh"]
     restart: unless-stopped
 
-  # Long-running worker for THIS machine (quick-mydesk): docker keeps it alive instead of a
+  # Long-running worker for a host workstation: docker keeps it alive instead of a
   # manual "register / run" in PowerShell. Same client, same variables as the demo worker
   # (agent_client.py is stdlib-only, so the plain python image is enough).
   #   docker compose --profile quick-worker up -d worker-quick
@@ -73,8 +73,8 @@ services:
       DSH_HUB_URL: https://hub:7891
       DSH_HUB_PROXY: "off"
       DSH_HUB_CAFILE: /hubca/hub-ca.pem
-      DSH_AGENT_ID: quick-mydesk
-      DSH_NODE: mydesk
+      DSH_AGENT_ID: ${WORKER_AGENT_ID:-quick-local}
+      DSH_NODE: ${WORKER_NODE:-local}
       DSH_PLATFORM: aws-quick
       DSH_CAPABILITIES: "document,research,data,code"
       DSH_MAX_CONCURRENCY: "10"          # tasks held at once (the hub keeps the value approved at enrollment)
@@ -82,8 +82,8 @@ services:
       DSH_EXCHANGE: /exchange
       DSH_HEARTBEAT_SECONDS: "30"
       # The workspace list comes from the HOST profile (out/quick-worker/profile.json + its dshProfile's
-      # router-b partitions), written with Windows paths; this map lets the container check they exist.
-      DSH_PATH_MAP: E:/PythonProject=/host/e/PythonProject;${USERPROFILE}/.dsh/profiles/desktop=/host/dsh-profile
+      # router-b partitions), written with host paths; this map lets the container check they exist.
+      DSH_PATH_MAP: ${HOST_WORKSPACES_ROOT:-./workspaces}=/host/workspace;${USERPROFILE:-~}/.dsh/profiles/desktop=/host/dsh-profile
       PYTHONUNBUFFERED: "1"
     volumes:
       - ../../../../plugins/dsh-agent-hub/scripts:/opt/agent:ro
@@ -91,11 +91,11 @@ services:
       - ./out/quick-worker:/wd          # token + worker-dir visible on the host
       - ./out/quick-exchange:/exchange
       - type: bind                      # workspaces live here (read-only: this container only relays)
-        source: E:/PythonProject
-        target: /host/e/PythonProject
+        source: ${HOST_WORKSPACES_ROOT:-./workspaces}
+        target: /host/workspace
         read_only: true
       - type: bind                      # the local DSH profile: its router-b partitions = workspaces
-        source: ${USERPROFILE}/.dsh/profiles/desktop
+        source: ${USERPROFILE:-~}/.dsh/profiles/desktop
         target: /host/dsh-profile
         read_only: true
         bind:
@@ -128,7 +128,83 @@ services:
         done
     restart: unless-stopped
 
+  # Same AWS Quick relay, registered on a remote/cloud hub instead of the local one.
+  # Own worker dir (own token); SAME exchange folder, so never run it together with worker-quick:
+  #   docker compose --profile quick-worker stop worker-quick
+  #   docker compose --profile quick-worker-cloud up -d worker-quick-cloud
+  worker-quick-cloud:
+    profiles: ["quick-worker-cloud"]
+    image: python:3.12-alpine
+    environment:
+      DSH_HOME: /worker-home
+      DSH_HUB_URL: ${CLOUD_HUB_URL:-https://hub.example.com:7891}
+      # Route cloud hub traffic through the host HTTP proxy when the hub allow-list
+      # requires a specific egress IP (configure overrides in docker-compose.override.yml).
+      DSH_HUB_PROXY: ${CLOUD_HUB_PROXY:-env}
+      HTTPS_PROXY: ${CLOUD_HTTPS_PROXY:-http://host.docker.internal:7890}
+      HTTP_PROXY: ${CLOUD_HTTP_PROXY:-http://host.docker.internal:7890}
+      NO_PROXY: "localhost,127.0.0.1,::1"
+      DSH_HUB_CAFILE: /cloudca/hub-ca.pem
+      DSH_AGENT_ID: ${WORKER_AGENT_ID:-quick-local}
+      DSH_NODE: ${WORKER_NODE:-local}
+      DSH_PLATFORM: aws-quick
+      DSH_CAPABILITIES: "code"
+      DSH_MAX_CONCURRENCY: "10"          # tasks held at once (the hub keeps the value approved at enrollment)
+      DSH_AGENT_TOKEN_FILE: /wd/agent.token   # on the host: out/quick-worker-cloud/agent.token
+      DSH_EXCHANGE: /exchange
+      DSH_HEARTBEAT_SECONDS: "30"
+      # The workspace list comes from the HOST profile (out/quick-worker-cloud/profile.json + its dshProfile's
+      # router-b partitions), written with host paths; this map lets the container check they exist.
+      DSH_PATH_MAP: ${HOST_WORKSPACES_ROOT:-./workspaces}=/host/workspace;${USERPROFILE:-~}/.dsh/profiles/desktop=/host/dsh-profile
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../../../../plugins/dsh-agent-hub/scripts:/opt/agent:ro
+      - type: bind
+        source: ${CLOUD_HUB_CAFILE:-./out/hub-ca.pem}
+        target: /cloudca/hub-ca.pem
+        read_only: true
+      - ./out/quick-worker-cloud:/wd    # its own token, visible on the host
+      - ./out/quick-exchange:/exchange
+      - type: bind                      # workspaces live here (read-only: this container only relays)
+        source: ${HOST_WORKSPACES_ROOT:-./workspaces}
+        target: /host/workspace
+        read_only: true
+      - type: bind                      # the local DSH profile: its router-b partitions = workspaces
+        source: ${USERPROFILE:-~}/.dsh/profiles/desktop
+        target: /host/dsh-profile
+        read_only: true
+        bind:
+          create_host_path: true
+      - workerdata-quick-cloud:/worker-home
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -u
+        mkdir -p "$$DSH_HOME/worker" "$$DSH_EXCHANGE" /wd
+        CLIENT=/opt/agent/agent_client.py
+        PROFILE=/wd/profile.json          # host file: out/quick-worker-cloud/profile.json
+        echo "== workspaces (host profile through DSH_PATH_MAP) =="
+        python "$$CLIENT" workspaces --profile-file "$$PROFILE" || echo "workspaces: see the message above"
+        echo "== check =="
+        python "$$CLIENT" check || echo "check failed (continuing)"
+        # register before every run: a token the hub accepts -> "already registered" (no new request);
+        # a revoked / rejected token (401) is moved aside and ONE new request waits for agent_approve.
+        # (Checking only that the token file exists would loop on 401 forever after a revoke.)
+        while true; do
+          echo "== register $$(date -u +%FT%TZ) =="
+          if python "$$CLIENT" register --profile-file "$$PROFILE"; then
+            echo "== run $$(date -u +%FT%TZ) =="
+            python "$$CLIENT" run --profile-file "$$PROFILE" || echo "run exited with $$?; restarting in 10s"
+          else
+            echo "register failed (hub down?); retrying in 10s"
+          fi
+          sleep 10
+        done
+    restart: unless-stopped
+
 volumes:
   hubdata: {}
   workerdata: {}
   workerdata-quick: {}
+  workerdata-quick-cloud: {}

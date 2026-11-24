@@ -9,6 +9,12 @@
  * cache read, cache write); `request/context` / `request/header` events carry
  * the model the next calls went to. Nothing is ever written, renamed or deleted.
  *
+ * The log is a *concatenated-frame* Zstandard container (one frame per header /
+ * durable batch), so it is read through `./zstd-frames.js`, which locates every
+ * frame and decompresses them one at a time. One-shot `zstdDecompressSync(whole)`
+ * would return only the first frame — the one-line session header — and thus no
+ * usage at all.
+ *
  * WHY NOT THE PROJECTION CACHE
  * ----------------------------
  * `~/.dsh/storages/session_projcache/sessions/*.json` already has per-session
@@ -36,7 +42,8 @@
 
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { zstdDecompressSync } from 'node:zlib'
+
+import { readZstdFrames } from './zstd-frames.js'
 
 /** Asia/Shanghai is a fixed UTC+8 offset. */
 export const TZ_OFFSET_MS = 8 * 60 * 60 * 1000
@@ -103,6 +110,11 @@ function emptyFileAggregate() {
 /**
  * Aggregate one decompressed session log.
  *
+ * The log is a concatenated-frame Zstandard container: `readZstdFrames` walks the
+ * frame structure and decompresses every frame, so all appended batches are seen.
+ * Dashed counters on the returned aggregate (`frames`, `failedFrames`, `tornBytes`)
+ * are diagnostics only; they never influence the usage totals.
+ *
  * Only three event types can change the answer, so every other (mostly huge
  * tool-result) line is skipped with a substring test before `JSON.parse`.
  *
@@ -110,10 +122,13 @@ function emptyFileAggregate() {
  * @returns {ReturnType<typeof emptyFileAggregate>} per-day buckets and model split.
  */
 export function parseSessionBytes(buffer) {
-  const text = zstdDecompressSync(buffer).toString('utf8')
+  const decoded = readZstdFrames(buffer)
   const aggregate = emptyFileAggregate()
+  aggregate.frames = decoded.frames
+  aggregate.failedFrames = decoded.failedFrames
+  aggregate.tornBytes = decoded.tornBytes
   let model = 'unknown'
-  for (const line of text.split('\n')) {
+  for (const line of decoded.text.split('\n')) {
     if (line === '') continue
     if (!line.includes('"assistant/message"') && !line.includes('"request/context"') && !line.includes('"request/header"')) continue
     let event
@@ -272,6 +287,8 @@ export class UsageStore {
     let reparsed = 0
     let reused = 0
     let failed = 0
+    let frameFailures = 0
+    let tornFiles = 0
     let parseMs = 0
     const seen = new Set()
     for (const file of files) {
@@ -284,12 +301,14 @@ export class UsageStore {
       const parseStarted = now()
       try {
         const aggregate = parseSessionBytes(await readFile(file.path))
+        frameFailures += aggregate.failedFrames ?? 0
+        if ((aggregate.tornBytes ?? 0) > 0) tornFiles += 1
         this.#cache.set(file.path, { mtimeMs: file.mtimeMs, size: file.size, aggregate, failed: false })
         reparsed += 1
       } catch (error) {
         failed += 1
         if (cached !== undefined && cached.failed !== true) {
-          // Caught mid-append (incomplete zstd frame): keep the last good aggregate and retry next refresh.
+          // Nothing decodable this time (caught mid-append): keep the last good aggregate and retry next refresh.
           this.#cache.set(file.path, { ...cached, mtimeMs: file.mtimeMs, size: file.size })
           this.#logger?.warn(`token-stats: keeping previous aggregate for ${file.path} (${error instanceof Error ? error.message : String(error)})`)
         } else {
@@ -301,6 +320,9 @@ export class UsageStore {
     for (const path of this.#cache.keys()) {
       if (!seen.has(path)) this.#cache.delete(path)
     }
+    if (frameFailures > 0) {
+      this.#logger?.warn(`token-stats: skipped ${frameFailures} unreadable zstd frame(s) in this refresh`)
+    }
     this.#merge()
     const totalMs = now() - started
     this.#stats.scans += 1
@@ -311,6 +333,8 @@ export class UsageStore {
       reparsed,
       reused,
       failed,
+      frameFailures,
+      tornFiles,
       statMs: ms(statMs),
       parseMs: ms(parseMs),
       totalMs: ms(totalMs),

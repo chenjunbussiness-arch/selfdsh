@@ -8,14 +8,19 @@
   "exports": {
     ".": "./index.js",
     "./scanner": "./scanner.js",
+    "./zstd-frames": "./zstd-frames.js",
     "./bridge": "./bridge.js",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
     "scanner.js",
+    "zstd-frames.js",
     "bridge.js"
   ],
+  "scripts": {
+    "test": "node --test test/zstd-frames.test.mjs"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=22"

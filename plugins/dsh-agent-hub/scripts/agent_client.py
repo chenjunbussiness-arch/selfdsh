@@ -1201,6 +1201,62 @@ def write_atomic(path, text):
     os.replace(tmp, path)
 
 
+def write_exclusive(path, text):
+    """Create `path` with O_CREAT | O_EXCL; raises FileExistsError if it already exists."""
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+
+
+def claim_task(exchange_root, task_id, by="worker", nonce=None, effort=None, now=None):
+    """Atomically claim `inbox/<task_id>` -> `working/<task_id>` and create `claim.json` with O_EXCL.
+
+    Kernel-level mutual exclusion: `os.rename` of `inbox/<task_id>` to `working/<task_id>`
+    succeeds for at most one concurrent caller; all losers get `claimed=False` without
+    touching `working/` or `outbox/`.
+    """
+    if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id) or task_id in (".", ".."):
+        raise ConfigError(f"invalid task_id: {task_id!r}")
+    root = os.path.abspath(exchange_root)
+    for box in ("working", "outbox", "failed", "archive"):
+        if os.path.exists(os.path.join(root, box, task_id)):
+            return {"claimed": False, "task_id": task_id, "reason": f"already in {box}"}
+    inbox_dir = os.path.join(root, "inbox", task_id)
+    working_dir = os.path.join(root, "working", task_id)
+    if not os.path.isdir(inbox_dir):
+        return {"claimed": False, "task_id": task_id, "reason": "not in inbox"}
+    try:
+        os.rename(inbox_dir, working_dir)
+    except OSError as e:
+        return {"claimed": False, "task_id": task_id, "reason": f"claim race lost ({type(e).__name__}: {e})"}
+    task_file = os.path.join(working_dir, "task.json")
+    try:
+        with open(task_file, encoding="utf-8-sig") as f:
+            task = json.load(f)
+    except (OSError, ValueError) as e:
+        return {"claimed": False, "task_id": task_id, "reason": f"bad task.json: {e}"}
+    eff = effort if effort is not None else task.get("effort_resolved")
+    claim_doc = {
+        "by": by,
+        "nonce": nonce,
+        "at": now or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "effort": eff,
+    }
+    claim_path = os.path.join(working_dir, "claim.json")
+    try:
+        write_exclusive(claim_path, json.dumps(claim_doc, ensure_ascii=False, indent=2) + "\n")
+    except FileExistsError:
+        return {"claimed": False, "task_id": task_id, "reason": "claim.json already exists"}
+    return {"claimed": True, "task_id": task_id, "working_dir": working_dir, "claim": claim_doc, "task": task}
+
+
 EXCHANGE_README = """\
 # dsh 交换目录（worker 本机）
 
@@ -1315,10 +1371,11 @@ class Bridge:
                 and not os.path.exists(os.path.join(d, ABORT_MARK)))
 
     def _busy(self):
-        """Tasks taking a slot: in inbox / working and not aborted (an aborted copy left in working/
-        must not stop this worker from ever pulling again)."""
-        return sum(1 for box in ("inbox", "working")
-                   for name in os.listdir(os.path.join(self.root, box)) if self._live(box, name))
+        """Tasks taking a slot: unique task ids in inbox / working and not aborted (an aborted
+        copy left in working/ must not stop this worker from ever pulling again)."""
+        ids = {name for box in ("inbox", "working")
+               for name in os.listdir(os.path.join(self.root, box)) if self._live(box, name)}
+        return len(ids)
 
     def _known(self, task_id):
         """Already held here. Only archive/ (done or aborted earlier) does not count: the hub leasing
@@ -1464,7 +1521,8 @@ class Bridge:
 class Runner:
     """`run`: stay online. First heartbeat with back-off (5 s doubling to 60 s), then a heartbeat
     every `heartbeat_seconds` and long polls in between (each poll is cut to the next heartbeat).
-    Network / 5xx errors back off the same way; 401 / 403 (token revoked) stop the loop."""
+    Network / 5xx / transient 403 ip-not-allowed errors back off the same way; 401 and other
+    403 errors (token revoked / role forbidden) stop the loop."""
 
     def __init__(self, bridge, heartbeat_seconds=DEFAULT_HEARTBEAT, wait=DEFAULT_WAIT, log=print,
                  sleep=time.sleep, clock=time.monotonic):
@@ -1475,7 +1533,14 @@ class Runner:
 
     @staticmethod
     def fatal(err):
-        return isinstance(err, HubError) and err.status in (401, 403)
+        if not isinstance(err, HubError):
+            return False
+        if err.status == 401:
+            return True
+        if err.status == 403:
+            # Proxy exit IP drift produces 403 ip-not-allowed; keep backing off until the allowlisted IP returns.
+            return err.code != "ip-not-allowed"
+        return False
 
     def _fail(self, err):
         self.log(f"hub not reachable ({err}); retrying in {self.backoff} s")
@@ -2002,6 +2067,11 @@ def build_parser():
     b.add_argument("--interval", type=int, default=60)
     b.add_argument("--max", type=int, default=1)
     b.add_argument("--wait", type=int, default=DEFAULT_WAIT, help=f"long-poll seconds (0..{MAX_WAIT}, default {DEFAULT_WAIT})")
+    cl = add("claim", "atomically claim inbox/<task_id> -> working/<task_id> with O_EXCL claim.json (no network)", net=False)
+    cl.add_argument("--exchange", help="overrides DSH_EXCHANGE")
+    cl.add_argument("--task-id", required=True, help="task_id inside inbox/ to claim")
+    cl.add_argument("--by", default="worker", help="claimant name recorded in claim.json")
+    cl.add_argument("--nonce", help="unique run nonce recorded in claim.json")
     return p
 
 
@@ -2029,6 +2099,10 @@ def main(argv=None, env=None):
             out["settings"] = settings_summary(st)
             print(json.dumps(out, ensure_ascii=False, indent=2))
             return 0
+        if cmd == "claim":
+            res = claim_task(st["exchange"], a.task_id, by=a.by, nonce=a.nonce)
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+            return 0 if res.get("claimed") else 1
         make = lambda token, agent_id=None: _client(st, token, wm.names(), a, agent_id)  # noqa: E731
         if cmd == "status":
             return cmd_status(st, wm, make)
