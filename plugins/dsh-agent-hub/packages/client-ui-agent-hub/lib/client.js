@@ -18,7 +18,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/index.ts
+// src/client/index.ts
 var index_exports = {};
 __export(index_exports, {
   BADGE_POLL_MS: () => BADGE_POLL_MS,
@@ -31,14 +31,14 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/AgentHubPage.tsx
+// src/client/AgentHubPage.tsx
 var import_react = require("react");
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/contract.ts
+// src/client/contract.ts
 var TASK_STATUSES = ["pending", "accepted", "running", "completed", "failed", "cancelled", "dead"];
 var AGENT_STATUSES = ["online", "pending", "offline", "left", "revoked"];
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/format.ts
+// src/client/format.ts
 function ageMs(iso, now = Date.now()) {
   if (iso === void 0) return void 0;
   const at = Date.parse(iso);
@@ -137,7 +137,7 @@ function bytes(value) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/HubIcon.tsx
+// src/client/HubIcon.tsx
 var import_jsx_runtime = require("react/jsx-runtime");
 function HubIcon({ size = 18, active = false }) {
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", { width: size, height: size, viewBox: "0 0 18 18", fill: "none", "aria-hidden": "true", style: { opacity: active ? 1 : 0.72 }, children: [
@@ -149,7 +149,7 @@ function HubIcon({ size = 18, active = false }) {
   ] });
 }
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/source.ts
+// src/client/source.ts
 var ADMIN_BASE = "/api/agent-hub/admin";
 var SourceError = class extends Error {
   status;
@@ -219,7 +219,7 @@ function fetchRequests(status) {
   return getJson("requests", { status });
 }
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/AgentHubPage.tsx
+// src/client/AgentHubPage.tsx
 var import_jsx_runtime2 = require("react/jsx-runtime");
 var REFRESH_MS = 1e4;
 var EMPTY = { overview: {}, agents: {}, tasks: {}, requests: {}, refreshing: false, first: true };
@@ -1131,7 +1131,7 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
   ] }) });
 }
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/board-tabs.ts
+// src/client/board-tabs.ts
 var REGISTRY_KEY = "__dshRouterBoardTabs__";
 var REGISTRY_VERSION = 1;
 function guard(read, fallback) {
@@ -1266,7 +1266,7 @@ function boardTabs() {
   return created;
 }
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/locales.ts
+// src/client/locales.ts
 var NS = "agentHub";
 var zh = {
   "page.title": "Agent \u8C03\u5EA6",
@@ -1558,7 +1558,7 @@ var en = {
 };
 var DICTIONARIES = { zh: { ...zh }, en: { ...en } };
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/styles.ts
+// src/client/styles.ts
 var STYLE_KEY = "dsh-client-ui-agent-hub/AgentHubPage.css";
 var AGENT_HUB_CSS = `
 .dah-page {
@@ -1868,7 +1868,7 @@ function installStyles() {
   document.head.appendChild(tag);
 }
 
-// plugins/dsh-agent-hub/packages/client-ui-agent-hub/src/client/index.ts
+// src/client/index.ts
 var PANEL_ID = "agent-hub/page";
 var BOARD_TAB_ID = "agent-hub";
 var BOARD_TAB_ORDER = 100;

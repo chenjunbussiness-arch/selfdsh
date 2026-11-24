@@ -16,7 +16,7 @@ const TLS = { cert: '/etc/dsh-hub/tls/fullchain.pem', key: '/etc/dsh-hub/tls/pri
 test('defaults: port 7891, 127.0.0.1 without TLS, no allow list, v1 timings', () => {
   const { config, warnings } = resolveConfig({})
   assert.deepEqual(config, {
-    port: DEFAULT_PORT, host: '127.0.0.1', tls: undefined, allow: [], trustProxy: false,
+    port: DEFAULT_PORT, host: '127.0.0.1', tls: undefined, allow: [], trustProxy: false, autoApprove: false,
     maxRetries: 2, offlineAfterMs: 90_000, sweepIntervalMs: 15_000, maxResultBytes: 20 * 1024 * 1024,
     fallback: { enabled: true, noFallbackCapabilities: ['quick'] }, mcp: { enabled: true },
   })

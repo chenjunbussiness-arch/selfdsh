@@ -1,22 +1,38 @@
 /**
- * Reading credential status for the rail's API-key block.
+ * The rail's API-key block.
  *
- * The block never asks for a secret and never receives one: the Host's
- * `credentials.describe(refs)` answers one projectCredentialInfo per reference —
- * `{ configured, source?, writable, masked? }` — and deliberately has no read
- * path for the value (`PKG(dsh-api-settings-controller)\src\credentials.ts:45-52,84-91`).
- * So the rail can say "已配置 / 未配置" and cannot say anything else, which is
- * exactly the amount of truth a status row should carry.
+ * A status block, not a secret store. It shows, per reference, whether a value
+ * exists and where it came from; the only write it can perform is "store this
+ * literal", which is the same call the official Models page makes
+ * (`ctx.remote.credentials.set`). Nothing here ever reads a value back, because
+ * the Host's credential seam has no read path at all — the block cannot leak what
+ * it cannot fetch.
+ *
+ * When the Host exposes no credential write, the rows stay readable and the
+ * block says where the official entry is instead of offering a dead button.
  */
 import type { CredentialView } from './contract.ts';
+/** Props for {@link Credentials}. */
+export interface CredentialsProps {
+    /** Status rows, already resolved by the panel (live Host answer or board snapshot). */
+    readonly rows: readonly CredentialView[];
+    /** Namespace-bound translate. */
+    readonly t: (key: string, values?: Record<string, string | number>) => string;
+    /** True when the Host implements a credential write. */
+    readonly writable: boolean;
+    /**
+     * Store one literal.
+     * @param ref - credential reference name.
+     * @param value - the literal to store.
+     * @returns a refusal message, or undefined once stored.
+     */
+    readonly onSave?: (ref: string, value: string) => Promise<string | undefined>;
+    /** Called after a successful write, so the panel can re-read status. */
+    readonly onChanged?: () => void;
+}
 /**
- * Narrow one `credentials.describe` answer into view rows.
- *
- * The wire shape is `Record<ref, CredentialInfo>`; a ref the Host did not answer
- * is dropped rather than assumed missing, because "the Host did not report it"
- * and "it is not configured" are different facts.
- * @param refs - the references that were asked about, in display order.
- * @param value - decoded Remote value.
- * @returns rows for the answered refs, empty when the payload is not a record.
+ * Render the API-key block.
+ * @param props - rows, translate, and the optional write path.
+ * @returns the rail's credential section.
  */
-export declare function asCredentialViews(refs: readonly string[], value: unknown): CredentialView[];
+export declare function Credentials({ rows, t, writable, onSave, onChanged }: CredentialsProps): import("react").JSX.Element;

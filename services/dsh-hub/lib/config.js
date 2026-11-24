@@ -5,7 +5,11 @@
  *   { "port": 7891, "host": "0.0.0.0", "tls": { "cert": "...", "key": "..." },
  *     "allow": ["203.0.113.7/32", "10.0.0.0/8", "2001:db8::1"], "trustProxy": false,
  *     "maxRetries": 2, "offlineAfterMs": 90000, "sweepIntervalMs": 15000,
- *     "maxResultBytes": 20971520 }
+ *     "maxResultBytes": 20971520, "autoApprove": false }
+ *
+ * `autoApprove: true` approves every /v1/enroll from an allow-listed address at
+ * once (no controller token, no human), granting exactly what the request asked
+ * for. It requires a non-empty `allow` list; the default is false.
  *
  * The environment variable DSH_HUB_PORT overrides `port`.
  *
@@ -22,7 +26,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { compileAllow, DEFAULT_MAX_RESULT_BYTES, resolveListenHost } from './http.js'
 
 export const DEFAULT_PORT = 7891
-export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'mcp']
+export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'mcp', 'autoApprove']
 
 /** A configuration problem: the service must not start (exit code 78, EX_CONFIG). */
 export class ConfigError extends Error {}
@@ -75,6 +79,14 @@ export function resolveConfig(raw = {}, { env = {}, dir = '.' } = {}) {
 
   if (raw.trustProxy !== undefined && typeof raw.trustProxy !== 'boolean') throw new ConfigError('hub.json: trustProxy must be true or false')
 
+  // autoApprove: approve /v1/enroll on the spot. OFF by default; it only makes
+  // sense behind an allow list, so without one the hub refuses to start below.
+  if (raw.autoApprove !== undefined && typeof raw.autoApprove !== 'boolean') throw new ConfigError('hub.json: autoApprove must be true or false')
+  const autoApprove = raw.autoApprove === true
+  if (autoApprove && allow.length === 0) {
+    throw new ConfigError('hub.json: autoApprove needs a non-empty "allow" list - without one /v1/enroll would be approved for any address on the internet')
+  }
+
   const fb = raw.fallback ?? {}
   if (typeof fb !== 'object' || Array.isArray(fb) || fb === null) throw new ConfigError('hub.json: fallback must be an object')
   if (fb.enabled !== undefined && typeof fb.enabled !== 'boolean') throw new ConfigError('hub.json: fallback.enabled must be true or false')
@@ -87,7 +99,7 @@ export function resolveConfig(raw = {}, { env = {}, dir = '.' } = {}) {
   const config = {
     fallback: { enabled: fb.enabled !== false, noFallbackCapabilities: fb.noFallbackCapabilities ?? ['quick'] },
     mcp: { enabled: mcp.enabled !== false },
-    port, host, tls, allow: [...allow], trustProxy: raw.trustProxy === true,
+    port, host, tls, allow: [...allow], trustProxy: raw.trustProxy === true, autoApprove,
     maxRetries: integer(raw.maxRetries, 'maxRetries', 0, 20, 2),
     offlineAfterMs: integer(raw.offlineAfterMs, 'offlineAfterMs', 1000, 7 * 86400_000, 90_000),
     sweepIntervalMs: integer(raw.sweepIntervalMs, 'sweepIntervalMs', 1000, 3600_000, 15_000),
@@ -95,6 +107,7 @@ export function resolveConfig(raw = {}, { env = {}, dir = '.' } = {}) {
   }
   try { config.host = resolveListenHost(config) } catch (error) { throw new ConfigError(error.message) }
   if (config.tls && config.allow.length === 0) warnings.push('hub.json: no "allow" list - any address can reach the hub (tokens are still required)')
+  if (config.autoApprove) warnings.push('hub.json: autoApprove is ON - /v1/enroll from an allow-listed address is approved on the spot, with no controller token and no human')
   if (config.trustProxy && config.tls) warnings.push('hub.json: trustProxy with tls - X-Forwarded-For is trusted, make sure only your proxy can connect')
   return { config, warnings }
 }

@@ -38,6 +38,7 @@ dist/
 
 # 环境变量文件
 .env
+.env.*
 .env*
 
 # dsh-secrets 运行态：加密保险库、vault 目录、vault key 与口令文件
@@ -49,6 +50,7 @@ keys/
 
 # 其它 token / 凭据缓存
 *.token
+*.token.*
 credentials*
 # 否定规则：把同名源码救回来（旧包曾因 credentials* 规则误排 4 个源码文件）
 !credentials.ts
@@ -61,18 +63,28 @@ credentials*
 # UI 改版前的源码备份目录、本地 Docker 联调生成的 CA/证书输出、临时 profile
 plugins/**/.ui-backup/
 services/dsh-hub/deploy/docker/out/
+services/dsh-hub/deploy/docker/.env
+**/docker-compose.override.yml
 tmp-profile/
 # Python 字节码缓存（agent_client.py 跑测试时生成）
 __pycache__/
 *.pyc
+# worker executor 任务脚本临时目录
+.dsh-executor/
 
 # 任何 *.env 都可能装着令牌/口令（controller.env、secrets.env、worker/.env 的副本……）
 *.env
 controller.env
 secrets.env
 # 示例文件放行（只含占位值）
+!.env.example
+!**/.env.example
 !*.env.example
 !worker.env.example
 # worker 注册后写下的令牌文件与入网申请回执
 agent.token
 *.enroll.json
+
+# local deployment hand-offs (controller tokens, CA, inventories): never commit
+out/
+/out/
