@@ -21,11 +21,11 @@
     3  NOT-RUNNING              Quick processes absent; nothing to judge.
 
   The conclusion this probe supports is recorded in
-  plugins/dsh-agent-hub/docs/aws-quick-onboarding.md.
+  plugins/dsh-agent-hub/docs/archive/aws-quick-onboarding.md.
 
 .EXAMPLE
-  pwsh -File plugins/dsh-agent-hub/scripts/probe-quick-exec-surface.ps1
-  pwsh -File plugins/dsh-agent-hub/scripts/probe-quick-exec-surface.ps1 -OutFile .dsh-artifacts\quick-probe.txt
+  pwsh -File plugins/dsh-agent-hub/docs/archive/probe-quick-exec-surface.ps1
+  pwsh -File plugins/dsh-agent-hub/docs/archive/probe-quick-exec-surface.ps1 -OutFile .dsh-artifacts\quick-probe.txt
 #>
 [CmdletBinding()]
 param(
