@@ -83,6 +83,7 @@ test('matchRoute: every contract endpoint exists with its method; unknown 404, w
     '/v1/ctl/revoke': 'POST', '/v1/ctl/provision': 'POST', '/v1/ctl/overview': 'GET',
     '/v1/release': 'POST', '/v1/dispatch': 'POST', '/v1/dispatched': 'GET', '/v1/cancel': 'POST',
     '/v1/ctl/fallback': 'GET', '/v1/ctl/fallback/take': 'POST', '/v1/ctl/fallback/event': 'POST', '/v1/ctl/fallback/result': 'POST', '/v1/ctl/fallback/input': 'GET',
+    '/v1/session': 'POST', '/v1/ctl/events': 'GET', '/v1/ctl/ack': 'POST', '/v1/ctl/session': 'POST', '/v1/ctl/session/read': 'GET',
   }
   assert.deepEqual(Object.keys(ROUTES).sort(), Object.keys(expected).sort())
   for (const [path, method] of Object.entries(expected)) {
