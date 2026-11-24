@@ -888,7 +888,7 @@ class TestMachineProfile(TempCase):
             ac.resolve_settings(wm, env={"DSH_CAPABILITIES": "Code"}, worker_dir=w)
 
     def test_local_dsh_example_is_valid(self):
-        example = os.path.join(REPO, "plugins", "dsh-agent-hub", "scripts", "profile.local-dsh.example.json")
+        example = os.path.join(REPO, "plugins", "dsh-agent-hub", "scripts", "agent.local-dsh.example.json")
         with open(example, encoding="utf-8") as f:
             cfg = json.load(f)
         self.assertEqual(ac.machine_settings(cfg, example)["capabilities"], ["browser:1", "test:2", "code:2"])
@@ -918,8 +918,8 @@ class TestEnvFile(TempCase):
     def test_examples_match_the_templates(self):
         scripts = os.path.join(REPO, "plugins", "dsh-agent-hub", "scripts")
         env_example = os.path.join(scripts, "worker.env.example")
-        prof_example = os.path.join(scripts, "profile.example.json")
-        if not (os.path.isfile(env_example) and os.path.isfile(prof_example)):
+        agent_example = os.path.join(scripts, "agent.example.json")
+        if not (os.path.isfile(env_example) and os.path.isfile(agent_example)):
             self.skipTest("examples not found")
         with open(env_example, encoding="utf-8") as f:
             text = f.read()
@@ -927,8 +927,8 @@ class TestEnvFile(TempCase):
         self.assertEqual(tuple(ac.parse_env_text(text)), ac.ENV_KEYS)
         values = ac.parse_env_text(text)
         self.assertEqual((values["DSH_HUB_PROXY"], values["DSH_HUB_URL"]), ("off", ""))
-        with open(prof_example, encoding="utf-8") as f:
-            self.assertEqual(set(json.load(f)), set(ac.profile_template()))
+        with open(agent_example, encoding="utf-8") as f:
+            self.assertEqual(set(json.load(f)), set(ac.agent_template("x")))
 
 
 class TestRuntime(TempCase):
@@ -1126,29 +1126,37 @@ class TestWorkerDir(TempCase):
 
     def test_init_writes_templates_once_and_prints_next_steps(self):
         out = Logs()
-        self.assertEqual(ac.cmd_init(self.wd, "mydesk", out), 0)
+        self.assertEqual(ac.cmd_init(self.wd, "mydesk", out, agent="code-mydesk", profile="web"), 0)
         with open(os.path.join(self.wd, ".env"), encoding="utf-8") as f:
             self.assertEqual(f.read(), ac.ENV_TEMPLATE)
-        with open(os.path.join(self.wd, "profile.json"), encoding="utf-8") as f:
-            self.assertEqual(json.load(f), {"node": "mydesk", "dshProfile": None, "workspaces": {}})
+        with open(os.path.join(self.wd, "agents", "code-mydesk.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        self.assertEqual((cfg["agentId"], cfg["dshProfile"], cfg["node"]), ("code-mydesk", "web", "mydesk"))
+        self.assertTrue(os.path.isdir(os.path.join(self.wd, "tokens")))
+        self.assertIn("doctor", out.joined())
         self.assertIn("register", out.joined())
-        self.assertIn("http://127.0.0.1:7890", out.joined())
         with open(os.path.join(self.wd, ".env"), "w", encoding="utf-8") as f:
             f.write("DSH_HUB_URL=mine\n")
         out = Logs()
-        ac.cmd_init(self.wd, "mydesk", out)
+        ac.cmd_init(self.wd, "mydesk", out, agent="code-mydesk")
         with open(os.path.join(self.wd, ".env"), encoding="utf-8") as f:
             self.assertEqual(f.read(), "DSH_HUB_URL=mine\n", "never overwritten")
         self.assertIn("kept", out.joined())
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(ac.main(["init", "--worker-dir", self.path("fresh"), "--exchange", self.path("fresh-ex")], env={}), 0)
+            self.assertEqual(ac.main(["init", "--worker-dir", self.path("fresh"), "--agent", "a1"], env={}), 0)
         self.assertTrue(os.path.isfile(self.path("fresh", ".env")))
-        self.assertTrue(os.path.isfile(self.path("fresh-ex", "README.md")))
+        self.assertTrue(os.path.isfile(self.path("fresh", "exchange", "a1", "README.md")))
+
+    def test_init_without_an_agent_only_writes_env(self):
+        out = Logs()
+        self.assertEqual(ac.cmd_init(self.wd, "mydesk", out, exchange=True, env={}), 0)
+        self.assertEqual(os.listdir(self.wd), [".env"])
+        self.assertIn("init --agent", out.joined())
 
     def test_init_creates_the_exchange_folder_with_a_readme(self):
         ex = self.path("ex")
         out = Logs()
-        self.assertEqual(ac.cmd_init(self.wd, "mydesk", out, exchange=True, env={}, exchange_dir=ex), 0)
+        self.assertEqual(ac.cmd_init(self.wd, "mydesk", out, exchange=True, env={}, exchange_dir=ex, agent="a1"), 0)
         for d in ac.EXCHANGE_DIRS:
             self.assertTrue(os.path.isdir(os.path.join(ex, d)), d)
         with open(os.path.join(ex, "README.md"), encoding="utf-8") as f:
@@ -1157,22 +1165,10 @@ class TestWorkerDir(TempCase):
         with open(os.path.join(ex, "README.md"), "w", encoding="utf-8") as f:
             f.write("mine")
         out = Logs()
-        ac.cmd_init(self.wd, "mydesk", out, exchange=True, env={}, exchange_dir=ex)
+        ac.cmd_init(self.wd, "mydesk", out, exchange=True, env={}, exchange_dir=ex, agent="a1")
         with open(os.path.join(ex, "README.md"), encoding="utf-8") as f:
             self.assertEqual(f.read(), "mine", "README.md is never overwritten")
         self.assertIn("kept", out.joined())
-
-    def test_init_reads_dsh_exchange_from_env_and_dotenv(self):
-        with open(os.path.join(self.wd, ".env"), "w", encoding="utf-8") as f:
-            f.write("DSH_EXCHANGE=from-dotenv\n")
-        ac.cmd_init(self.wd, "mydesk", Logs(), exchange=True, env={})
-        self.assertTrue(os.path.isfile(os.path.join(self.wd, "from-dotenv", "README.md")))
-        ac.cmd_init(self.wd, "mydesk", Logs(), exchange=True, env={"DSH_EXCHANGE": self.path("from-env")})
-        self.assertTrue(os.path.isdir(self.path("from-env", "inbox")))
-        if os.name != "nt":
-            out = Logs()
-            self.assertIsNone(ac.init_exchange(self.wd, {"DSH_EXCHANGE": "E:/dsh-exchange"}, out=out))
-            self.assertIn("skipped", out.joined())
 
     def test_bridge_creates_the_exchange_readme(self):
         ex = self.path("bridge-ex")

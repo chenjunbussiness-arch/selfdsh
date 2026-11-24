@@ -200,9 +200,9 @@ EXCHANGE_DIRS = ("inbox", "working", "outbox", "failed", "archive")
 TASK_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,96}")
 ABORT_MARK = "ABORTED.json"
 DEFAULT_HEARTBEAT = 30
-ENV_KEYS = ("DSH_HUB_URL", "DSH_HUB_PROXY", "DSH_HUB_CAFILE", "DSH_AGENT_ID", "DSH_NODE", "DSH_PLATFORM",
-            "DSH_CAPABILITIES", "DSH_MAX_CONCURRENCY", "DSH_AGENT_TOKEN_FILE", "DSH_EXCHANGE", "DSH_HEARTBEAT_SECONDS",
-            "DSH_ROLE", "DSH_PULL_EVERY_SECONDS", "DSH_PATH_MAP")
+# Keys worker/.env carries (what `init` writes). The older agent keys (DSH_AGENT_ID, DSH_NODE, ...) are
+# still read from the environment / .env for one release; `doctor` says where they belong now.
+ENV_KEYS = ("DSH_HUB_URL", "DSH_HUB_PROXY", "DSH_HUB_CAFILE", "DSH_AGENT")
 ROLES = ("worker", "tester", "dispatcher", "observer")
 PROXY_OFF = ("off", "direct", "none", "false", "no")
 EFFORT_MODES = ("fast", "balanced", "smart")
@@ -344,8 +344,9 @@ class HubClient:
 
     def __init__(self, url, token=None, insecure=False, cafile=None, timeout=60, *, agent_id=None,
                  proxy=None, no_proxy=False, workspaces=(), opener=None, ctx=None, runtime=None,
-                 role=None, pull_every_seconds=None):
+                 role=None, pull_every_seconds=None, dsh_profile=None):
         self.url = hub_url(url)
+        self.dsh_profile = dsh_profile
         self.runtime = runtime
         self.role = role
         self.pull_every_seconds = pull_every_seconds
@@ -399,6 +400,8 @@ class HubClient:
             body["role"] = self.role
         if self.pull_every_seconds is not None:
             body["pull_every_seconds"] = self.pull_every_seconds
+        if self.dsh_profile is not None:
+            body["dsh_profile"] = self.dsh_profile
         return self._req("POST", "enroll", body, auth=False)
 
     def enroll_status(self, request_id, poll_secret):
@@ -415,6 +418,8 @@ class HubClient:
             body["pull_every_seconds"] = self.pull_every_seconds  # so the hub does not count us offline between visits
         if running is not None:
             body["running"] = list(running)
+        if self.dsh_profile is not None:
+            body["dsh_profile"] = self.dsh_profile
         return self._req("POST", "heartbeat", body)
 
     def me(self):
@@ -746,6 +751,9 @@ class WorkspaceMap:
         # what this machine's worker is (capabilities / maxConcurrency / role / pullEverySeconds / platform /
         # agentId), lowest-priority fallbacks of the DSH_* settings; None = not set in the file
         self.machine = dict(machine or {})
+        self.profile_name = None  # name of the dshProfile (folder name), sent to the hub as dsh_profile
+        self.agent_file = False   # True when read from <worker>/agents/<id>.json
+        self.path_map = []
 
     def names(self):
         """Names safe to report: mapped and still present on disk."""
@@ -753,7 +761,7 @@ class WorkspaceMap:
 
     def to_json(self):
         proxy = self.proxy if self.proxy in (None, False) else mask_url(self.proxy)
-        return {"node": self.node, "workspaces_file": self.config_path, "profile": self.profile,
+        return {"node": self.node, "workspaces_file": self.config_path, "profile": self.profile, "dsh_profile": self.profile_name,
                 "workspaces": dict(sorted(self.workspaces.items())), "sources": dict(sorted(self.sources.items())),
                 "dropped": self.dropped,
                 "runtime": self.runtime if self.has_runtime else "(platform default)",
@@ -779,6 +787,84 @@ def dsh_home(env=None):
 def default_worker_dir(env=None):
     """<DSH home>/worker: .env, profile.json, the token file and (by default) the exchange folder."""
     return os.path.join(dsh_home(env), "worker")
+
+
+# --- worker folder layout -----------------------------------------------------------
+#
+# <DSH home>/
+#   .env                        DSH's own; never any DSH_* variable
+#   profiles/<profile>/         local DSH profiles; their router-b partitions are the workspaces
+#   worker/
+#     .env                      how to reach the hub only: DSH_HUB_URL, DSH_HUB_PROXY, DSH_HUB_CAFILE (+ DSH_AGENT)
+#     agents/<agent-id>.json    what each agent is: dshProfile (required), capabilities, role, ...
+#     tokens/<agent-id>.token   its token (mode 600)
+#     exchange/<agent-id>/      its own inbox / working / outbox / failed / archive
+#     logs/<agent-id>.log       worker_run.py log; logs/<agent-id>.executor.log for worker_executor.py
+
+AGENTS_DIR, TOKENS_DIR, LOGS_DIR, EXCHANGE_BASE, PROFILES_DIR = "agents", "tokens", "logs", "exchange", "profiles"
+PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# Settings that describe one agent: they live in agents/<id>.json, not in worker/.env.
+AGENT_ENV_KEYS = {"DSH_NODE": "node", "DSH_PLATFORM": "platform", "DSH_CAPABILITIES": "capabilities",
+                  "DSH_MAX_CONCURRENCY": "maxConcurrency", "DSH_ROLE": "role", "DSH_PULL_EVERY_SECONDS": "pullEverySeconds",
+                  "DSH_EXCHANGE": "exchange", "DSH_PATH_MAP": "pathMap", "DSH_HEARTBEAT_SECONDS": "heartbeatSeconds"}
+CONNECTION_ENV_KEYS = ("DSH_HUB_URL", "DSH_HUB_PROXY", "DSH_HUB_CAFILE", "DSH_AGENT")
+
+
+def agent_paths(worker_dir, agent_id):
+    """Where one agent's files live inside the worker folder."""
+    return {"config": os.path.join(worker_dir, AGENTS_DIR, f"{agent_id}.json"),
+            "token": os.path.join(worker_dir, TOKENS_DIR, f"{agent_id}.token"),
+            "exchange": os.path.join(worker_dir, EXCHANGE_BASE, agent_id),
+            "log": os.path.join(worker_dir, LOGS_DIR, f"{agent_id}.log"),
+            "executor_log": os.path.join(worker_dir, LOGS_DIR, f"{agent_id}.executor.log")}
+
+
+def agent_configs(worker_dir):
+    """Agent ids that have a config file in <worker>/agents/, sorted."""
+    d = os.path.join(worker_dir, AGENTS_DIR)
+    if not os.path.isdir(d):
+        return []
+    return sorted(n[:-5] for n in os.listdir(d) if n.endswith(".json") and AGENT_ID_RE.fullmatch(n[:-5]))
+
+
+def select_agent(worker_dir, env=None, dotenv=None, cli_agent=None):
+    """(agent id, source) of the agent this run is for, or (None, None) without agents/ (legacy layout).
+
+    --agent > DSH_AGENT (environment, then worker/.env) > the only file in agents/.
+    A named agent must have its agents/<id>.json; several files and none named is an error."""
+    env = os.environ if env is None else env
+    dotenv = dotenv or {}
+    for label, value in (("cli", cli_agent), ("env", env.get("DSH_AGENT")), (".env", dotenv.get("DSH_AGENT"))):
+        if isinstance(value, str) and value.strip():
+            value = value.strip()
+            if not AGENT_ID_RE.fullmatch(value):
+                raise ConfigError(f"agent name {value!r} (from {label}) must match ^[a-z][a-z0-9-]{{1,47}}$")
+            if not os.path.isfile(agent_paths(worker_dir, value)["config"]):
+                have = agent_configs(worker_dir)
+                raise ConfigError(f"no config for agent {value} (from {label}): {agent_paths(worker_dir, value)['config']} is missing"
+                                  + (f"; configured agents: {', '.join(have)}" if have else
+                                     f"; create it with: python agent_client.py init --agent {value}"))
+            return value, label
+    have = agent_configs(worker_dir)
+    if len(have) == 1:
+        return have[0], "agents/"
+    if len(have) > 1:
+        raise ConfigError(f"several agents are configured in {os.path.join(worker_dir, AGENTS_DIR)}: {', '.join(have)}; "
+                          "pick one with --agent <id> or DSH_AGENT=<id>")
+    return None, None
+
+
+def resolve_dsh_profile(value, base, home, path_map=None):
+    """dshProfile -> (local folder or .yml path, profile name). A bare name means <DSH home>/profiles/<name>."""
+    v = value.strip()
+    if PROFILE_NAME_RE.fullmatch(v) and not v.lower().endswith((".yml", ".yaml")):
+        named = os.path.join(home, PROFILES_DIR, v)
+        older = _local_path(v, base)  # an older profile.json may name a folder next to it
+        return (older if not os.path.isdir(named) and os.path.isdir(older) else named), v
+    path = _local_path(map_path(v, path_map), base)
+    folder = os.path.dirname(path) if path.lower().endswith((".yml", ".yaml")) else path
+    name = os.path.basename(folder.rstrip("\\/")) or None
+    return path, name if name and PROFILE_NAME_RE.fullmatch(name) else None
 
 
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -855,11 +941,14 @@ def profile_file_for(worker_dir, log=warn):
     return current, False
 
 
-def resolve_workspaces(config_path=None, node=None, required=False, log=warn, isdir=os.path.isdir, worker_dir=None, path_map=None):
-    """Merge profile.json "workspaces" (explicit, wins) over the dshProfile's router-b partitions.
+def resolve_workspaces(config_path=None, node=None, required=False, log=warn, isdir=os.path.isdir, worker_dir=None, path_map=None,
+                       home=None):
+    """Merge the agent config's "workspaces" (explicit, wins) over the dshProfile's router-b partitions.
 
-    `config_path` names the file (profile.json or a legacy workspaces.json); without it the
-    worker dir is searched: profile.json, then workspaces.json."""
+    `config_path` names the file (agents/<id>.json, profile.json or a legacy workspaces.json); without
+    it the worker dir is searched: profile.json, then workspaces.json. Relative paths in a file under
+    agents/ resolve against the worker dir, in any other file against that file's folder.
+    `home` is the DSH home a bare dshProfile name is looked up in (<home>/profiles/<name>)."""
     legacy = False
     if config_path:
         path = _local_path(config_path)
@@ -880,13 +969,22 @@ def resolve_workspaces(config_path=None, node=None, required=False, log=warn, is
     else:
         log(f"no profile at {path}; no workspaces are mapped (python agent_client.py init writes a template)")
     base = os.path.dirname(path)
+    in_agents = os.path.basename(base) == AGENTS_DIR
+    if in_agents:
+        base = os.path.dirname(base)  # agents/<id>.json: relative paths are relative to the worker dir
+    if path_map is None or not path_map:
+        pm = config.get("pathMap")
+        if pm is not None and not isinstance(pm, str):
+            raise ConfigError(f"{path}: pathMap must be a string like \"E:/=/host/e\"")
+        path_map = parse_path_map(pm or "")
 
     candidates, sources, dropped, hosts = {}, {}, [], {}
     profile = config.get("dshProfile", config.get("profile"))
+    profile_name = None
     if profile is not None and not isinstance(profile, str):
         raise ConfigError(f"{path}: dshProfile must be a string")
     if profile:
-        profile = _local_path(map_path(profile, path_map), base)
+        profile, profile_name = resolve_dsh_profile(profile, base, home or dsh_home(), path_map)
         patch = profile_patch_path(profile)
         if os.path.isfile(patch):
             with open(patch, encoding="utf-8-sig") as f:
@@ -953,10 +1051,14 @@ def resolve_workspaces(config_path=None, node=None, required=False, log=warn, is
         raise ConfigError(f"{path}: proxy must be a URL string, false (direct) or null")
     if isinstance(proxy, str):
         proxy = normalize_proxy(proxy) if proxy.strip() else None
-    return WorkspaceMap(node, path, profile or None, workspaces, sources, dropped, hub, token_file, proxy,
-                        file_node=file_node, legacy=legacy, exists=exists,
-                        host_paths={n: hosts.get(n, p) for n, p in workspaces.items()},
-                        runtime=runtime, has_runtime=has_runtime, machine=machine_settings(config, path))
+    wm = WorkspaceMap(node, path, profile or None, workspaces, sources, dropped, hub, token_file, proxy,
+                      file_node=file_node, legacy=legacy, exists=exists,
+                      host_paths={n: hosts.get(n, p) for n, p in workspaces.items()},
+                      runtime=runtime, has_runtime=has_runtime, machine=machine_settings(config, path, base))
+    wm.profile_name = profile_name
+    wm.agent_file = in_agents
+    wm.path_map = path_map
+    return wm
 
 
 CAPABILITY_RE = re.compile(r"([a-z][a-z0-9-]{0,47})(?::([1-9][0-9]?))?")
@@ -997,12 +1099,14 @@ def parse_capabilities(value, where="DSH_CAPABILITIES"):
     return out
 
 
-def machine_settings(config, path):
-    """profile.json keys that describe this machine's worker (each machine keeps its own profile)."""
+def machine_settings(config, path, base=None):
+    """Agent config keys that describe this worker (each machine keeps its own file)."""
     out = {}
     if "capabilities" in config and config["capabilities"] is not None:
         out["capabilities"] = parse_capabilities(config["capabilities"], f"{path}: capabilities")
-    for key in ("maxConcurrency", "pullEverySeconds"):
+    exchange = _opt_str(config, "exchange", path)
+    out["exchange"] = _local_path(exchange, base) if exchange is not None and base is not None else exchange
+    for key in ("maxConcurrency", "pullEverySeconds", "heartbeatSeconds"):
         v = config.get(key)
         if v is not None and (isinstance(v, bool) or not isinstance(v, int)):
             raise ConfigError(f"{path}: {key} must be a whole number")
@@ -1084,8 +1188,11 @@ def _int_setting(value, key, lo, hi):
     return n
 
 
-def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, env=None, dotenv=None, worker_dir=None, cli=None):
-    """All settings. Order: command line > process env > worker/.env > profile.json > default.
+def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, env=None, dotenv=None, worker_dir=None, cli=None,
+                     agent=None):
+    """All settings. Order: command line > process env > worker/.env > agent config (agents/<id>.json, or a
+    legacy profile.json) > default. `agent` is the selected agent id (select_agent); with it the token,
+    exchange and log default to tokens/<id>.token, exchange/<id>/ and logs/<id>.log.
 
     Returns a dict with url, proxy, no_proxy, cafile, agent_id, node, platform, capabilities,
     max_concurrency, token_file, exchange, heartbeat_seconds, worker_dir and `sources`
@@ -1095,6 +1202,8 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
     cli = dict(cli or {})
     wd = worker_dir or default_worker_dir(env)
     sources = {}
+    file_label = "agent" if getattr(wm, "agent_file", False) else "profile"
+    layout = agent_paths(wd, agent) if agent else None
 
     def pick(key, name, cli_value, profile_value=None, default=None):
         if cli_value not in (None, ""):
@@ -1106,7 +1215,7 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
                 sources[key] = label
                 return v.strip()
         if profile_value is not None:
-            sources[key] = "profile"
+            sources[key] = file_label
             return profile_value
         sources[key] = "default"
         return default
@@ -1116,8 +1225,8 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
             return None
         if sources[key] == "cli":
             return os.path.abspath(os.path.expanduser(value))
-        if sources[key] == "profile":
-            return value  # already resolved against the profile file
+        if sources[key] in ("profile", "agent"):
+            return value  # already resolved against the file's folder
         return _local_path(value, wd)
 
     st = {"worker_dir": wd, "sources": sources}
@@ -1130,10 +1239,10 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
         raw = pick("proxy", "DSH_HUB_PROXY", proxy)
         if sources["proxy"] == "default":
             if wm.proxy is False:
-                sources["proxy"] = "profile"
+                sources["proxy"] = file_label
                 st["proxy"], st["no_proxy"] = None, True
             elif wm.proxy:
-                sources["proxy"] = "profile"
+                sources["proxy"] = file_label
                 st["proxy"], st["no_proxy"] = wm.proxy, False
             else:
                 st["proxy"], st["no_proxy"] = None, False
@@ -1143,10 +1252,19 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
             except ConfigError:
                 raise ConfigError(f"DSH_HUB_PROXY / --proxy must be http://host:port, off or env (from {sources['proxy']})") from None
     st["cafile"] = in_wd(pick("cafile", "DSH_HUB_CAFILE", cli.get("cafile")), "cafile")
-    agent_id = pick("agent_id", "DSH_AGENT_ID", cli.get("agent_id"), (getattr(wm, "machine", {}) or {}).get("agentId"))
+    file_id = (getattr(wm, "machine", {}) or {}).get("agentId")
+    if agent and file_id and file_id != agent:
+        raise ConfigError(f"{wm.config_path}: agentId {file_id!r} does not match the file name {agent!r}")
+    agent_id = pick("agent_id", "DSH_AGENT_ID", cli.get("agent_id"), agent or file_id)
     if agent_id is not None and not AGENT_ID_RE.fullmatch(agent_id):
         raise ConfigError(f"DSH_AGENT_ID / --agent-id must match ^[a-z][a-z0-9-]{{1,47}}$ (from {sources['agent_id']})")
+    if agent and agent_id != agent:
+        raise ConfigError(f"DSH_AGENT_ID={agent_id} (from {sources['agent_id']}) is not the selected agent {agent}; "
+                          "remove DSH_AGENT_ID (the agent's name is its agents/<id>.json file name)")
     st["agent_id"] = agent_id
+    st["agent"] = agent
+    st["dsh_profile"] = getattr(wm, "profile_name", None)
+    st["log_file"] = layout["log"] if layout else os.path.join(wd, "run.log")
     st["node"] = pick("node", "DSH_NODE", cli.get("node"), wm.file_node, default_node())
     m = getattr(wm, "machine", {}) or {}
     st["platform"] = pick("platform", "DSH_PLATFORM", cli.get("platform"), m.get("platform"), "custom")
@@ -1155,10 +1273,12 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
     st["max_concurrency"] = _int_setting(pick("max_concurrency", "DSH_MAX_CONCURRENCY", cli.get("max_concurrency"),
                                               m.get("maxConcurrency"), 1),
                                          "DSH_MAX_CONCURRENCY", 1, 32)
-    st["token_file"] = in_wd(pick("token_file", "DSH_AGENT_TOKEN_FILE", token_file, wm.token_file, "agent.token"), "token_file")
-    st["exchange"] = in_wd(pick("exchange", "DSH_EXCHANGE", cli.get("exchange"), None, "exchange"), "exchange")
+    st["token_file"] = in_wd(pick("token_file", "DSH_AGENT_TOKEN_FILE", token_file, wm.token_file,
+                                  layout["token"] if layout else "agent.token"), "token_file")
+    st["exchange"] = in_wd(pick("exchange", "DSH_EXCHANGE", cli.get("exchange"), m.get("exchange"),
+                                layout["exchange"] if layout else "exchange"), "exchange")
     st["runtime"] = check_runtime(wm.runtime, f"{wm.config_path}: runtime") if wm.has_runtime else platform_runtime(st["platform"])
-    st["heartbeat_seconds"] = _int_setting(pick("heartbeat_seconds", "DSH_HEARTBEAT_SECONDS", cli.get("heartbeat_seconds"), None,
+    st["heartbeat_seconds"] = _int_setting(pick("heartbeat_seconds", "DSH_HEARTBEAT_SECONDS", cli.get("heartbeat_seconds"), m.get("heartbeatSeconds"),
                                                 DEFAULT_HEARTBEAT), "DSH_HEARTBEAT_SECONDS", 5, 3600)
     role = pick("role", "DSH_ROLE", cli.get("role"), m.get("role"), "worker")
     if role not in ROLES:
@@ -1182,6 +1302,7 @@ def settings_summary(st):
             "token_file": st["token_file"], "token_file_exists": bool(st["token_file"]) and os.path.isfile(st["token_file"]),
             "exchange": st["exchange"], "heartbeat_seconds": st["heartbeat_seconds"],
             "role": st.get("role"), "pull_every_seconds": st.get("pull_every_seconds"),
+            "dsh_profile": st.get("dsh_profile"), "log_file": st.get("log_file"),
             "runtime": st.get("runtime")}
 
 
@@ -1600,7 +1721,8 @@ def config_help():
 
 
 def _add_local_args(s):
-    s.add_argument("--worker-dir", help="worker folder with .env / profile.json (default <DSH home>/worker, DSH home = $DSH_HOME or ~/.dsh)")
+    s.add_argument("--worker-dir", help="worker folder with .env and agents/ (default <DSH home>/worker, DSH home = $DSH_HOME or ~/.dsh)")
+    s.add_argument("--agent", help="which agents/<id>.json to use; overrides DSH_AGENT (one file = picked automatically)")
     s.add_argument("--profile-file", "--workspaces-file", dest="profile_file",
                    help=f"profile.json (or legacy workspaces.json, e.g. {DEFAULT_WORKSPACES_FILE}) to read instead of the worker dir's")
     s.add_argument("--node", help="node name; overrides DSH_NODE and \"node\" in profile.json (default: host name)")
@@ -1629,7 +1751,7 @@ def _client(st, token, workspaces, a, agent_id=None):
         warn("plain http to a non-loopback hub: the token would cross the network in clear text")
     return HubClient(url, token, a.insecure, st["cafile"], a.timeout, agent_id=agent_id or st["agent_id"] or None,
                      proxy=st["proxy"], no_proxy=st["no_proxy"], workspaces=workspaces, runtime=st.get("runtime"),
-                     role=st.get("role"), pull_every_seconds=st.get("pull_every_seconds"))
+                     role=st.get("role"), pull_every_seconds=st.get("pull_every_seconds"), dsh_profile=st.get("dsh_profile"))
 
 
 def check_settings(st):
@@ -1874,48 +1996,176 @@ def _proxy_source(st):
 
 
 ENV_TEMPLATE = """\
-# dsh-hub worker settings of this machine: <DSH home>/worker/.env (keep it private: chmod 600).
-# These DSH_HUB_* / DSH_AGENT_* settings belong ONLY here or in the process environment, never in
-# <DSH home>/.env: DSH itself refuses to start when its own .env sets any DSH_* variable.
-# Priority: command line > process environment > this file > profile.json > default.
-# Relative paths are relative to this folder. Reference: python agent_client.py --help
+# How this machine reaches the dsh-hub: <DSH home>/worker/.env (keep it private: chmod 600).
+# Only connection settings live here. What each agent is (profile, capabilities, role, ...) lives in
+# agents/<agent-id>.json; its token in tokens/<agent-id>.token; its exchange in exchange/<agent-id>/.
+# Never put DSH_* variables in <DSH home>/.env: DSH itself refuses to start when its own .env has one.
+# Check everything with: python agent_client.py doctor
 
 # Hub address: host, host:port or URL (default port 7891, path /v1), e.g. https://hub.example.com:7891.
-# Required. Prefer a domain name: the server IP may change. Never commit the real address.
+# Prefer a domain name: the server IP may change. Never commit the real address.
 DSH_HUB_URL=
-# Way out to the hub: off = direct (default of this template), env = HTTPS_PROXY / system proxy,
-# http://host:port = this HTTP proxy. Only when the direct connection fails: http://127.0.0.1:7890 (Clash/mihomo)
+# Way out to the hub: off = direct, env = HTTPS_PROXY / system proxy, http://host:port = this HTTP proxy
 DSH_HUB_PROXY=off
 # CA file (PEM) when the hub certificate is self-signed; empty = system CAs
 DSH_HUB_CAFILE=
-# Registered worker name, ^[a-z][a-z0-9-]{1,47}$, suggested <agent>-<machine>
-DSH_AGENT_ID=quick-mydesk
-DSH_NODE=mydesk
-# aws-quick | claude-code | kiro | custom
-DSH_PLATFORM=aws-quick
-# Comma separated capabilities, for pool:<capability> tasks
-DSH_CAPABILITIES=code,document
-DSH_MAX_CONCURRENCY=1
-# Written by `register` (mode 600); the token is only ever read from this file
-DSH_AGENT_TOKEN_FILE=agent.token
-# Exchange folder of run / bridge (inbox, working, outbox, failed, archive); `init` creates it with a README.md.
-# It stays empty until register was approved, `run` is running and DSH dispatched a task to this worker.
-DSH_EXCHANGE=E:/dsh-exchange
-# Heartbeat period of `run` in seconds (the hub marks a worker offline after 90 s of silence)
-DSH_HEARTBEAT_SECONDS=30
-# worker | tester | dispatcher | observer (approval may narrow it)
-DSH_ROLE=worker
-# Only for a worker that is NOT always on (cron / scheduled `bridge --once`): how often it runs, 60..86400 s.
-# The hub then waits 90 s + this long before it counts the worker offline. Empty = always on (`run`).
-DSH_PULL_EVERY_SECONDS=
-# Only for a worker in a container that reads the host profile: host prefix=container prefix;...
-# e.g. E:/=/host/e  (empty on the host itself)
-DSH_PATH_MAP=
+# Which agents/<id>.json to run when there are several (one file = picked automatically)
+DSH_AGENT=
 """
+
+
+# --- one-time move from the older layout ---------------------------------------------
+
+def _bak(path):
+    """Rename `path` to `path.bak` (or .bak2, .bak3 ... when taken). Returns the new name."""
+    n, dest = 1, path + ".bak"
+    while os.path.exists(dest):
+        n += 1
+        dest = f"{path}.bak{n}"
+    os.replace(path, dest)
+    return dest
+
+
+def _env_value(name, env, dotenv):
+    for table in (env, dotenv):
+        v = table.get(name)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def migrate_layout(worker_dir, env=None, dotenv=None, home=None, log=warn):
+    """Move an older worker folder (profile.json / workspaces.json, agent.token, exchange/, DSH_* agent
+    settings in .env) to agents/<id>.json + tokens/<id>.token + exchange/<id>/ + a .env with connection
+    settings only. Every file it replaces is kept as <name>.bak. Does nothing when agents/ already has a
+    config or there is nothing old to move. Returns [(old, new), ...] of what moved, or [] .
+
+    The exchange folder only moves when it is the default <worker>/exchange; an exchange folder set
+    elsewhere (DSH_EXCHANGE=E:/...) stays where it is and is written into the agent config."""
+    env = os.environ if env is None else env
+    dotenv = dict(dotenv or {})
+    home = home or dsh_home(env)
+    if agent_configs(worker_dir):
+        return []
+    prof = os.path.join(worker_dir, "profile.json")
+    legacy = os.path.join(worker_dir, "workspaces.json")
+    src = prof if os.path.isfile(prof) else legacy if os.path.isfile(legacy) else None
+    cfg = {}
+    if src:
+        with open(src, encoding="utf-8-sig") as f:
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            raise ConfigError(f"{src}: top level must be an object")
+    if _env_value("DSH_AGENT_TOKEN_FILE", env, dotenv):
+        token_src = _local_path(_env_value("DSH_AGENT_TOKEN_FILE", env, dotenv), worker_dir)
+    elif isinstance(cfg.get("tokenFile"), str) and cfg["tokenFile"].strip():
+        token_src = _local_path(cfg["tokenFile"], os.path.dirname(src))
+    else:
+        token_src = os.path.join(worker_dir, "agent.token")
+    if src is None and not os.path.isfile(token_src):
+        return []  # a fresh folder: nothing to move
+    agent_id = cfg.get("agentId") or _env_value("DSH_AGENT_ID", env, dotenv)
+    if not agent_id and os.path.isfile(token_src):
+        try:
+            agent_id = agent_id_from_token(read_token(token_src))
+        except (OSError, ConfigError):
+            agent_id = None
+    if not agent_id or not AGENT_ID_RE.fullmatch(agent_id):
+        log("older worker folder found but its agent name is unknown; set DSH_AGENT_ID in worker/.env (or \"agentId\" "
+            "in profile.json) and start again to move it to agents/<id>.json")
+        return []
+    paths = agent_paths(worker_dir, agent_id)
+    moved = []
+    new_cfg = {"agentId": agent_id}
+    for key, value in cfg.items():
+        if key in ("hubUrl", "tokenFile", "proxy", "agentId"):
+            continue
+        new_cfg["dshProfile" if key == "profile" else key] = value
+    for name, key in AGENT_ENV_KEYS.items():
+        v = _env_value(name, env, dotenv)
+        if v is None or key in new_cfg:
+            continue
+        if key in ("maxConcurrency", "pullEverySeconds", "heartbeatSeconds"):
+            try:
+                v = int(v)
+            except ValueError:
+                continue
+        elif key == "capabilities":
+            v = [c.strip() for c in v.split(",") if c.strip()]
+        elif key == "exchange":
+            v = _local_path(v, worker_dir)
+        new_cfg[key] = v
+    dp = new_cfg.get("dshProfile")
+    if isinstance(dp, str) and dp.strip():  # a path under <home>/profiles/ becomes its bare name
+        full = _local_path(dp, os.path.dirname(src) if src else worker_dir)
+        if os.path.normcase(os.path.dirname(full.rstrip("\\/"))) == os.path.normcase(os.path.join(home, PROFILES_DIR)):
+            new_cfg["dshProfile"] = os.path.basename(full.rstrip("\\/"))
+        else:
+            new_cfg["dshProfile"] = full
+    # token (and a pending enrollment) -> tokens/<id>.token
+    for suffix in ("", ".enroll.json"):
+        old = token_src + suffix
+        if os.path.isfile(old):
+            new = paths["token"] + suffix
+            os.makedirs(os.path.dirname(new), exist_ok=True)
+            shutil.copyfile(old, new)
+            _private(new)
+            moved.append((old, new))
+            _bak(old)
+    # the default exchange folder -> exchange/<id>/
+    if "exchange" not in new_cfg:
+        old_ex = os.path.join(worker_dir, EXCHANGE_BASE)
+        if any(os.path.isdir(os.path.join(old_ex, d)) for d in EXCHANGE_DIRS):
+            os.makedirs(paths["exchange"], exist_ok=True)
+            for item in EXCHANGE_DIRS + ("README.md",):
+                a = os.path.join(old_ex, item)
+                if os.path.exists(a):
+                    os.replace(a, os.path.join(paths["exchange"], item))
+            moved.append((old_ex, paths["exchange"]))
+    os.makedirs(os.path.dirname(paths["config"]), exist_ok=True)
+    write_atomic(paths["config"], json.dumps(new_cfg, ensure_ascii=False, indent=2) + "\n")
+    moved.append((src or "(worker/.env)", paths["config"]))
+    if src:
+        _bak(src)
+    # .env: connection settings only, plus DSH_AGENT
+    env_path = os.path.join(worker_dir, ".env")
+    if os.path.isfile(env_path):
+        with open(env_path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+        drop = set(AGENT_ENV_KEYS) | {"DSH_AGENT_ID", "DSH_AGENT_TOKEN_FILE", "DSH_AGENT"}
+        kept = [ln for ln in lines if not any(re.match(rf"\s*(export\s+)?{k}\s*=", ln) for k in drop)]
+        _bak(env_path)
+        write_atomic(env_path, "\n".join(kept + [f"# this worker folder's agent (agents/{agent_id}.json)", f"DSH_AGENT={agent_id}"]) + "\n")
+        _private(env_path)
+        moved.append((env_path + " (agent settings)", paths["config"]))
+    for old, new in moved:
+        log(f"moved: {old} -> {new}")
+    log(f"older layout moved to agents/{agent_id}.json; replaced files are kept as *.bak")
+    return moved
+
+
+def require_profile(st, wm, what):
+    """register / run / bridge need the agent to name its local DSH profile (workers and testers)."""
+    if st.get("role") in ("dispatcher", "observer"):
+        return
+    where = wm.config_path or "agents/<id>.json"
+    if not wm.profile:
+        raise ConfigError(f"{what} needs \"dshProfile\" in {where}: the name of the local DSH profile "
+                          f"(<DSH home>/{PROFILES_DIR}/<name>) whose partitions this agent works in")
+    if not os.path.exists(profile_patch_path(wm.profile)):
+        raise ConfigError(f"dshProfile in {where} points at {wm.profile}, which has no cordis.patch.yml")
+    if not getattr(wm, "profile_name", None):
+        raise ConfigError(f"dshProfile in {where}: the profile folder name must be letters, digits, . _ - (it is sent to the hub)")
 
 
 def profile_template(node=None):
     return {"node": node or default_node(), "dshProfile": None, "workspaces": {}}
+
+
+def agent_template(agent_id, node=None, profile=None):
+    """agents/<id>.json of a new agent. dshProfile is required before register / run."""
+    return {"agentId": agent_id, "dshProfile": profile or "", "node": node or default_node(), "platform": "custom",
+            "role": "worker", "capabilities": {"code": 1}, "maxConcurrency": 1, "pullEverySeconds": None, "workspaces": {}}
 
 
 def _foreign_drive(path):
@@ -1943,8 +2193,8 @@ def init_exchange(worker_dir, env=None, cli_value=None, out=print):
     return root
 
 
-def cmd_init(worker_dir, node=None, out=print, exchange=False, env=None, exchange_dir=None):
-    """Write .env / profile.json templates (never overwritten); exchange=True also creates DSH_EXCHANGE."""
+def cmd_init(worker_dir, node=None, out=print, exchange=False, env=None, exchange_dir=None, agent=None, profile=None):
+    """Write worker/.env and agents/<agent>.json templates (never overwritten) and create exchange/<agent>/."""
     os.makedirs(worker_dir, exist_ok=True)
     done = {}
     env_path = os.path.join(worker_dir, ".env")
@@ -1954,23 +2204,33 @@ def cmd_init(worker_dir, node=None, out=print, exchange=False, env=None, exchang
         write_atomic(env_path, ENV_TEMPLATE)
         _private(env_path)
         done[".env"] = "created"
-    prof = os.path.join(worker_dir, "profile.json")
-    legacy = os.path.join(worker_dir, "workspaces.json")
-    if os.path.exists(prof):
-        done["profile.json"] = "kept (already exists)"
-    else:
-        write_atomic(prof, json.dumps(profile_template(node), indent=2) + "\n")
-        done["profile.json"] = "created" + (" (a legacy workspaces.json is next to it: copy its workspaces over)" if os.path.isfile(legacy) else "")
+    if agent:
+        if not AGENT_ID_RE.fullmatch(agent):
+            raise ConfigError(f"agent name {agent!r} must match ^[a-z][a-z0-9-]{{1,47}}$")
+        paths = agent_paths(worker_dir, agent)
+        rel = os.path.relpath(paths["config"], worker_dir)
+        if os.path.exists(paths["config"]):
+            done[rel] = "kept (already exists)"
+        else:
+            os.makedirs(os.path.dirname(paths["config"]), exist_ok=True)
+            write_atomic(paths["config"], json.dumps(agent_template(agent, node, profile), ensure_ascii=False, indent=2) + "\n")
+            done[rel] = "created"
+        for d in (TOKENS_DIR, LOGS_DIR):
+            os.makedirs(os.path.join(worker_dir, d), exist_ok=True)
     out(f"worker dir: {worker_dir}")
     for name, what in done.items():
-        out(f"  {name:<13} {what}")
-    if exchange:
-        init_exchange(worker_dir, env, exchange_dir, out)
+        out(f"  {name:<24} {what}")
+    if agent and exchange:
+        root = os.path.abspath(os.path.expanduser(exchange_dir)) if exchange_dir else agent_paths(worker_dir, agent)["exchange"]
+        created = ensure_exchange(root)
+        out(f"  exchange                 {root} ({'created: ' + ', '.join(created) if created else 'kept (already exists)'})")
     out("next:")
-    out("  1. check .env: DSH_HUB_URL (your hub, e.g. https://hub.example.com:7891), DSH_AGENT_ID, DSH_NODE, DSH_PLATFORM,")
-    out("     DSH_CAPABILITIES, DSH_EXCHANGE; DSH_HUB_PROXY=off (direct); only if check fails: http://127.0.0.1:7890 (Clash)")
-    out("  2. edit profile.json: workspaces {name: local path} (names as in router-b), or dshProfile")
-    out("  3. python agent_client.py check      (reachable through the proxy? which IP does the hub see?)")
+    if not agent:
+        out("  0. python agent_client.py init --agent <name>   (one agents/<name>.json per agent on this machine)")
+    out("  1. worker/.env: DSH_HUB_URL (your hub, e.g. https://hub.example.com:7891); DSH_HUB_PROXY=off unless check fails")
+    out(f"  2. agents/{agent or '<name>'}.json: dshProfile = the local DSH profile's name ({os.path.join(dsh_home(env), PROFILES_DIR)}/<name>),")
+    out("     platform, role, capabilities, maxConcurrency")
+    out("  3. python agent_client.py doctor     (every value, where it came from, and what to fix)")
     out("  4. python agent_client.py register   (then in DSH: agent_requests -> agent_approve)")
     out("  5. python agent_client.py run")
     return 0
@@ -2021,6 +2281,105 @@ def cmd_status(st, wm, make_client, out=print):
     return code
 
 
+SOURCE_ZH = {"cli": "命令行", "env": "进程环境变量", ".env": "worker/.env", "agent": "agent 配置", "profile": "profile.json",
+             "default": "默认", "agents/": "agents/ 下唯一的配置"}
+
+
+def cmd_doctor(wd, env, dotenv, agent, agent_src, wm, st, a, out=print):
+    """Startup self-check: every value and where it came from, plus one line per problem (Chinese, for the
+    person at the machine). Returns 0 when nothing is wrong (warnings allowed), else 1."""
+    bad, notes = [], []
+    home = dsh_home(env)
+    out(f"DSH home     {home}")
+    out(f"worker 目录  {wd}")
+    home_env = read_env_file(os.path.join(home, ".env"), log=lambda *_a: None)
+    leaked = sorted(k for k in home_env if k.startswith("DSH_"))
+    if leaked:
+        bad.append(f"{os.path.join(home, '.env')} 里有 {', '.join(leaked)}：DSH 会拒绝启动。把它们挪到 {os.path.join(wd, '.env')}")
+    stray = sorted(k for k in AGENT_ENV_KEYS if isinstance(dotenv.get(k), str) and dotenv[k].strip())
+    if stray and agent:
+        notes.append(f"worker/.env 里的 {', '.join(stray)} 属于 agent 配置，请挪进 agents/{agent}.json（现在仍生效，并且优先于 agent 配置）")
+    in_proc = sorted(k for k in list(AGENT_ENV_KEYS) + ["DSH_AGENT_ID", "DSH_AGENT_TOKEN_FILE"] if isinstance(env.get(k), str) and env[k].strip())
+    if in_proc:
+        notes.append(f"进程环境变量里设了 {', '.join(in_proc)}，会覆盖 agent 配置；不需要的话从启动脚本或系统环境变量里删掉")
+    if agent:
+        out(f"agent        {agent}（{SOURCE_ZH.get(agent_src, agent_src)}） 配置 {wm.config_path}")
+    elif wm.exists:
+        notes.append(f"还在用旧的 {wm.config_path}；设好 DSH_AGENT_ID 后再跑一次 doctor 会自动迁到 agents/<id>.json")
+        out(f"agent        {st.get('agent_id') or '-'}（旧布局 {wm.config_path}）")
+    else:
+        bad.append("没有 agent 配置：python agent_client.py init --agent <名字> 会建 agents/<名字>.json")
+    if st.get("role") not in ("dispatcher", "observer"):
+        if not wm.profile:
+            bad.append(f"agent 配置里没写 dshProfile：填本机 DSH profile 的名字（{os.path.join(home, PROFILES_DIR)} 下的文件夹名）")
+        elif not os.path.exists(profile_patch_path(wm.profile)):
+            bad.append(f"dshProfile 指向 {wm.profile}，那里没有 cordis.patch.yml")
+        else:
+            out(f"dshProfile   {wm.profile_name or '?'} -> {wm.profile}")
+    names = wm.names()
+    out(f"工作区       {', '.join(names) if names else '-'}")
+    for d in wm.dropped:
+        notes.append(f"工作区 {d['name']} 没上报：{d['reason']}（{d.get('path') or '-'}）")
+    if not names and st.get("role") in ("worker", "tester"):
+        notes.append("没有可用的工作区：只能接不指定工作区的任务")
+    tf = st["token_file"]
+    if os.path.isfile(tf):
+        out(f"token        {tf}")
+        if os.name != "nt" and os.stat(tf).st_mode & 0o077:
+            notes.append(f"{tf} 别人也能读：chmod 600 {tf}")
+    else:
+        notes.append(f"还没注册（没有 {tf}）：python agent_client.py register")
+    ex = st["exchange"]
+    out(f"交换目录     {ex}")
+    if _foreign_drive(ex):
+        bad.append(f"交换目录 {ex} 是 Windows 路径，这台机器用不了")
+    elif os.path.isdir(ex):
+        missing = [d for d in EXCHANGE_DIRS if not os.path.isdir(os.path.join(ex, d))]
+        if missing:
+            notes.append(f"交换目录缺 {', '.join(missing)}；run 启动时会补上")
+        if not os.access(ex, os.W_OK):
+            bad.append(f"交换目录 {ex} 不可写")
+    else:
+        notes.append("交换目录还不存在；run 启动时会建")
+    for other in agent_configs(wd):
+        if other == agent:
+            continue
+        try:
+            o = resolve_workspaces(agent_paths(wd, other)["config"], log=lambda *_a: None, home=home)
+            o_ex = o.machine.get("exchange") or agent_paths(wd, other)["exchange"]
+            if os.path.normcase(os.path.abspath(o_ex)) == os.path.normcase(os.path.abspath(ex)):
+                bad.append(f"agent {other} 和 {agent} 用的是同一个交换目录 {ex}：会互相抢任务")
+        except ConfigError:
+            pass
+    out(f"日志         {st.get('log_file')}")
+    out("")
+    out("设置（值 / 来源）")
+    summary = settings_summary(st)
+    for key in ("hub_url", "proxy", "cafile", "agent_id", "node", "platform", "role", "capabilities", "max_concurrency",
+                "pull_every_seconds", "heartbeat_seconds", "token_file", "exchange"):
+        src = st["sources"].get({"hub_url": "url"}.get(key, key), "-")
+        value = summary.get(key)
+        out(f"  {key:<20} {json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value}  [{SOURCE_ZH.get(src, src)}]")
+    if not st["url"]:
+        bad.append("没有 hub 地址：在 worker/.env 里写 DSH_HUB_URL")
+    elif not a.offline:
+        out("")
+        out("连通性")
+        if run_check(st["url"], st["proxy"], st["no_proxy"], st["cafile"], getattr(a, "insecure", False), 15,
+                     source=_proxy_source(st), out=lambda m: out("  " + m)) != 0:
+            bad.append("连不上 hub：看上面「连通性」的提示")
+    out("")
+    for line in bad:
+        out(f"✗ {line}")
+    for line in notes:
+        out(f"! {line}")
+    if not bad and not notes:
+        out("✓ 一切正常")
+    elif not bad:
+        out("✓ 可以启动（上面的 ! 是提醒）")
+    return 1 if bad else 0
+
+
 def build_parser():
     fmt = argparse.RawDescriptionHelpFormatter
     epilog = config_help()
@@ -2036,10 +2395,15 @@ def build_parser():
 
     i = sub.add_parser("init", help="write .env / profile.json templates (never overwrites) and create the exchange folder", epilog=epilog, formatter_class=fmt)
     i.add_argument("--worker-dir", help="worker folder (default <DSH home>/worker)")
-    i.add_argument("--node", help="node name for profile.json (default: host name)")
-    i.add_argument("--exchange", help="exchange folder to create (default: DSH_EXCHANGE from the environment / .env)")
+    i.add_argument("--agent", help="create agents/<agent>.json, tokens/, logs/ and exchange/<agent>/")
+    i.add_argument("--dsh-profile", help="local DSH profile name for the new agent config (<DSH home>/profiles/<name>)")
+    i.add_argument("--node", help="node name for the agent config (default: host name)")
+    i.add_argument("--exchange", help="exchange folder to create (default: exchange/<agent>)")
     i.add_argument("--no-exchange", action="store_true", help="only write the templates, do not create the exchange folder")
     add("workspaces", "print the local workspace map and file settings, then exit (no network)", net=False)
+    dr = add("doctor", "self-check: every setting and where it came from, the profile, workspaces, token, exchange and the hub", worker=False)
+    dr.add_argument("--offline", action="store_true", help="skip the hub connection test")
+    dr.set_defaults(timeout=15)
     c = add("check", "GET /v1/health through the configured proxy and report (no token)", worker=False)
     c.set_defaults(timeout=15)
     e = add("register", "ask the hub to register this worker, wait for approval, save the token", aliases=("enroll",))
@@ -2083,17 +2447,28 @@ def main(argv=None, env=None):
     try:
         wd = os.path.abspath(os.path.expanduser(a.worker_dir)) if a.worker_dir else default_worker_dir(env)
         if cmd == "init":
-            return cmd_init(wd, a.node, exchange=not a.no_exchange, env=env, exchange_dir=a.exchange)
+            agent_name = a.agent or (env.get("DSH_AGENT") or "").strip() or None
+            return cmd_init(wd, a.node, exchange=not a.no_exchange, env=env, exchange_dir=a.exchange, agent=agent_name,
+                            profile=a.dsh_profile)
         dotenv = read_env_file(os.path.join(wd, ".env"))
+        home = dsh_home(env)
+        if a.profile_file is None and cmd != "claim" and migrate_layout(wd, env, dotenv, home, log=lambda m: print(m, file=sys.stderr)):
+            dotenv = read_env_file(os.path.join(wd, ".env"))
+        agent, agent_src = (None, None) if a.profile_file else select_agent(wd, env, dotenv, a.agent)
+        profile_file = a.profile_file or (agent_paths(wd, agent)["config"] if agent else None)
         raw_map = next((v for v in (env.get("DSH_PATH_MAP"), dotenv.get("DSH_PATH_MAP")) if isinstance(v, str) and v.strip()), "")
-        wm = resolve_workspaces(a.profile_file, a.node, required=a.profile_file is not None, worker_dir=wd,
-                                path_map=parse_path_map(raw_map))
+        wm = resolve_workspaces(profile_file, a.node, required=profile_file is not None, worker_dir=wd,
+                                path_map=parse_path_map(raw_map), home=home)
         cli = {k: getattr(a, k, None) for k in ("cafile", "agent_id", "node", "platform", "capabilities",
                                                 "max_concurrency", "exchange", "heartbeat_seconds",
                                                 "role", "pull_every_seconds")}
         st = resolve_settings(wm, getattr(a, "url", None), getattr(a, "token_file", None), getattr(a, "proxy", None),
-                              getattr(a, "no_proxy", False), env=env, dotenv=dotenv, worker_dir=wd, cli=cli)
+                              getattr(a, "no_proxy", False), env=env, dotenv=dotenv, worker_dir=wd, cli=cli, agent=agent)
         wm.node = st["node"]
+        if cmd == "doctor":
+            return cmd_doctor(wd, env, dotenv, agent, agent_src, wm, st, a)
+        if cmd in ("register", "run", "bridge"):
+            require_profile(st, wm, cmd)
         if cmd == "workspaces":
             out = wm.to_json()
             out["settings"] = settings_summary(st)
