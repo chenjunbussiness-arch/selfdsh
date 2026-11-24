@@ -149,6 +149,17 @@ export function timeline(history: readonly HistoryEvent[]): HistoryEvent[] {
   return out.reverse()
 }
 
+/**
+ * Who registered a task to run it itself, read from the hub's `registered`
+ * history entry ("<controller> runs it itself (<executor>)").
+ */
+export function registeredBy(event: Pick<HistoryEvent, 'event' | 'message'>): { by: string; executor?: string } | undefined {
+  if (event.event !== 'registered') return undefined
+  const match = /^(\S+) runs it itself(?: \((.+)\))?$/.exec(event.message ?? '')
+  if (match === null) return undefined
+  return match[2] === undefined ? { by: match[1] ?? '' } : { by: match[1] ?? '', executor: match[2] }
+}
+
 /** Stage of a task worth naming on its row. */
 export function stageOf(task: Pick<TaskRow, 'stage' | 'status'>): TaskStage | undefined {
   if (task.status === 'completed' || task.status === 'cancelled') return undefined

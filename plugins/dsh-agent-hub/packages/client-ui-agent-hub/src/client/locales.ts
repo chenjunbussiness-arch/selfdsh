@@ -161,6 +161,8 @@ export const zh = {
   'history.worker-lost': 'worker 失联，任务已重排',
   'history.worker-offline': 'worker 离线，任务已重排',
   'history.agent-offline': '派发时 agent 不在线',
+  'history.registered': '{by} 在本地执行',
+  'history.registered.at': '{by} 在本地执行（{executor}）',
   'board.flag.stranded': '{n} 个离线 agent 还占着 {tasks} 个任务（掉线后会自动重排）',
 
   // 调度台 (the board tab): lanes, stages, origin, profile groups, DSH's own workers, fallback, history, session.
@@ -383,6 +385,8 @@ export const en: Record<keyof typeof zh, string> = {
   'history.worker-lost': 'worker lost; task requeued',
   'history.worker-offline': 'worker offline; task requeued',
   'history.agent-offline': 'agent was offline at dispatch',
+  'history.registered': '{by} runs it locally',
+  'history.registered.at': '{by} runs it locally ({executor})',
   'board.flag.stranded': '{n} offline agent(s) still hold {tasks} task(s) (they are requeued automatically)',
   'desk.active': 'Open',
   'desk.active.hint': 'queued, claimed, running and waiting on you',

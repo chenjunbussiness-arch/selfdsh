@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { LANES, agentGroups, fallbackReason, fallbackTasks, laneOf, lanesOf, selfParts, selfWorkers, stageOf, timeline } from '../src/client/desk.ts'
+import { LANES, agentGroups, fallbackReason, fallbackTasks, laneOf, lanesOf, registeredBy, selfParts, selfWorkers, stageOf, timeline } from '../src/client/desk.ts'
 
 const task = (over = {}) => ({ task_id: 't', agent: 'pool:code', type: 'code', title: 'x', status: 'running', priority: 'normal', attempts: 1, created_at: '2026-11-24T10:00:00.000Z', depends_on: [], ...over })
 const agent = (over = {}) => ({ agent_id: 'a', capabilities: [], revoked: false, online: true, running_tasks: [], ...over })
@@ -72,4 +72,11 @@ test('timeline: newest first, empty keep-alives and repeated steps dropped', () 
   assert.deepEqual(events.map(e => e.at), ['5', '3', '1'])
   assert.equal(stageOf(task({ status: 'completed', stage: 'uploading' })), undefined)
   assert.equal(stageOf(task({ stage: 'blocked' })), 'blocked')
+})
+
+test('registeredBy: reads the hub line for a task DSH runs itself', () => {
+  assert.deepEqual(registeredBy({ event: 'registered', message: 'dsh-cloud runs it itself (dsh-self/web/demo)' }), { by: 'dsh-cloud', executor: 'dsh-self/web/demo' })
+  assert.deepEqual(registeredBy({ event: 'registered', message: 'dsh-cloud runs it itself' }), { by: 'dsh-cloud' })
+  assert.equal(registeredBy({ event: 'created', message: 'dsh-cloud runs it itself' }), undefined)
+  assert.equal(registeredBy({ event: 'registered', message: 'something else' }), undefined)
 })

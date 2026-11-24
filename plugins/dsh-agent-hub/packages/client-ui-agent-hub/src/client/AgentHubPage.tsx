@@ -41,7 +41,7 @@ import type { KeyboardEvent, ReactNode } from 'react'
 
 import { AGENT_STATUSES, TASK_STATUSES } from './contract.ts'
 import type { AgentStatus, AgentView, AgentsDoc, HistoryEvent, Overview, RequestView, RequestsDoc, SessionDoc, SessionEntry, TaskDetail, TaskDoc, TaskFilter, TaskRow, TaskStatus, TasksDoc } from './contract.ts'
-import { LANES, agentGroups, fallbackReason, fallbackTasks, lanesOf, selfWorkers, stageOf, timeline } from './desk.ts'
+import { LANES, agentGroups, fallbackReason, fallbackTasks, lanesOf, registeredBy, selfWorkers, stageOf, timeline } from './desk.ts'
 import type { AgentGroup, Lane, SelfWorker } from './desk.ts'
 import { absolute, agentCounts, agentStatus, bytes, clock, percent, presence, relative, sortAgents, until } from './format.ts'
 import { HubIcon } from './HubIcon.tsx'
@@ -255,6 +255,13 @@ function presenceEvent(event: HistoryEvent): PresenceEvent | undefined {
   return found === 'worker-lost' || found === 'worker-offline' || found === 'agent-offline' ? found : undefined
 }
 
+/** A history entry's text; the hub's own English sentence for a task DSH runs itself is said in the page's language. */
+function historyText(event: HistoryEvent, t: Translate): string {
+  const own = registeredBy(event)
+  if (own === undefined) return event.message ?? ''
+  return own.executor === undefined ? t('history.registered', { by: own.by }) : t('history.registered.at', { by: own.by, executor: own.executor })
+}
+
 /** Enter / Space activate a focusable row. */
 function onActivate(run: () => void): (event: KeyboardEvent<HTMLElement>) => void {
   return (event) => {
@@ -399,8 +406,10 @@ function EmbeddedFold({ part, title, count, note, open, onToggle, tools, childre
 }
 
 /** One hub agent: id and state, then platform · mode · load · client version · heartbeat. */
-function AgentItem({ agent, now, t, onTask }: {
+function AgentItem({ agent, titles, now, t, onTask }: {
   readonly agent: AgentView
+  /** Task titles by id, so a chip names the work rather than its id. */
+  readonly titles?: ReadonlyMap<string, string>
   readonly now: number
   readonly t: Translate
   readonly onTask: (id: string) => void
@@ -433,9 +442,12 @@ function AgentItem({ agent, now, t, onTask }: {
         {agent.running_tasks.length > 0
           ? (
             <span className="dah-chips">
-              {agent.running_tasks.map(id => (
-                <button key={id} type="button" className="dah-chip dah-id" onClick={() => { onTask(id) }}>{id}</button>
-              ))}
+              {agent.running_tasks.map(id => {
+                const title = titles?.get(id)
+                return title === undefined
+                  ? <button key={id} type="button" className="dah-chip dah-id" onClick={() => { onTask(id) }}>{id}</button>
+                  : <button key={id} type="button" className="dah-chip" title={id} onClick={() => { onTask(id) }}>{title}</button>
+              })}
             </span>
           )
           : null}
@@ -495,6 +507,7 @@ function EmbeddedAgents({ agents, tasks, loaded, now, t, onTask }: {
   const [showDormant, setShowDormant] = useState(false)
   const { groups, dormant } = useMemo(() => agentGroups(agents), [agents])
   const selves = useMemo(() => selfWorkers(tasks), [tasks])
+  const titles = useMemo(() => new Map(tasks.filter(task => task.title !== '').map(task => [task.task_id, task.title])), [tasks])
   // Profiles that only DSH's own workers use still get a group.
   const all: AgentGroup[] = [...groups]
   for (const profile of selves.keys()) {
@@ -511,7 +524,7 @@ function EmbeddedAgents({ agents, tasks, loaded, now, t, onTask }: {
           <div key={`${group.kind}:${group.key}`} className="dah-sub">
             {all.length > 1 || group.kind !== 'none' ? <div className="dah-sub-head">{groupTitle(group, t)}</div> : null}
             <ul className="dah-list">
-              {group.agents.map(agent => <AgentItem key={agent.agent_id} agent={agent} now={now} t={t} onTask={onTask} />)}
+              {group.agents.map(agent => <AgentItem key={agent.agent_id} agent={agent} titles={titles} now={now} t={t} onTask={onTask} />)}
               {mine.map(worker => <SelfItem key={worker.id} worker={worker} t={t} onTask={onTask} />)}
             </ul>
           </div>
@@ -524,7 +537,7 @@ function EmbeddedAgents({ agents, tasks, loaded, now, t, onTask }: {
               {showDormant ? t('dormant.hide') : t('dormant.show', { n: dormant.length })}
             </button>
             {showDormant
-              ? <ul className="dah-list">{dormant.map(agent => <AgentItem key={agent.agent_id} agent={agent} now={now} t={t} onTask={onTask} />)}</ul>
+              ? <ul className="dah-list">{dormant.map(agent => <AgentItem key={agent.agent_id} agent={agent} titles={titles} now={now} t={t} onTask={onTask} />)}</ul>
               : null}
           </div>
         )
@@ -993,7 +1006,9 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }: {
   const task: TaskDetail | undefined = detail.data?.task
   const result = task?.result
   const history = task === undefined ? [] : timeline(task.history)
-  const reason = task === undefined || task.fallback_by === undefined ? undefined : fallbackReason(task.history)
+  // A task DSH registered as its own from the start was never taken over, whatever fallback_by says.
+  const takenOver = task !== undefined && task.origin?.kind !== 'local' && task.fallback_by !== undefined && task.fallback_by !== ''
+  const reason = task === undefined || !takenOver ? undefined : fallbackReason(task.history)
   const failed = task !== undefined && (task.status === 'failed' || task.status === 'dead')
   return (
     <div className="dah-detail" role="region" aria-label={t('detail.title')}>
@@ -1017,7 +1032,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }: {
                 : null}
               {present(task.dsh_profile) ? <div><dt>{t('detail.meta.profile')}</dt><dd className="dah-id">{task.dsh_profile}</dd></div> : null}
               {task.stage !== undefined ? <div><dt>{t('detail.meta.stage')}</dt><dd>{t(`stage.${task.stage}`)}</dd></div> : null}
-              {task.fallback_by !== undefined
+              {takenOver
                 ? <div><dt>{t('detail.meta.fallback')}</dt><dd>{`${t(FALLBACK_KEY[reason ?? 'other'])} · ${task.fallback_by}`}</dd></div>
                 : null}
               <div><dt>{t('detail.meta.target')}</dt><dd className="dah-id">{task.agent}</dd></div>
@@ -1129,7 +1144,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }: {
                           <span className="dah-history-event">{event.stage !== undefined ? t(`stage.${event.stage}`) : event.event ?? ''}</span>
                           <span>
                             {flag === undefined ? null : <span className="dah-history-flag">{t(PRESENCE_KEY[flag])}</span>}
-                            {event.message ?? ''}
+                            {historyText(event, t)}
                           </span>
                         </li>
                       )

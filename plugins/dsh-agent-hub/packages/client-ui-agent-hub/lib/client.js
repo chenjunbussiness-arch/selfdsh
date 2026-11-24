@@ -120,6 +120,12 @@ function timeline(history) {
   }
   return out.reverse();
 }
+function registeredBy(event) {
+  if (event.event !== "registered") return void 0;
+  const match = /^(\S+) runs it itself(?: \((.+)\))?$/.exec(event.message ?? "");
+  if (match === null) return void 0;
+  return match[2] === void 0 ? { by: match[1] ?? "" } : { by: match[1] ?? "", executor: match[2] };
+}
 function stageOf(task) {
   if (task.status === "completed" || task.status === "cancelled") return void 0;
   return task.stage;
@@ -454,6 +460,11 @@ function presenceEvent(event) {
   const found = match?.[1];
   return found === "worker-lost" || found === "worker-offline" || found === "agent-offline" ? found : void 0;
 }
+function historyText(event, t) {
+  const own = registeredBy(event);
+  if (own === void 0) return event.message ?? "";
+  return own.executor === void 0 ? t("history.registered", { by: own.by }) : t("history.registered.at", { by: own.by, executor: own.executor });
+}
 function onActivate(run) {
   return (event) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -554,7 +565,7 @@ function EmbeddedFold({ part, title, count, note, open, onToggle, tools, childre
     open ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-group-body", children }) : null
   ] });
 }
-function AgentItem({ agent, now, t, onTask }) {
+function AgentItem({ agent, titles, now, t, onTask }) {
   const status = agentStatus(agent);
   const meta = [
     agent.platform,
@@ -578,9 +589,14 @@ function AgentItem({ agent, now, t, onTask }) {
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AgentBadge, { agent, t })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-meta", children: meta.join(" \xB7 ") }),
-    agent.running_tasks.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-chips", children: agent.running_tasks.map((id) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-chip dah-id", onClick: () => {
-      onTask(id);
-    }, children: id }, id)) }) : null
+    agent.running_tasks.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-chips", children: agent.running_tasks.map((id) => {
+      const title = titles?.get(id);
+      return title === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-chip dah-id", onClick: () => {
+        onTask(id);
+      }, children: id }, id) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-chip", title: id, onClick: () => {
+        onTask(id);
+      }, children: title }, id);
+    }) }) : null
   ] }) });
 }
 function SelfItem({ worker, t, onTask }) {
@@ -608,6 +624,7 @@ function EmbeddedAgents({ agents, tasks, loaded, now, t, onTask }) {
   const [showDormant, setShowDormant] = (0, import_react.useState)(false);
   const { groups, dormant } = (0, import_react.useMemo)(() => agentGroups(agents), [agents]);
   const selves = (0, import_react.useMemo)(() => selfWorkers(tasks), [tasks]);
+  const titles = (0, import_react.useMemo)(() => new Map(tasks.filter((task) => task.title !== "").map((task) => [task.task_id, task.title])), [tasks]);
   const all = [...groups];
   for (const profile of selves.keys()) {
     if (!all.some((group) => group.kind === "profile" && group.key === profile)) {
@@ -621,7 +638,7 @@ function EmbeddedAgents({ agents, tasks, loaded, now, t, onTask }) {
       return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-sub", children: [
         all.length > 1 || group.kind !== "none" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-sub-head", children: groupTitle(group, t) }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("ul", { className: "dah-list", children: [
-          group.agents.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AgentItem, { agent, now, t, onTask }, agent.agent_id)),
+          group.agents.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AgentItem, { agent, titles, now, t, onTask }, agent.agent_id)),
           mine.map((worker) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(SelfItem, { worker, t, onTask }, worker.id))
         ] })
       ] }, `${group.kind}:${group.key}`);
@@ -630,7 +647,7 @@ function EmbeddedAgents({ agents, tasks, loaded, now, t, onTask }) {
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-link", title: t("dormant.hint"), "aria-expanded": showDormant, onClick: () => {
         setShowDormant((value) => !value);
       }, children: showDormant ? t("dormant.hide") : t("dormant.show", { n: dormant.length }) }),
-      showDormant ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-list", children: dormant.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AgentItem, { agent, now, t, onTask }, agent.agent_id)) }) : null
+      showDormant ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-list", children: dormant.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AgentItem, { agent, titles, now, t, onTask }, agent.agent_id)) }) : null
     ] }) : null
   ] });
 }
@@ -951,7 +968,8 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
   const task = detail.data?.task;
   const result = task?.result;
   const history = task === void 0 ? [] : timeline(task.history);
-  const reason = task === void 0 || task.fallback_by === void 0 ? void 0 : fallbackReason(task.history);
+  const takenOver = task !== void 0 && task.origin?.kind !== "local" && task.fallback_by !== void 0 && task.fallback_by !== "";
+  const reason = task === void 0 || !takenOver ? void 0 : fallbackReason(task.history);
   const failed = task !== void 0 && (task.status === "failed" || task.status === "dead");
   return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-detail", role: "region", "aria-label": t("detail.title"), children: [
     /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-detail-head", children: [
@@ -983,7 +1001,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("detail.meta.stage") }),
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: t(`stage.${task.stage}`) })
         ] }) : null,
-        task.fallback_by !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+        takenOver ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("detail.meta.fallback") }),
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: `${t(FALLBACK_KEY[reason ?? "other"])} \xB7 ${task.fallback_by}` })
         ] }) : null,
@@ -1085,7 +1103,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
             /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-event", children: event.stage !== void 0 ? t(`stage.${event.stage}`) : event.event ?? "" }),
             /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
               flag === void 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-flag", children: t(PRESENCE_KEY[flag]) }),
-              event.message ?? ""
+              historyText(event, t)
             ] })
           ] }, `${event.at ?? ""}-${String(index)}`);
         }) })
@@ -1820,6 +1838,8 @@ var zh = {
   "history.worker-lost": "worker \u5931\u8054\uFF0C\u4EFB\u52A1\u5DF2\u91CD\u6392",
   "history.worker-offline": "worker \u79BB\u7EBF\uFF0C\u4EFB\u52A1\u5DF2\u91CD\u6392",
   "history.agent-offline": "\u6D3E\u53D1\u65F6 agent \u4E0D\u5728\u7EBF",
+  "history.registered": "{by} \u5728\u672C\u5730\u6267\u884C",
+  "history.registered.at": "{by} \u5728\u672C\u5730\u6267\u884C\uFF08{executor}\uFF09",
   "board.flag.stranded": "{n} \u4E2A\u79BB\u7EBF agent \u8FD8\u5360\u7740 {tasks} \u4E2A\u4EFB\u52A1\uFF08\u6389\u7EBF\u540E\u4F1A\u81EA\u52A8\u91CD\u6392\uFF09",
   // 调度台 (the board tab): lanes, stages, origin, profile groups, DSH's own workers, fallback, history, session.
   "desk.active": "\u5728\u529E",
@@ -2027,6 +2047,8 @@ var en = {
   "history.worker-lost": "worker lost; task requeued",
   "history.worker-offline": "worker offline; task requeued",
   "history.agent-offline": "agent was offline at dispatch",
+  "history.registered": "{by} runs it locally",
+  "history.registered.at": "{by} runs it locally ({executor})",
   "board.flag.stranded": "{n} offline agent(s) still hold {tasks} task(s) (they are requeued automatically)",
   "desk.active": "Open",
   "desk.active.hint": "queued, claimed, running and waiting on you",

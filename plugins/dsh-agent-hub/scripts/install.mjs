@@ -150,5 +150,5 @@ if (!uninstall) {
   if (!existsSync(controllerEnv)) {
     console.log(`\n还没有控制方配置：把 ${join(BUNDLE, 'controller.env.example')}\n  复制到 ${controllerEnv}，填好 DSH_HUB_URL、DSH_HUB_CONTROLLER_ID、DSH_HUB_TOKEN（不要写进 ${join(dshHome, '.env')}）。`)
   }
-  console.log('\nNext: restart the service that owns this profile (the operator decides when), then check the log for\n  "agent-hub: config hubUrl=..." and "agent-hub: mounted /api/agent-hub/admin/*", then try agent_list in DSH\n  and open the "Agent" tab of the task board.')
+  console.log('\nNext: restart the service that owns this profile (the operator decides when), then check the log for\n  "agent-hub: config hubUrl=..." and "agent-hub: mounted /api/agent-hub/admin/*", then try agent_list in DSH\n  and open the "调度台" tab of the task board (the dispatch desk).')
 }
