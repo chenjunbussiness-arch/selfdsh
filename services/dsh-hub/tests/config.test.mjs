@@ -19,6 +19,7 @@ test('defaults: port 7891, 127.0.0.1 without TLS, no allow list, v1 timings', ()
     port: DEFAULT_PORT, host: '127.0.0.1', tls: undefined, allow: [], trustProxy: false, autoApprove: false,
     maxRetries: 2, offlineAfterMs: 90_000, sweepIntervalMs: 15_000, maxResultBytes: 20 * 1024 * 1024,
     fallback: { enabled: true, noFallbackCapabilities: ['quick'] }, sticky: { holdSeconds: 120, ttlSeconds: 86400 }, mcp: { enabled: true },
+    expiry: { doneHours: 12, failedHours: 48, dormantHours: 72, archiveHours: 168 },
   })
   assert.equal(DEFAULT_PORT, 7891)
   assert.notEqual(DEFAULT_PORT, 7890, '7890 is the Clash/mihomo proxy port on MYDESK')

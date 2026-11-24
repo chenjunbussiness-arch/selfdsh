@@ -27,7 +27,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { compileAllow, DEFAULT_MAX_RESULT_BYTES, resolveListenHost } from './http.js'
 
 export const DEFAULT_PORT = 7891
-export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'sticky', 'mcp', 'autoApprove']
+export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'sticky', 'mcp', 'autoApprove', 'expiry']
 
 /** A configuration problem: the service must not start (exit code 78, EX_CONFIG). */
 export class ConfigError extends Error {}
@@ -96,6 +96,14 @@ export function resolveConfig(raw = {}, { env = {}, dir = '.' } = {}) {
   }
   const st = raw.sticky ?? {}
   if (typeof st !== 'object' || Array.isArray(st) || st === null) throw new ConfigError('hub.json: sticky must be an object')
+  const ex = raw.expiry ?? {}
+  if (typeof ex !== 'object' || Array.isArray(ex) || ex === null) throw new ConfigError('hub.json: expiry must be an object')
+  const hoursOf = (key, fallback) => {
+    const v = ex[key]
+    if (v === undefined) return fallback
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 24 * 3650) throw new ConfigError(`hub.json: expiry.${key} must be a number of hours > 0`)
+    return v
+  }
   const mcp = raw.mcp ?? {}
   if (typeof mcp !== 'object' || Array.isArray(mcp) || mcp === null || (mcp.enabled !== undefined && typeof mcp.enabled !== 'boolean')) throw new ConfigError('hub.json: mcp must be {"enabled": true|false}')
 
@@ -106,6 +114,8 @@ export function resolveConfig(raw = {}, { env = {}, dir = '.' } = {}) {
       ttlSeconds: integer(st.ttlSeconds, 'sticky.ttlSeconds', 60, 30 * 86400, 86400),
     },
     mcp: { enabled: mcp.enabled !== false },
+    // When finished data leaves the default views (hours): see hub.js DEFAULT_EXPIRY.
+    expiry: { doneHours: hoursOf('doneHours', 12), failedHours: hoursOf('failedHours', 48), dormantHours: hoursOf('dormantHours', 72), archiveHours: hoursOf('archiveHours', 168) },
     port, host, tls, allow: [...allow], trustProxy: raw.trustProxy === true, autoApprove,
     maxRetries: integer(raw.maxRetries, 'maxRetries', 0, 20, 2),
     offlineAfterMs: integer(raw.offlineAfterMs, 'offlineAfterMs', 1000, 7 * 86400_000, 90_000),

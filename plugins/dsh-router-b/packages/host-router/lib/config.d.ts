@@ -180,6 +180,12 @@ export interface RouterConfig {
      */
     readonly screenshotCommand?: string;
     /**
+     * Server scripts named in the worker brief: `build` builds host plugin code
+     * without touching the running copy, `restart` restarts DSH safely (the
+     * human runs it). Nothing is said about either when it is not set.
+     */
+    readonly hostScripts?: HostScripts;
+    /**
      * 快任务: small jobs outside every workspace (machine settings, a git command,
      * installing a tool). On by default; `false` turns it off.
      */
@@ -383,19 +389,28 @@ export declare function resolveRouteSmart(partitions: readonly Partition[], inpu
     readonly partition?: string;
     readonly files?: readonly string[];
 }, options?: SmartRouteOptions): Promise<RouteDecision>;
+/** Server scripts a worker may be told about. Each is named in the brief only when configured. */
+export interface HostScripts {
+    /** Builds host plugin code somewhere safe (for example into `lib.next/`) without touching the running copy. */
+    readonly build?: string;
+    /** Restarts DSH safely; run by the human, so the brief only names it. */
+    readonly restart?: string;
+}
 /**
  * The standing brief a worker receives before its task body.
  *
  * A worker is a fresh session with no memory of the conversation that produced
- * the task, so the partition's identity, its acceptance command, and the
- * reporting contract all travel in the prompt. Completion is phrased as a
- * request for evidence, never as an assertion the worker may make about itself:
- * the router decides acceptance, not the worker.
+ * the task, so the partition's identity, its scope and the reporting contract
+ * travel in the prompt. Acceptance commands are run once, by the router, after
+ * the worker answers; the brief names them so the worker knows the bar, but
+ * does not ask the worker to run them as well. Server script paths come from
+ * the router config (`hostScripts`) and are left out when it has none.
  * @param partition - the partition the worker runs in.
- * @param options - whether acceptance commands are configured and will be run.
+ * @param options - whether acceptance commands will be run, the task id, and the configured host scripts.
  * @returns the brief text.
  */
 export declare function partitionBrief(partition: Partition, options: {
     readonly verify: boolean;
     readonly taskId?: string;
+    readonly hostScripts?: HostScripts;
 }): string;

@@ -194,6 +194,12 @@ export interface RouterConfig {
    */
   readonly screenshotCommand?: string
   /**
+   * Server scripts named in the worker brief: `build` builds host plugin code
+   * without touching the running copy, `restart` restarts DSH safely (the
+   * human runs it). Nothing is said about either when it is not set.
+   */
+  readonly hostScripts?: HostScripts
+  /**
    * 快任务: small jobs outside every workspace (machine settings, a git command,
    * installing a tool). On by default; `false` turns it off.
    */
@@ -785,94 +791,76 @@ const NETWORK_BRIEF: Readonly<Record<PartitionNetwork, string>> = {
     + 'service; if the task needs one, stop and report which one.',
 }
 
+/** Server scripts a worker may be told about. Each is named in the brief only when configured. */
+export interface HostScripts {
+  /** Builds host plugin code somewhere safe (for example into `lib.next/`) without touching the running copy. */
+  readonly build?: string
+  /** Restarts DSH safely; run by the human, so the brief only names it. */
+  readonly restart?: string
+}
+
 /**
  * The standing brief a worker receives before its task body.
  *
  * A worker is a fresh session with no memory of the conversation that produced
- * the task, so the partition's identity, its acceptance command, and the
- * reporting contract all travel in the prompt. Completion is phrased as a
- * request for evidence, never as an assertion the worker may make about itself:
- * the router decides acceptance, not the worker.
+ * the task, so the partition's identity, its scope and the reporting contract
+ * travel in the prompt. Acceptance commands are run once, by the router, after
+ * the worker answers; the brief names them so the worker knows the bar, but
+ * does not ask the worker to run them as well. Server script paths come from
+ * the router config (`hostScripts`) and are left out when it has none.
  * @param partition - the partition the worker runs in.
- * @param options - whether acceptance commands are configured and will be run.
+ * @param options - whether acceptance commands will be run, the task id, and the configured host scripts.
  * @returns the brief text.
  */
-export function partitionBrief(partition: Partition, options: { readonly verify: boolean; readonly taskId?: string }): string {
+export function partitionBrief(
+  partition: Partition,
+  options: { readonly verify: boolean; readonly taskId?: string; readonly hostScripts?: HostScripts },
+): string {
   if (partition.quick === true) return quickBrief(partition, options)
   const lines = [
-    `You are a worker for the "${partition.name}" partition of this workspace.`,
-    `Your working directory is ${partition.dir}; it is your whole scope.`,
+    `You are a worker for the "${partition.name}" partition; your working directory is ${partition.dir}.`,
+    'For work of three or more steps, keep a `todo_write` checklist (the board shows it); skip it for small jobs.',
     '',
-    'Checklist (required; the task board reads it live): first call `todo_write` with 3 to 8 steps, update it as each',
-    'step finishes (one in_progress at a time), and mark all completed before your final answer.',
+    'Rules:',
+    `- Change files only under ${partition.dir}${partition.include === undefined ? '' : ' that match the member globs'}; reading elsewhere is fine.`,
+    '- If you need a change outside this partition or another task first, call `task_suspend`'
+      + (options.taskId === undefined ? '' : ` ("${options.taskId}")`)
+      + ' with a one-line `reason` and a self-contained `prerequisite` (plus `partition` if it belongs elsewhere), then end.',
+    '- Run only the tests that cover what you changed; a full suite only when the task asks for it.',
+    '- Do not probe the environment up front. If something you need is missing, say what in your report.',
+    '- Server changes (services, system files, media, DNS, firewall, users) go through `ops_run`.',
+    '- Never write a host plugin\'s `lib/` and never stop or restart DSH. Client bundles may be rebuilt.',
   ]
-  lines.push(
-    '',
-    'Partition rules (required):',
-    `- Change files only under ${partition.dir}${partition.include === undefined ? '' : ' that match the member globs below'}; reading elsewhere is fine.`,
-    '- If finishing needs a change outside this partition or work another task must do first, do not do it or',
-    '  guess: call `task_suspend` with your task id' + (options.taskId === undefined ? '' : ` ("${options.taskId}")`)
-      + ', a one-line `reason` and a self-contained `prerequisite`',
-    '  (add `partition` if it belongs elsewhere), then end. The router resumes this session when it is done.',
-    '- List every path you changed, relative to the partition root, under `touched:` in your report.',
-  )
-  if (partition.include !== undefined) {
-    lines.push(`Member files are selected by: ${partition.include.join(', ')}.`)
+  const scripts = options.hostScripts
+  if (scripts?.build !== undefined && scripts.build.trim() !== '') {
+    lines.push(`- Build host code with \`${scripts.build.trim()}\` and say a restart is needed`
+      + (scripts.restart !== undefined && scripts.restart.trim() !== '' ? ` (the human runs \`${scripts.restart.trim()}\`).` : '.'))
   }
+  lines.push('- For UI or site evidence use `browser_capture` and list the image paths in your report.')
+  if (partition.include !== undefined) lines.push(`Member files: ${partition.include.join(', ')}.`)
   if (partition.exclude !== undefined && partition.exclude.length > 0) {
-    lines.push(`Files outside scope: ${partition.exclude.join(', ')}.`)
+    lines.push(`Out of scope: ${partition.exclude.join(', ')}.`)
   }
   if (partition.brief !== undefined && partition.brief.trim() !== '') {
     lines.push('', 'Standing instructions for this partition:', partition.brief.trim())
   }
-  if (partition.network !== undefined) {
-    lines.push('', NETWORK_BRIEF[partition.network])
-  }
+  if (partition.network !== undefined) lines.push('', NETWORK_BRIEF[partition.network])
   if (partition.git !== undefined) {
     const gitRules = [
-      partition.git.branch === undefined
-        ? undefined
-        : `Work on branch "${partition.git.branch}". Create it from the current HEAD if it does not exist.`,
-      'Never switch branches, never reset, never clean, never force-push: this working tree is shared '
-        + 'with a human and with other agents, and those operations move work that is not yours.',
+      partition.git.branch === undefined ? undefined : `Work on branch "${partition.git.branch}" (create it from HEAD if missing).`,
+      'Never switch branches, reset, clean or force-push: the tree is shared.',
       partition.git.rule,
     ].filter((rule): rule is string => rule !== undefined && rule.trim() !== '')
     if (partition.git.scm !== undefined) {
-      gitRules.push(
-        `Code host: ${partition.git.scm.provider} ${partition.git.scm.repo}. When your change is committed, publish it with `
-          + '`git_publish` (it pushes the current branch and opens or updates its pull request); read CI with `pr_status`. '
-          + 'Never merge yourself and never push the default branch: a merge is `pr_merge`, which waits for the human.',
-      )
+      gitRules.push(`Code host: ${partition.git.scm.provider} ${partition.git.scm.repo}. Publish a committed change with \`git_publish\`, `
+        + 'read CI with `pr_status`; never merge or push the default branch (`pr_merge` waits for the human).')
     }
-    if (gitRules.length > 0) lines.push('', 'Git rules for this partition:', ...gitRules)
+    if (gitRules.length > 0) lines.push('', 'Git:', ...gitRules)
   }
-  lines.push(
-    '',
-    'Server commands: anything that changes the server (services, system files, media, DNS, firewall, users) goes '
-      + 'through `ops_run`, never your own shell. Read-only looks may use either.',
-  )
   if (options.verify && partition.verify !== undefined && partition.verify.length > 0) {
-    lines.push(
-      '',
-      'Acceptance is decided by these commands, run afterwards in your working directory:',
-      ...partition.verify.map(command => `  ${command}`),
-      'Run them yourself before answering, and report their exact output rather than a summary.',
-    )
+    lines.push('', 'After you answer, the router runs these acceptance commands once:', ...partition.verify.map(command => `  ${command}`))
   }
-  lines.push(
-    '',
-    'DSH itself (required): never write a host plugin\'s `lib/` and never stop or restart DSH. Build host code with',
-    '`/srv/workspace/deepseek-harness/dsh-router-b/scripts/safe-build-host.sh` (writes `lib.next/`) and say a restart',
-    'is needed; the human runs `scripts/safe-restart.sh`. Client bundles (`client-ui-*/lib/client.js`) are safe to rebuild.',
-    '',
-    'Screenshots: for a web page or UI, capture evidence with `/srv/workspace/bin/screenshot <url> <out.png> [--full] [--wait ms]`',
-    `(one capture, then it exits; never keep a browser running). Save under \`${partition.dir}/.dsh-artifacts/${options.taskId ?? '<task-id>'}/\``,
-    'and list each absolute image path in your report.',
-    '',
-    ...REPORT_INSTRUCTION,
-    '',
-    'Only report what you actually observed (command output, page text, files you checked).',
-  )
+  lines.push('', ...REPORT_INSTRUCTION, 'Only report what you actually observed.')
   return lines.join('\n')
 }
 
@@ -883,23 +871,18 @@ export function partitionBrief(partition: Partition, options: { readonly verify:
  */
 function quickBrief(partition: Partition, options: { readonly taskId?: string }): string {
   return [
-    'You are a worker for 快任务 (quick jobs): one small job that belongs to no project workspace, such as a',
-    'machine setting, a git command, installing a tool, or checking a port, a process or the disk.',
-    `Your working directory is ${partition.dir}; cd elsewhere when the job names another place.`,
+    'You are a 快任务 worker: one small job outside every project workspace (a machine setting, a git command,',
+    `a tool install, a port, process or disk check). Your working directory is ${partition.dir}; cd where the job says.`,
     '',
-    'Rules (hard requirement):',
-    '- Do exactly the job asked, with as few steps as it takes, then answer. Do not plan with `todo_write`.',
-    '- Do not edit the source code of a project workspace. If the job turns out to be project work, stop and',
-    '  say so in one line; the router will send it to that workspace.',
-    '- Never switch branches, reset, clean or force-push in a repository you did not create for this job.',
-    '- Anything that changes the machine in a way that is hard to undo (restart or stop a service, delete files,',
-    '  firewall, users, reboot, force-push, package removal) goes through `ops_run`, never your own shell:',
-    '  it is logged and the dangerous ones wait for the human to press 同意. Installing a tool, setting a',
-    '  config value and read-only looks may use the shell.',
-    '- Never print a secret value (token, password, key) in your answer; say where it is set instead.',
+    'Rules:',
+    '- Do just the job in as few steps as it takes. No `todo_write` plan.',
+    '- Do not edit a project workspace\'s source; if the job is project work, say so in one line and stop.',
+    '- Never switch branches, reset, clean or force-push a repository you did not create for this job.',
+    '- Hard-to-undo machine changes (stop or restart a service, delete files, firewall, users, reboot, package',
+    '  removal) go through `ops_run`; installs, config values and read-only looks may use the shell.',
+    '- Never print a secret; say where it is set.',
     ...options.taskId === undefined ? [] : [`- Your task id is ${options.taskId}.`],
     '',
-    'Answer in two to five lines: what you ran and what came out (the exact value, version or error).',
-    'Only report what you actually observed.',
+    'Answer in two to five lines: what you ran and what came out (exact value, version or error). Only report what you observed.',
   ].join('\n')
 }

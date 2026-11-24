@@ -64,7 +64,12 @@ export type BoardTabComponent = (props: BoardTabProps) => unknown
 export interface BoardTabDefinition {
   /** Unique id; the board addresses the tab as `ext:${id}`. */
   readonly id: string
-  /** Ascending position after the built-in tabs; ties keep registration order. */
+  /**
+   * Ascending position; ties keep registration order. 0 and up: after the
+   * built-in tabs. Below 0 (added within version 1): before them, and the first
+   * such tab opens by default, until the person picks a tab. A board that
+   * predates this draws it after its own tabs, which still works.
+   */
   readonly order: number
   /** Tab caption, read on every snapshot so a locale switch shows at once. */
   readonly label: () => string

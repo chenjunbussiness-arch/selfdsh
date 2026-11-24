@@ -52,6 +52,12 @@ export interface AgentView {
   left_at?: string
   running_tasks: string[]
   created_at?: string
+  /** Machine the agent runs on (registration). */
+  node?: string
+  /** Local DSH profile the agent belongs to (agents/<id>.json `dshProfile`). */
+  dsh_profile?: string
+  /** Revoked, or silent longer than the hub's dormant window (3 days): out of the default list. */
+  dormant?: boolean
 }
 
 /** `GET /api/agent-hub/admin/overview` (hub.overview()). */
@@ -68,6 +74,8 @@ export interface Overview {
   pending_requests: number
   /** Tasks DSH may do itself now (no worker for them online, or busy too long). */
   fallback_due?: number
+  /** Agents in 已停用. */
+  dormant_agents?: number
 }
 
 /** `GET /api/agent-hub/admin/agents`. */
@@ -110,6 +118,24 @@ export interface TaskRow {
   created_at: string
   lease_until?: string
   depends_on: string[]
+  /** Controller that ran it itself when no worker took it. */
+  fallback_by?: string
+  /** Local DSH profile it belongs to. */
+  dsh_profile?: string
+  /** Who published it; `local` = a DSH ran it itself and only reports it here. */
+  origin?: TaskOrigin
+  /** Last reported stage of the executor. */
+  stage?: TaskStage
+  updated_at?: string
+  finished_at?: string
+  /** A failed task someone put away (it is then in 历史). */
+  acknowledged?: boolean
+  /** Past its expiry window: only in 历史. */
+  in_history?: boolean
+  /** A local task whose DSH has not reported for a while (it is never failed for that). */
+  quiet?: boolean
+  /** Number of session entries stored for it. */
+  session_entries?: number
   result?: {
     status: 'completed' | 'failed' | 'partial'
     summary?: string
@@ -119,10 +145,22 @@ export interface TaskRow {
   }
 }
 
+/** Executor stages (progress.jsonl `stage`). */
+export type TaskStage = 'received' | 'started' | 'step' | 'blocked' | 'needs_input' | 'uploading'
+
+export const TASK_STAGES: readonly TaskStage[] = ['received', 'started', 'step', 'blocked', 'needs_input', 'uploading']
+
+export interface TaskOrigin {
+  kind: 'controller' | 'agent' | 'local'
+  by?: string
+  /** For a local task: `dsh-self/<profile>/<partition>`. */
+  executor?: string
+}
+
 /** `GET /api/agent-hub/admin/tasks`. */
 export interface TasksDoc {
   generated_at: string
-  filter: { status: string; agent?: string; limit: number }
+  filter: { status: string; agent?: string; limit: number; history?: HistoryView }
   tasks: TaskRow[]
 }
 
@@ -131,6 +169,7 @@ export interface HistoryEvent {
   at?: string
   event?: string
   message?: string
+  stage?: TaskStage
 }
 
 /** Task detail (`GET /api/agent-hub/admin/task?task_id=`). */
@@ -180,8 +219,32 @@ export interface RequestsDoc {
 }
 
 /** Task-list filter the page keeps. */
+/** Which tasks a list shows: the default view, only the expired ones, or both. */
+export type HistoryView = 'hide' | 'only' | 'include'
+
 export interface TaskFilter {
   status: TaskStatus | 'all'
   agent: string
   limit: number
+  /** Absent = `hide` (the hub's default). */
+  history?: HistoryView
+}
+
+/** One entry of a task's stored session (already redacted by the hub). */
+export interface SessionEntry {
+  index?: number
+  at?: string
+  role?: string
+  name?: string
+  by?: string
+  text?: string
+}
+
+export interface SessionDoc {
+  generated_at: string
+  task_id: string
+  total: number
+  next?: number
+  full: boolean
+  entries: SessionEntry[]
 }

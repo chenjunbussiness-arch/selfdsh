@@ -10,7 +10,7 @@
 export const NS = 'router.board'
 
 const zh = {
-  'panel.title': '任务板',
+  'panel.title': '调度台',
   'panel.subtitle': '{partitions} 个分区 · {workers} 个 worker',
   'board.updated': '更新于 {time}',
   'board.mock': '示例数据',
@@ -150,8 +150,9 @@ const zh = {
   'compact.state.stale': '已失效',
 
   // Right-Sidebar task rail: segment strip, group captions, header actions.
-  'board.title': '任务',
+  'board.title': '调度台',
   'seg.active': '进行中',
+  'seg.local': '本机',
   'seg.workspace': '工作区',
   'seg.resolved': '已结束',
   'grp.running': '进行中',
@@ -404,7 +405,7 @@ const zh = {
 }
 
 const en: typeof zh = {
-  'panel.title': 'Task board',
+  'panel.title': 'Dispatch',
   'panel.subtitle': '{partitions} partitions · {workers} workers',
   'board.updated': 'updated {time}',
   'board.mock': 'sample',
@@ -544,8 +545,9 @@ const en: typeof zh = {
   'compact.state.stale': 'Stale',
 
   // Right-Sidebar task rail: segment strip, group captions, header actions.
-  'board.title': 'Tasks',
+  'board.title': 'Dispatch',
   'seg.active': 'Active',
+  'seg.local': 'Local',
   'seg.workspace': 'Workspace',
   'seg.resolved': 'Resolved',
   'grp.running': 'Running',

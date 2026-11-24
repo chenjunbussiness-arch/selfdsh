@@ -559,9 +559,9 @@ test('the worker brief bounds what gets delivered back to the dispatcher', async
   const brief = h.starts[0].prompt[0].text
   // The delivered text is the worker's last message, so the brief must say that
   // out loud: `delivery: 'parent'` hands it straight into the dispatcher's context.
-  assert.match(brief, /final message is the only thing the dispatcher receives/)
+  assert.match(brief, /final message goes to the human/)
   assert.match(brief, /--- report ---/)
-  assert.match(brief, /nothing after it/)
+  assert.match(brief, /End with exactly this block/)
 })
 
 test('a partition declares its network and git rules into the worker brief', async () => {
@@ -583,7 +583,7 @@ test('a partition declares its network and git rules into the worker brief', asy
   const brief = h.starts[0].prompt[0].text
   assert.match(brief, /reached over the intranet VPN/)
   assert.match(brief, /branch "router\/work"/)
-  assert.match(brief, /never reset, never clean/)
+  assert.match(brief, /Never switch branches, reset, clean or force-push/)
 })
 
 test('an unknown network value fails at config time, not at dispatch', () => {
@@ -608,8 +608,8 @@ test('the manager brief caps its own reply too', async () => {
   await h.call('route_task')({ text: 'align the mcp tools', partition: 'state' }, root)
 
   const brief = h.starts[0].prompt[0].text
-  assert.match(brief, /at most three lines/)
-  assert.match(brief, /delivered into the requester's context verbatim/)
+  assert.match(brief, /closing message goes to the human/)
+  assert.match(brief, /One worker by default/)
 })
 
 // --- upgrade surface -------------------------------------------------------

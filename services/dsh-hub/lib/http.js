@@ -24,7 +24,7 @@
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 
-import { AGENT_ID_RE, HubError, MAX_WAIT_SECONDS, POOL_RE, TASK_ID_RE, VERSION, WORKSPACE_RE } from './hub.js'
+import { AGENT_ID_RE, HubError, MAX_WAIT_SECONDS, POOL_RE, PROFILE_RE, TASK_ID_RE, VERSION, WORKSPACE_RE } from './hub.js'
 import { MCP_PATH, McpGateway, TOKEN_PATH } from './mcp.js'
 
 export const API_BASE = '/v1'
@@ -210,6 +210,21 @@ export function parseTaskQuery(query) {
     if (!WORKSPACE_RE.test(workspace)) throw new HubError(400, 'bad-query', 'workspace must be a workspace name')
     filter.workspace = workspace
   }
+  const history = queryOne(query, 'history') ?? ''
+  if (history !== '') {
+    if (!['hide', 'include', 'only'].includes(history)) throw new HubError(400, 'bad-query', 'history must be hide, include or only')
+    filter.history = history
+  }
+  const profile = queryOne(query, 'dsh_profile') ?? ''
+  if (profile !== '') {
+    if (!PROFILE_RE.test(profile)) throw new HubError(400, 'bad-query', 'dsh_profile must be a DSH profile name')
+    filter.dsh_profile = profile
+  }
+  const origin = queryOne(query, 'origin') ?? ''
+  if (origin !== '') {
+    if (!['controller', 'agent', 'local'].includes(origin)) throw new HubError(400, 'bad-query', 'origin must be controller, agent or local')
+    filter.origin = origin
+  }
   filter.limit = 50
   if (limitText !== '') {
     const n = Number(limitText)
@@ -361,6 +376,8 @@ export const ROUTES = {
   '/v1/event': { method: 'POST', auth: 'worker', body: 'event', run: ({ hub, id, body }) => hub.progress(id, body) },
   '/v1/result': { method: 'POST', auth: 'worker', body: 'result', run: ({ hub, id, body }) => hub.submitResult(id, body) },
   '/v1/release': { method: 'POST', auth: 'worker', body: 'event', run: ({ hub, id, body }) => hub.release(id, body) },
+  // full session log of a task this worker holds or just finished (redacted on the hub)
+  '/v1/session': { method: 'POST', auth: 'worker', body: 'result', run: ({ hub, id, body }) => hub.agentSession(id, body) },
   // dispatcher agents (role dispatcher, own worker token): create and follow their own tasks
   '/v1/dispatch': { method: 'POST', auth: 'worker', body: 'result', run: ({ hub, id, body }) => hub.agentDispatch(id, body) },
   '/v1/dispatched': {
@@ -426,6 +443,15 @@ export const ROUTES = {
     run: async ({ hub, id, body }) => ({ ...(await hub.provisionAgent(id, body)), note: 'Store this token now; it is not shown again.' }),
   },
   '/v1/ctl/overview': { method: 'GET', auth: 'controller', run: ({ hub }) => hub.overview() },
+  // the event stream every DSH follows (long poll by cursor)
+  '/v1/ctl/events': { method: 'GET', auth: 'controller', run: runEvents },
+  '/v1/ctl/ack': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.acknowledge(id, requireTaskId(body.task_id)) },
+  // full session logs: DSH uploads those of the tasks it runs itself; any controller reads any
+  '/v1/ctl/session': { method: 'POST', auth: 'controller', body: 'result', run: ({ hub, id, body }) => hub.controllerSession(id, body) },
+  '/v1/ctl/session/read': {
+    method: 'GET', auth: 'controller',
+    run: ({ hub, query }) => hub.readSession(requireTaskId(queryOne(query, 'task_id')), { after: intQuery(query, 'after', 0, 1e9, 0), limit: intQuery(query, 'limit', 1, 2000, 500) }),
+  },
   // DSH fallback: the controller acts as the built-in dsh-self
   '/v1/ctl/fallback': {
     method: 'GET', auth: 'controller',
@@ -451,6 +477,24 @@ function workspaceQuery(query) {
   const list = raw.split(',').map(s => s.trim()).filter(Boolean)
   if (list.length > 64 || list.some(w => !WORKSPACE_RE.test(w))) throw new HubError(400, 'bad-query', 'workspaces must be workspace names, comma separated')
   return list
+}
+
+/** `?key=n` -> integer in min..max, or `fallback` when absent. */
+function intQuery(query, key, min, max, fallback) {
+  const raw = queryOne(query, key)
+  if (raw === undefined || raw === '') return fallback
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < min || n > max) throw new HubError(400, 'bad-query', `${key} must be an integer ${min}..${max}`)
+  return n
+}
+
+/** `?after=<seq>&wait=<s>&limit=` on the controllers' event stream. */
+async function runEvents({ hub, query, res }) {
+  const after = intQuery(query, 'after', 0, Number.MAX_SAFE_INTEGER, 0)
+  const wait = intQuery(query, 'wait', 0, MAX_WAIT_SECONDS, 0)
+  const limit = intQuery(query, 'limit', 1, 1000, 200)
+  const out = await hub.feed({ after, wait, limit, signal: closeSignal(res) })
+  return res.destroyed ? undefined : { generated_at: now(), ...out }
 }
 
 /** Long poll; tasks leased for a connection that closed meanwhile are handed back. */

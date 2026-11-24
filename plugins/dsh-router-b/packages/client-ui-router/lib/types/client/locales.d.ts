@@ -140,6 +140,7 @@ export declare const DICTIONARIES: {
         'compact.state.stale': string;
         'board.title': string;
         'seg.active': string;
+        'seg.local': string;
         'seg.workspace': string;
         'seg.resolved': string;
         'grp.running': string;
@@ -383,6 +384,7 @@ export declare const DICTIONARIES: {
         'batch.running': string;
         'batch.ok': string;
         'batch.failed': string;
+        'ext.error': string;
     };
     en: {
         'panel.title': string;
@@ -515,6 +517,7 @@ export declare const DICTIONARIES: {
         'compact.state.stale': string;
         'board.title': string;
         'seg.active': string;
+        'seg.local': string;
         'seg.workspace': string;
         'seg.resolved': string;
         'grp.running': string;
@@ -758,5 +761,6 @@ export declare const DICTIONARIES: {
         'batch.running': string;
         'batch.ok': string;
         'batch.failed': string;
+        'ext.error': string;
     };
 };

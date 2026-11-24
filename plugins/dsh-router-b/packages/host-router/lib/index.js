@@ -130,39 +130,28 @@ function relayWarning(body, children) {
 /** Text a manager child receives in place of a worker brief. */
 function managerPrompt(input) {
     return [
-        `You are the manager of the "${input.partition.name}" partition (files under ${input.partition.dir}).`,
-        'Every request for this partition comes to you; what earlier requests did is in the partition memory below.',
-        '`session_list` / `session_read` show what workers did; `task_resume` continues one.',
+        `You manage the "${input.partition.name}" partition (files under ${input.partition.dir}). You dispatch; you never`,
+        'edit files or run shell or build commands yourself. Earlier work is in the partition memory below;',
+        '`session_list` / `session_read` show what workers did, `task_resume` continues one.',
         '',
         'Rules:',
-        '- Dispatch only. Never edit files, run shell or build commands, or do the task yourself, however small.',
-        `- Start at least one worker with \`route_task\` (partition "${input.partition.name}", parent_task "${input.taskId}") before you answer, or the task fails.`,
-        '- Split, do not relay: two or more deliverables (artifacts, areas, or phases like investigate / fix / verify)',
-        '  need two or more workers. Give each worker only its slice plus the context it needs; it sees nothing else.',
-        '- Start independent workers in the same turn. Publish pieces that must wait now, with `stage` (1, 2, ...)',
-        '  or `depends_on`; the router starts them in order. A worker may `task_suspend` for a missing prerequisite.',
-        '- Do not wait for approval. Ask only when the request reads two ways or a step could destroy data:',
-        `  \`task_control\` action \`block\` on "${input.taskId}" with the question as \`value\`, then end.`,
-        '- Code ships with `git_publish` and merges only with `pr_merge` (it waits for the human). Server changes go',
-        '  through `ops_run`. Move a failure another partition or model would fix with `task_reassign`.',
-        '- Keep a `todo_write` checklist: one step per worker plus a consolidate step, one in_progress at a time,',
-        '  updated as workers start and report, all completed before you answer.',
+        `- Start at least one worker with \`route_task\` (partition "${input.partition.name}", parent_task "${input.taskId}") or the task fails.`,
+        '- One worker by default. Split only when the work has three or more steps or spans separate areas; give',
+        '  each worker its slice plus the context it needs. Independent workers start in the same turn; ordered',
+        '  ones use `stage` or `depends_on`.',
+        '- Reuse an earlier worker (`task_resume`) only when its `touched` files overlap this piece; otherwise a new one.',
+        `- Do not wait for approval. Ask only when the request reads two ways or could destroy data: \`task_control\` \`block\` on "${input.taskId}" with the question, then end.`,
+        '- Code ships with `git_publish`, merges only via `pr_merge` (the human approves); server changes via `ops_run`;',
+        '  hand a failure another partition or model would fix to `task_reassign`.',
+        '- For a split, keep a `todo_write` checklist: one step per worker.',
         '',
-        'Steps:',
-        '1. Split the request; do not invent work.',
-        '2. Per piece: `task_resume` an earlier worker only when its `touched` files overlap this piece (`session_read`',
-        '   it first); otherwise `route_task`. When in doubt, a new worker.',
-        '3. `route_task` returns at once. Call `wait_agent` until every worker has reported; your closing message is',
-        `   what the dispatcher receives. When only staged, suspended or waiting tasks are left, loop \`task_wait\` with parent_task "${input.taskId}"`,
-        '   until all settle. Re-brief or `task_control` `retry` a failed piece once; if it fails again, say so.',
-        '4. Record lasting facts with `partition_memory` action `note` (one short fact each, nothing the work log',
-        '   already keeps); `forget` notes that proved wrong.',
-        '5. Answer with one report for the human in the request\'s language: what was done, how, the results the',
-        '   workers observed, and every artifact and screenshot path verbatim as absolute paths. No acceptance step follows.',
+        `Then call \`wait_agent\` until every worker reports (\`task_wait\` with parent_task "${input.taskId}" for staged or suspended ones).`,
+        'Retry a failed piece once; if it fails again, say so. Note lasting facts with `partition_memory` `note`',
+        '(`forget` wrong ones). Your closing message goes to the human in the request\'s language: what was done,',
+        'the results the workers observed, and every artifact path verbatim.',
         '',
         ...input.contextLimit > 0
-            ? [`Delegation stops at ${formatTokens(input.contextLimit)} prompt tokens; if a dispatch is refused for`,
-                'that reason, say so in your answer instead of doing the work yourself.']
+            ? [`Delegation stops at ${formatTokens(input.contextLimit)} prompt tokens; if a dispatch is refused for that reason, say so.`]
             : [],
         '',
         ...input.memory === undefined ? [] : [input.memory, ''],
@@ -171,8 +160,8 @@ function managerPrompt(input) {
     ].join('\n');
 }
 /** Compose the text one worker receives: partition brief, then the task body. */
-function workerPrompt(partition, taskId, body, autoVerify) {
-    return `${partitionBrief(partition, { verify: autoVerify, taskId })}\n\n---\n\nTask ${taskId}:\n${body}`;
+function workerPrompt(partition, taskId, body, autoVerify, hostScripts) {
+    return `${partitionBrief(partition, { verify: autoVerify, taskId, ...hostScripts === undefined ? {} : { hostScripts } })}\n\n---\n\nTask ${taskId}:\n${body}`;
 }
 /** Title of the router's chat-facing anchor Session. */
 const ANCHOR_TITLE = '作战室';
@@ -973,9 +962,10 @@ export async function apply(ctx, config) {
                 return;
             // No acceptance step: a manager that dispatched and ended normally is done.
             const relayed = relayWarning(task.body, children);
+            // One worker is the default now, so a straight relay is only worth a log line, not a note to the human.
             if (relayed !== undefined)
-                ctx.logger.warn(`host-router: ${taskId} ${relayed}`);
-            const managerResult = relayed === undefined ? tail(report) : `${tail(report)}\n\n[router] ${relayed}`;
+                ctx.logger.info(`host-router: ${taskId} ${relayed}`);
+            const managerResult = tail(report);
             await board.patch(taskId, { state: 'done', result: managerResult, ...described });
             await publishSnapshot().catch(() => { });
             return;
@@ -1029,7 +1019,7 @@ export async function apply(ctx, config) {
         }
         const prompt = isManager
             ? managerPrompt({ partition, taskId: task.id, body: task.body, contextLimit, ...brief === undefined ? {} : { memory: brief } })
-            : workerPrompt(partition, task.id, task.body, autoVerify);
+            : workerPrompt(partition, task.id, task.body, autoVerify, config.hostScripts);
         const label = `${partition.name}/${isManager ? 'manager' : 'worker'}: ${task.subject}`;
         // Tier -> model route, read at dispatch time so a saved change applies to queued rows too.
         let route;
@@ -3203,11 +3193,21 @@ export async function apply(ctx, config) {
         snapshot: (_request) => publishSnapshot(),
         task: async (taskId) => (await publishSnapshot()).tasks.find(task => task.id === taskId),
         snapshotPath,
+        /** One line for the 作战室 (coalesced into 【进度提醒】) and the panel's notice list: e.g. cloud task news from dsh-agent-hub. */
+        notice: (text) => {
+            if (typeof text === 'string' && text.trim() !== '')
+                notice(text.trim().slice(0, 500));
+        },
     };
-    if (typeof ctx.set === 'function') {
+    // `provide` registers the service; `set` alone throws on a name nobody
+    // provided, which left ctx.hostRouter unpublished on DSH 0.2.2.
+    if (typeof ctx.provide === 'function' || typeof ctx.set === 'function') {
         try {
-            ctx.set('hostRouter', service);
-            ctx.logger.info('host-router: published ctx.hostRouter { snapshot, task, snapshotPath }');
+            if (typeof ctx.provide === 'function')
+                ctx.provide('hostRouter', service);
+            else
+                ctx.set('hostRouter', service);
+            ctx.logger.info('host-router: published ctx.hostRouter { snapshot, task, snapshotPath, notice }');
         }
         catch (error) {
             ctx.logger.warn(`host-router: could not publish ctx.hostRouter: ${String(error)}`);

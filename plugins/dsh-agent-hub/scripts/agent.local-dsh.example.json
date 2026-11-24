@@ -1,0 +1,10 @@
+{
+  "agentId": "dsh-mydesk",
+  "dshProfile": "web",
+  "node": "mydesk",
+  "platform": "dsh",
+  "role": "worker",
+  "capabilities": { "browser": 1, "test": 2, "code": 2 },
+  "maxConcurrency": 4,
+  "workspaces": {}
+}

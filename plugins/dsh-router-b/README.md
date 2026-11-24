@@ -84,6 +84,7 @@
 | `credentialRefs` | DeepSeek（`DEEPSEEK_API_KEY`）、Exa（`EXA_API_KEY`） | 左侧小栏里显示“是否已配置”的凭据名单 |
 | `progressNotices` / `progressNoticeDelayMs` | `true` / `3000` | 任务挂起、继续、前置失败时往作战室发【进度提醒】 |
 | `screenshotCommand` | `/srv/workspace/bin/screenshot` | `browser_capture` 用的截图命令（换机器要改） |
+| `hostScripts` | 无 | `build`（构建宿主代码、不动在跑的那份）/ `restart`（安全重启，人来跑）。配了才写进 worker 提示，不配就不提 |
 | `quick` | 开启（目录 = 用户主目录，并发 2） | 「快任务」：不属于任何工作区的小活；写 `false` 关闭 |
 
 ### 每个工作区（`partitions` 里的每一项）
@@ -128,7 +129,7 @@ node scripts/install.mjs --profile ~/.dsh/profiles/web
 # 3. 重启拥有这个 profile 的 DSH 进程
 ```
 
-安装脚本只在 profile 的 `package.json` 写三条 `link:` 依赖、把 `dsh-router-b` 加进 `dsh.profile.bundles`、在 `node_modules` 下建目录链接；**不跑包管理器**，也没有卸载参数（卸载见 [docs/UPGRADE.md](docs/UPGRADE.md)「回滚」）。服务器上可用 `scripts/safe-build-host.sh`（构建到 `lib.next/`）+ `scripts/safe-restart.sh`（等在飞任务结束后安全重启、失败自动回滚）。
+安装脚本只在 profile 的 `package.json` 写三条 `link:` 依赖、把 `dsh-router-b` 加进 `dsh.profile.bundles`、在 `node_modules` 下建目录链接；**不跑包管理器**，也没有卸载参数（卸载见 [docs/UPGRADE.md](docs/UPGRADE.md)「回滚」）。服务器上可用 `scripts/safe-build-host.sh`（构建到 `lib.next/`）+ `scripts/safe-restart.sh`（等在飞任务结束后安全重启、失败自动回滚）。想让 worker 知道这两个脚本，把它们的路径写进 `hostScripts.build` / `hostScripts.restart`。
 
 装完检查：`<DSH home>/router/seams.json` 里 `ok: true`；左侧栏有「打开作战室对话」；任务板显示的是真实工作区而不是「示例数据」。
 
@@ -136,6 +137,7 @@ node scripts/install.mjs --profile ~/.dsh/profiles/web
 
 - **任务板显示「示例数据」**：浏览器连不上宿主侧（`/api/router/*`）。确认插件已装好并重启；经反向代理访问时，代理必须转发 WebSocket upgrade，否则页面能打开但一直“重新连接中”、工作区和会话全是空的。
 - **插件页报 `partition "xxx" needs an absolute root`**：要么 `root` 写错，要么把子包 `dsh-host-router` / `dsh-client-ui-router` 误写进了 `dsh.profile.bundles`（它们是库，不是 bundle）。删掉这两项（重跑 `install.mjs` 会自动清理）。
+- **worker 提示里的规则**：验收命令只由路由器在 worker 结束后跑一次，worker 不自己再跑；worker 只跑和改动相关的测试，不先探测环境；manager 默认一个 worker，三步以上或跨区域才拆。
 - **任务一直停在「待验收」**：这个工作区没配 `verify`，或 `autoVerify: false`（插件自带配置就是 `false`）。在任务板上人工「通过 / 退回」，或给工作区配验收命令并打开 `autoVerify`。
 - **派工报“两个工作区同分，请点名”**：路由器不猜，直接在需求里写工作区名，或补充 `keywords` / `description`。
 - **改了 `cordis.patch.yml` 不生效**：配置只在启动时读，改完要重启 DSH。

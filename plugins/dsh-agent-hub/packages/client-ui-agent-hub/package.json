@@ -1,6 +1,6 @@
 {
   "name": "dsh-client-ui-agent-hub",
-  "description": "Read-only dispatch panel for the DSH Web client: task counts, agents (online, platform, capabilities, running tasks), task list with detail/history/result summary and pending enrollment requests, backed by the dsh-host-agent-hub admin routes",
+  "description": "调度台 for the DSH Web client: open tasks in lanes (queued, claimed, running, waiting on you, ended) with stage, timeline and stored session; agents grouped by DSH profile with DSH's own partition workers; fallback tasks; history after expiry. Backed by the dsh-host-agent-hub admin routes",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -28,7 +28,13 @@
   ],
   "scripts": {
     "build": "node scripts/build-client.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test tests/desk.test.mjs"
   },
-  "keywords": ["dsh", "dsh-plugin", "client-ui", "agent-hub"]
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "client-ui",
+    "agent-hub"
+  ]
 }

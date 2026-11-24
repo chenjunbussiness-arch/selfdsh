@@ -65,9 +65,9 @@ outpost token 每次启动新生成、只经 stdio 交给 Electron 主进程、�
 ## 怎么复跑
 
 ```powershell
-pwsh -NoProfile -File plugins/dsh-agent-hub/scripts/probe-quick-exec-surface.ps1
+pwsh -NoProfile -File plugins/dsh-agent-hub/docs/archive/probe-quick-exec-surface.ps1
 # 可选：落盘证据
-pwsh -NoProfile -File plugins/dsh-agent-hub/scripts/probe-quick-exec-surface.ps1 -OutFile .dsh-artifacts\quick-probe.txt
+pwsh -NoProfile -File plugins/dsh-agent-hub/docs/archive/probe-quick-exec-surface.ps1 -OutFile .dsh-artifacts\quick-probe.txt
 ```
 
 退出码：`0` = 确认无可编程执行面（当前状态）；`2` = 有非 `/health` 路由免认证返回 2xx（需重新评估）；
