@@ -436,8 +436,22 @@ class HubClient:
         res = self._req("GET", "poll", query={"max": max_tasks, "wait": wait}, timeout=max(self.timeout, wait + POLL_SLACK))
         return res.get("tasks", [])
 
-    def progress(self, task_id, progress=None, message=None):
-        return self._req("POST", "event", {"task_id": task_id, "progress": progress, "message": message})
+    def progress(self, task_id, progress=None, message=None, stage=None, renew=False):
+        """POST /v1/event. `renew=True` with nothing else only keeps the lease (no event on the hub)."""
+        body = {"task_id": task_id}
+        if progress is not None:
+            body["progress"] = progress
+        if message is not None:
+            body["message"] = message
+        if stage is not None:
+            body["stage"] = stage
+        if renew:
+            body["renew"] = True
+        return self._req("POST", "event", body)
+
+    def session(self, task_id, entries):
+        """POST /v1/session: append session log entries ({role, text, name?, at?}) to the task on the hub."""
+        return self._req("POST", "session", {"task_id": task_id, "entries": list(entries)})
 
     def artifact(self, task_id, name, from_task=None):
         q = {"task_id": task_id, "name": name}
@@ -1399,6 +1413,13 @@ EXCHANGE_README = """\
 | `failed/<task_id>/` | agent | 失败时写 `result.json`（同样最后写） |
 | `archive/<task_id>/` | agent_client | 上传完成或任务被取消后归档 |
 
+**进度和会话（可选，推荐）**：做任务时往任务目录里追加 JSON 行，agent_client 每轮把新行发到云端，断网时留在文件里，恢复后补发：
+
+- `progress.jsonl`：`{"stage": "started|step|blocked|needs_input|uploading", "message": "...", "progress": 0.4}`
+- `session.jsonl`：`{"role": "user|assistant|tool|system|note", "text": "...", "name": "bash"}`
+
+写结果时把这两个文件也拷进 `outbox/`（或 `failed/`）的结果目录，再最后写 `result.json`。它们不会作为结果文件上传。
+
 协议：docs/DSH-HUB-PROTOCOL-v2.md；配置：plugins/dsh-agent-hub/README.md。
 """
 
@@ -1420,6 +1441,82 @@ def ensure_exchange(root):
 
 def _upload_order(name):
     return ({"changes.patch": 0, "summary.md": 1}.get(name, 2), name)
+
+
+# --- live progress and the session log --------------------------------------------
+#
+# While it works, the agent may append JSON lines to two files in its task folder
+# (working/<id>/, and a copy in the result folder before result.json):
+#   progress.jsonl  {"stage": "started|step|blocked|needs_input|uploading", "message": "...", "progress": 0.4}
+#   session.jsonl   {"role": "user|assistant|tool|system|note", "text": "...", "name": "bash", "at": "..."}
+# The bridge sends new lines every cycle (progress -> /v1/event, session -> /v1/session). How
+# many lines of each went out is kept in <exchange>/.sync/<id>.json, so nothing is sent twice and
+# whatever was written while the hub was out of reach goes out once it is back (the files are
+# the offline spool). Both files stay local: they are not uploaded as result files.
+
+PROGRESS_FILE, SESSION_FILE, SYNC_DIR = "progress.jsonl", "session.jsonl", ".sync"
+LOCAL_ONLY_FILES = (PROGRESS_FILE, SESSION_FILE)
+STAGES = ("received", "started", "step", "blocked", "needs_input", "uploading")
+SESSION_ROLES = ("user", "assistant", "tool", "system", "note")
+SESSION_BATCH = 200
+SESSION_TEXT_MAX = 20000
+
+
+def read_new_lines(path, skip):
+    """(parsed JSON objects after the first `skip` complete lines, complete line count). A last line
+    without its newline is still being written and is left for the next cycle; bad lines count but
+    are dropped."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return [], skip
+    lines = data.split(b"\n")
+    complete = lines[:-1]  # the part after the last newline is unfinished (or empty)
+    out = []
+    for raw in complete[skip:]:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            item = json.loads(raw.decode("utf-8-sig", errors="replace"))
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            out.append(item)
+    return out, max(skip, len(complete))
+
+
+def progress_updates(items):
+    """progress.jsonl lines -> the events to send. A run of `step` lines is sent as its last one."""
+    out = []
+    for it in items:
+        stage = it.get("stage") if it.get("stage") in STAGES else ("step" if it.get("stage") is not None else None)
+        msg = it.get("message")
+        upd = {"stage": stage, "message": msg[:1000] if isinstance(msg, str) else None,
+               "progress": it.get("progress") if isinstance(it.get("progress"), (int, float)) and 0 <= it.get("progress") <= 1 else None}
+        if upd["stage"] is None and upd["message"] is None and upd["progress"] is None:
+            continue
+        if out and upd["stage"] in ("step", None) and out[-1]["stage"] in ("step", None):
+            out[-1] = upd
+        else:
+            out.append(upd)
+    return out
+
+
+def session_entry(it):
+    role = it.get("role") if it.get("role") in SESSION_ROLES else "note"
+    text = it.get("text")
+    if not isinstance(text, str):
+        text = json.dumps(text, ensure_ascii=False) if text is not None else ""
+    e = {"role": role, "text": text[:SESSION_TEXT_MAX]}
+    if isinstance(it.get("name"), str) and it["name"].strip():
+        e["name"] = it["name"].strip()[:64]
+    if isinstance(it.get("at"), (str, int, float)):
+        e["at"] = it["at"]
+    if it.get("error") is True:
+        e["error"] = True
+    return e
 
 
 class Bridge:
@@ -1559,7 +1656,7 @@ class Bridge:
                              "outputs": "changes.patch, summary.md and any other files; write result.json LAST"}
             write_atomic(os.path.join(stage, "task.json"), json.dumps(t, ensure_ascii=False, indent=2))
             os.replace(stage, os.path.join(self.root, "inbox", tid))
-            self.c.progress(tid, 0.0, "delivered to exchange inbox")
+            self.c.progress(tid, 0.0, "delivered to exchange inbox", stage="received")
             self.log(f"pulled {tid}: {t.get('title')}" + (f" [{ws}]" if ws else "") + (f" <{t['capability']}>" if t.get("capability") else ""))
             delivered += 1
         return delivered
@@ -1568,7 +1665,7 @@ class Bridge:
         files = []
         for n in sorted(os.listdir(d), key=_upload_order):
             p = os.path.join(d, n)
-            if n == "result.json" or n.endswith(".tmp") or n.startswith("."):
+            if n == "result.json" or n in LOCAL_ONLY_FILES or n.endswith(".tmp") or n.startswith("."):
                 continue
             if not os.path.isfile(p):
                 self.log(f"{d}: sub-folder {n} not uploaded (only top-level files are)")
@@ -1605,6 +1702,7 @@ class Bridge:
                     with open(sm, encoding="utf-8", errors="replace") as f:
                         summary = f.read(SUMMARY_MAX)
                 files = [file_entry(p) for p in paths]
+                self.sync(tid, d)  # the last progress lines and the session go out before the result
                 try:
                     self.c.result(tid, status, summary, files, r.get("error"), r.get("needs_input"))
                     self.log(f"uploaded {tid}: {status} ({len(files)} file(s))")
@@ -1620,16 +1718,82 @@ class Bridge:
                     p = os.path.join(self.root, leftover, tid)
                     if os.path.exists(p):
                         shutil.rmtree(p, ignore_errors=True)
+                self._drop_sync(tid)
                 sent += 1
         return sent
 
+    # --- progress.jsonl / session.jsonl -> hub ---------------------------------
+    def _sync_path(self, tid):
+        return os.path.join(self.root, SYNC_DIR, f"{tid}.json")
+
+    def _load_sync(self, tid):
+        try:
+            with open(self._sync_path(tid), encoding="utf-8") as f:
+                st = json.load(f)
+            return {"progress": int(st.get("progress", 0)), "session": int(st.get("session", 0)), "gone": bool(st.get("gone"))}
+        except (OSError, ValueError, TypeError):
+            return {"progress": 0, "session": 0, "gone": False}
+
+    def _save_sync(self, tid, st):
+        os.makedirs(os.path.join(self.root, SYNC_DIR), exist_ok=True)
+        write_atomic(self._sync_path(tid), json.dumps(st))
+
+    def _drop_sync(self, tid):
+        try:
+            os.remove(self._sync_path(tid))
+        except OSError:
+            pass
+
+    def sync(self, tid, d):
+        """Send the new lines of <d>/progress.jsonl and <d>/session.jsonl. True when anything went out.
+        A network error propagates (the lines stay unsent and go out next time); a 404/409 from the
+        hub (task gone or not ours) stops syncing this task."""
+        if not TASK_ID_RE.fullmatch(tid):
+            return False
+        st = self._load_sync(tid)
+        if st["gone"]:
+            return False
+        sent = False
+        try:
+            items, n = read_new_lines(os.path.join(d, PROGRESS_FILE), st["progress"])
+            for upd in progress_updates(items):
+                self.c.progress(tid, upd["progress"], upd["message"], stage=upd["stage"])
+                sent = True
+            if n != st["progress"]:
+                st["progress"] = n
+                self._save_sync(tid, st)
+            items, n = read_new_lines(os.path.join(d, SESSION_FILE), st["session"])
+            entries = [session_entry(it) for it in items]
+            for i in range(0, len(entries), SESSION_BATCH):
+                self.c.session(tid, entries[i:i + SESSION_BATCH])
+                sent = True
+            if n != st["session"]:
+                st["session"] = n
+                self._save_sync(tid, st)
+        except HubError as e:
+            if e.status not in (404, 409):
+                raise
+            self.log(f"{tid}: hub no longer takes its progress / session ({e.code})")
+            st["gone"] = True
+            self._save_sync(tid, st)
+        return sent
+
     def renew(self):
-        for tid in os.listdir(os.path.join(self.root, "working")):
+        """Every cycle, for each task being worked on: send its new progress / session lines; with
+        nothing new only renew the lease (silent on the hub)."""
+        base = os.path.join(self.root, "working")
+        for tid in os.listdir(base):
+            d = os.path.join(base, tid)
+            if tid.startswith(".") or not os.path.isdir(d) or os.path.exists(os.path.join(d, ABORT_MARK)):
+                continue
             try:
-                self.c.progress(tid, None, "working")
+                if not self.sync(tid, d):
+                    self.c.progress(tid, renew=True)
             except HubError as e:
                 if e.status in (404, 409):
                     self.log(f"{tid} no longer leased ({e.code})")
+                else:
+                    raise
 
     def tick(self):
         self.heartbeat("idle")
@@ -2401,6 +2565,7 @@ def build_parser():
     i.add_argument("--exchange", help="exchange folder to create (default: exchange/<agent>)")
     i.add_argument("--no-exchange", action="store_true", help="only write the templates, do not create the exchange folder")
     add("workspaces", "print the local workspace map and file settings, then exit (no network)", net=False)
+    add("paths", "print where the selected agent's exchange, token and log files are (JSON, no network)", net=False)
     dr = add("doctor", "self-check: every setting and where it came from, the profile, workspaces, token, exchange and the hub", worker=False)
     dr.add_argument("--offline", action="store_true", help="skip the hub connection test")
     dr.set_defaults(timeout=15)
@@ -2439,6 +2604,48 @@ def build_parser():
     return p
 
 
+def _resolve(a, cmd, wd, env):
+    """Every setting of the selected agent, the same way for every command (and for worker_run.py /
+    worker_executor.py through resolve_files): (dotenv, agent, agent source, workspace map, settings)."""
+    dotenv = read_env_file(os.path.join(wd, ".env"))
+    home = dsh_home(env)
+    if a.profile_file is None and cmd != "claim" and migrate_layout(wd, env, dotenv, home, log=lambda m: print(m, file=sys.stderr)):
+        dotenv = read_env_file(os.path.join(wd, ".env"))
+    agent, agent_src = (None, None) if a.profile_file else select_agent(wd, env, dotenv, a.agent)
+    profile_file = a.profile_file or (agent_paths(wd, agent)["config"] if agent else None)
+    raw_map = next((v for v in (env.get("DSH_PATH_MAP"), dotenv.get("DSH_PATH_MAP")) if isinstance(v, str) and v.strip()), "")
+    wm = resolve_workspaces(profile_file, a.node, required=profile_file is not None, worker_dir=wd,
+                            path_map=parse_path_map(raw_map), home=home)
+    cli = {k: getattr(a, k, None) for k in ("cafile", "agent_id", "node", "platform", "capabilities",
+                                            "max_concurrency", "exchange", "heartbeat_seconds",
+                                            "role", "pull_every_seconds")}
+    st = resolve_settings(wm, getattr(a, "url", None), getattr(a, "token_file", None), getattr(a, "proxy", None),
+                          getattr(a, "no_proxy", False), env=env, dotenv=dotenv, worker_dir=wd, cli=cli, agent=agent)
+    wm.node = st["node"]
+    return dotenv, agent, agent_src, wm, st
+
+
+def files_of(st):
+    """Where the selected agent's files are: what worker_run.py and worker_executor.py use."""
+    wd, agent = st["worker_dir"], st.get("agent")
+    layout = agent_paths(wd, agent) if agent else None
+    return {"agent": agent, "agent_id": st.get("agent_id"), "dsh_profile": st.get("dsh_profile"), "worker_dir": wd,
+            "exchange": os.path.abspath(st["exchange"]), "token_file": st.get("token_file"),
+            "log_file": st.get("log_file"),
+            "executor_log": layout["executor_log"] if layout else os.path.join(wd, "executor.log"),
+            "executor_lock": os.path.join(os.path.abspath(st["exchange"]), ".executor.lock")}
+
+
+def resolve_files(worker_dir=None, agent=None, env=None):
+    """files_of() for the agent that `agent_client.py run [--agent X]` would run. Raises ConfigError."""
+    env = os.environ if env is None else env
+    argv = ["paths"] + (["--worker-dir", worker_dir] if worker_dir else []) + (["--agent", agent] if agent else [])
+    a = build_parser().parse_args(argv)
+    wd = os.path.abspath(os.path.expanduser(a.worker_dir)) if a.worker_dir else default_worker_dir(env)
+    st = _resolve(a, "paths", wd, env)[4]
+    return files_of(st)
+
+
 def main(argv=None, env=None):
     p = build_parser()
     a = p.parse_args(argv)
@@ -2450,21 +2657,10 @@ def main(argv=None, env=None):
             agent_name = a.agent or (env.get("DSH_AGENT") or "").strip() or None
             return cmd_init(wd, a.node, exchange=not a.no_exchange, env=env, exchange_dir=a.exchange, agent=agent_name,
                             profile=a.dsh_profile)
-        dotenv = read_env_file(os.path.join(wd, ".env"))
-        home = dsh_home(env)
-        if a.profile_file is None and cmd != "claim" and migrate_layout(wd, env, dotenv, home, log=lambda m: print(m, file=sys.stderr)):
-            dotenv = read_env_file(os.path.join(wd, ".env"))
-        agent, agent_src = (None, None) if a.profile_file else select_agent(wd, env, dotenv, a.agent)
-        profile_file = a.profile_file or (agent_paths(wd, agent)["config"] if agent else None)
-        raw_map = next((v for v in (env.get("DSH_PATH_MAP"), dotenv.get("DSH_PATH_MAP")) if isinstance(v, str) and v.strip()), "")
-        wm = resolve_workspaces(profile_file, a.node, required=profile_file is not None, worker_dir=wd,
-                                path_map=parse_path_map(raw_map), home=home)
-        cli = {k: getattr(a, k, None) for k in ("cafile", "agent_id", "node", "platform", "capabilities",
-                                                "max_concurrency", "exchange", "heartbeat_seconds",
-                                                "role", "pull_every_seconds")}
-        st = resolve_settings(wm, getattr(a, "url", None), getattr(a, "token_file", None), getattr(a, "proxy", None),
-                              getattr(a, "no_proxy", False), env=env, dotenv=dotenv, worker_dir=wd, cli=cli, agent=agent)
-        wm.node = st["node"]
+        dotenv, agent, agent_src, wm, st = _resolve(a, cmd, wd, env)
+        if cmd == "paths":
+            print(json.dumps(files_of(st), ensure_ascii=False, indent=2))
+            return 0
         if cmd == "doctor":
             return cmd_doctor(wd, env, dotenv, agent, agent_src, wm, st, a)
         if cmd in ("register", "run", "bridge"):

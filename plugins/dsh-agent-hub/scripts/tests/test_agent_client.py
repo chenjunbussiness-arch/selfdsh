@@ -643,8 +643,20 @@ class FakeHub:
         out, self.tasks = self.tasks[:max_tasks], self.tasks[max_tasks:]
         return copy.deepcopy(out)
 
-    def progress(self, task_id, progress=None, message=None):
-        self.calls.append(("progress", task_id, progress, message))
+    session_error = None
+
+    def progress(self, task_id, progress=None, message=None, stage=None, renew=False):
+        if renew and progress is None and message is None and stage is None:
+            self.calls.append(("renew", task_id))
+        else:
+            self.calls.append(("progress", task_id, progress, message))
+            self.stages = getattr(self, "stages", []) + [(task_id, stage, message)]
+        return {"ok": True}
+
+    def session(self, task_id, entries):
+        if self.session_error:
+            raise self.session_error
+        self.calls.append(("session", task_id, list(entries)))
         return {"ok": True}
 
     def artifact(self, task_id, name, from_task=None):
