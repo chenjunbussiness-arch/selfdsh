@@ -4,21 +4,21 @@ DeepSeek Harness Web 客户端的**任务面板插件**：挂在右侧栏的一�
 显示「分区 / manager / worker / 任务」，每个任务能看到它的**工作清单**与**干到哪一步**。
 
 ```text
-┌──────────────── 左：原生会话 ────────────────┬──── 右：本插件 ────────────────┐
-│  你：把这几个需求做一下…                      │ 任务面板        3 分区 · 9 worker │
-│  AI：按分区下发给 3 个 manager…               │ 投递需求  [一行一条，自动判分区] │
-│                                              │ 分区花名册                        │
-│                                              │  rca-ab-test  ● 在线  4 worker    │
-│                                              │    worker-1 go build  ●           │
-│                                              │    worker-2 已释放 ○（不占机器）   │
-│                                              │ 待派 │ 进行中 │ 待验收 │ 已完成    │
-│                                              │ …每个任务卡片带工作清单与当前步骤… │
-└──────────────────────────────────────────────┴───────────────────────────────────┘
+┌──────────────── 左：原生会话 ────────────────┬──── 右：本插件「调度台」 ──────────┐
+│  你：把这几个需求做一下…                      │ 调度台 │ 本机 │ 工作区              │
+│  AI：按分区下发给 3 个 manager…               │ 在办 4 · 在线 agent 3 · 待批 1      │
+│                                              │ 任务：排队 / 已领取 / 进行中 /       │
+│                                              │       等你回复 / 已结束（可折叠）    │
+│                                              │ Agent：按 DSH profile 分组，         │
+│                                              │       DSH 自己的 worker 并列显示     │
+│                                              │ 兜底：没人领、DSH 自己做的任务       │
+└──────────────────────────────────────────────┴───────────────────────────────────────┘
 ```
 
 - **左半边不是本插件**：那是原生 conversation。本插件只贡献右侧一个 tab + 一个会话头按钮。
-- **`待验收`（worker 自报）与 `已完成`（验收通过）是两条泳道**，永不合并。
-- **空闲 worker 显示「已释放」**（虚线胶囊、空心点），不会让人以为机器还被占着。
+- 装了 dsh-agent-hub 时，第一个 tab 是它的「调度台」（云端 hub 的统一任务账本：本机 DSH 派的任务也会同步上去），
+  「本机」是这台 DSH 自己的任务板，「已结束」收进调度台的折叠里；没装 dsh-agent-hub 时仍是原来的「现在 / 已结束 / 工作区」。
+- 过期的数据默认不显示：完成 12 小时、失败 2 天后进历史，3 天没心跳的 agent 收进「休眠」，7 天后归档；都可以点开查看。
 
 截图（`docs/screenshots/`）：[停靠态·亮](docs/screenshots/panel-docked-light.png) ·
 [停靠态·暗](docs/screenshots/panel-docked-dark.png) · [宽屏看板](docs/screenshots/board-wide.png)
@@ -37,13 +37,13 @@ ctx.effect(() => ctx.sidebarRightTabs.register({
   priority: 'extension',
   multiple: false,
   keepMounted: true,
-  title: () => '任务面板',
+  title: () => '调度台',
 }), 'client-ui-router: tab type')
 
 // 阶段二：向 keyed slot 注册 body / title，key = definition.id
 ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
   name: 'sidebar.right.pane.tab', key: 'dsh-client-ui-router/board', locale: 'router.board', inject: …,
-}, RouterPanel))
+}, CompactBoard))
 ```
 
 > 直接注册 `rightbar` 会把文件树/终端/浏览器/文档预览四个面板一起顶掉——所以不走那条路。
@@ -107,13 +107,15 @@ packages/client-ui-router/
 │     ├─ mock.ts                内置示例数据（发布/验收是真的会改状态）
 │     ├─ native-todos.ts        读原生 todos 投影（含 asTodos 形状校验）
 │     ├─ controller.ts          快照状态机（并发读合并、错误不白屏）
-│     ├─ lanes.ts               四条泳道定义 + 清单进度
-│     ├─ RouterPanel.tsx        面板主体（容器查询：窄=tab 切换，宽=四列看板）
-│     ├─ Roster.tsx             分区花名册（manager/worker/presence）
-│     ├─ TaskCard.tsx           任务卡（状态、清单、当前步骤、产物、验收动作）
-│     ├─ Composer.tsx           投递需求（一行一条，Cmd/Ctrl+Enter 提交）
+│     ├─ CompactBoard.tsx       面板主体：分段条（扩展 tab / 本机 / 已结束 / 工作区）+ 任务行
+│     ├─ Desk.tsx               等你确认、实时输出、改派 / 换模型
+│     ├─ WorkspacePage.tsx      工作区 tab：分区文件树和 worker 规则
+│     ├─ ModelTiers.tsx         左栏「模型档位」
+│     ├─ board-tabs.ts          扩展 tab 注册表（与 dsh-agent-hub 逐字节相同）
+│     ├─ theme.tsx              白天 / 黑夜 / 跟随系统
 │     ├─ RouterPanelTitle.tsx   tab 标题（带待验收数）
 │     ├─ RouterPanelButton.tsx  会话头入口按钮
+│     ├─ WarRoomRedirect.tsx / RoutingIcon.tsx / Brand.tsx  左栏入口、品牌位
 │     ├─ format.ts / locales.ts (zh+en) / styles.ts（CSS 文本 + installStyles）
 ├─ scripts/                     build-client / build-host / build-preview / serve-preview / verify-load
 ├─ preview/                     预览页（frame 是假的，面板是真组件）
@@ -150,6 +152,8 @@ boardTabs().hasConsumer()     // 是否有任务板声明了自己；生产方�
 ```
 
 - `flag`（v1 内新增的可选字段）：返回非空字符串时，tab 上画一个 `.dshrc-tab-flag` 小圆点，字符串用作 `title` 和 `aria-label`（最多保留 200 字）；返回 `undefined` 或空串不画。和 `badge` 互相独立。旧版注册表不会读取它，旧版任务板不会画它，都只会退化成「没有圆点」，所以不用升 `REGISTRY_VERSION`。
+
+- `order` 为负数的 tab 画在内置分段**前面**，第一个负数 tab 默认选中（用户手动点过别的 tab 之后就不再自动切）；此时内置的「现在」改叫「本机」、「已结束」隐藏（由该 tab 自己承担）。dsh-agent-hub 的调度台用 `order: -100`。
 
 - 本插件在 `apply` 里 `consume('dsh-router-b')`（不是等面板第一次挂载），`CompactBoard` 用 `useSyncExternalStore` 订阅 `list()`。
 - 扩展 tab 的 id 是 `ext:<id>`，样式与内置 tab 完全相同（`.dshrc-tab`），有 badge 时显示计数；`id` 重复时后注册的替换前一个。
