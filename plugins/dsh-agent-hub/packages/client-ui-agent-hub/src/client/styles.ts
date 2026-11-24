@@ -307,6 +307,44 @@ button.dah-chip:focus-visible { outline: 2px solid var(--dah-accent); outline-of
 .dah-history li[data-tone="warn"]:hover { background: color-mix(in srgb, var(--dah-warn) 18%, var(--dah-base)); }
 .dah-history-flag { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; font-size: 12px; line-height: 20px; font-weight: 500; color: var(--dah-text-2); white-space: nowrap; }
 .dah-history-flag::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dah-tone, var(--dah-warn)); }
+
+/* ---------- 调度台: lanes, profile groups, DSH's own workers, session ---------- */
+.dah-page [data-tone="self"] { --dah-tone: var(--dah-accent); }
+.dah-badge[data-tone="self"] { color: var(--dah-accent); }
+.dah-sub { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dah-sub + .dah-sub { margin-top: 6px; }
+.dah-sub-head {
+  display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 0; border: 0; background: transparent;
+  font-size: 12px; line-height: 16px; font-weight: 600; color: var(--dah-text-2); text-align: left;
+}
+.dah-sub-head .dah-count { font-weight: 400; color: var(--dah-text-3); font-variant-numeric: tabular-nums; }
+.dah-sub-head[data-button="true"] { margin-left: -8px; padding: 0 8px; border-radius: 10px; cursor: pointer; transition: background 0.15s; }
+.dah-sub-head[data-button="true"]:hover { background: var(--dah-hover); }
+.dah-sub-head[data-button="true"]:focus-visible { outline: 2px solid var(--dah-accent); outline-offset: -2px; }
+.dah-sub-head[aria-expanded="true"] .dah-caret { transform: rotate(90deg); }
+.dah-sub[data-lane="waiting"] > .dah-sub-head { color: var(--dah-warn); }
+.dah-item[data-kind="self"] .dah-item-row { background: color-mix(in srgb, var(--dah-accent) 5%, transparent); }
+.dah-item-row .dah-chips .dah-chip:not(.dah-id) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dah-item-note[data-tone="quiet"] { color: var(--dah-text-3); }
+.dah-link {
+  align-self: flex-start; height: 26px; margin-left: -8px; padding: 0 8px; border: 0; border-radius: 10px; background: transparent;
+  font-size: 12px; color: var(--dah-text-3); cursor: pointer; transition: background 0.15s;
+}
+.dah-link:hover { background: var(--dah-hover); color: var(--dah-text-2); }
+.dah-link:focus-visible { outline: 2px solid var(--dah-accent); outline-offset: -2px; }
+.dah-tools { flex: none; display: inline-flex; align-items: center; gap: 6px; }
+.dah-page[data-embedded="true"] .dah-tools .dah-select { max-width: 120px; }
+.dah-session { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.dah-session-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 420px; overflow-y: auto; }
+.dah-session-entry { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 12px; background: var(--dah-fill); min-width: 0; }
+.dah-session-entry[data-role="assistant"] { background: var(--dah-accent-soft); }
+.dah-session-entry[data-role="tool"] { background: var(--dah-fill-2); }
+.dah-session-who { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--dah-text-2); }
+.dah-session-text { margin: 0; font-family: var(--dah-mono); font-size: 12px; line-height: 18px; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; }
+.dah-session-foot { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .dah-sub-head[data-button="true"], .dah-link { transition: none; }
+}
 `
 
 /** Install the stylesheet once per document; a no-op without a DOM. */

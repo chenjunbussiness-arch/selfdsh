@@ -50,7 +50,7 @@
  * @module client-ui-router/compact-board
  */
 
-import { Component, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ComponentType, ReactNode } from 'react'
 import type { GroupProgressView, HostTaskState, NoticeView, PartitionView, TaskView, TodoItem } from './contract.ts'
 import type { ControlAction, ControlExtra } from './source.ts'
@@ -674,16 +674,31 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   const board = state.board
   const sessionFace = sessions ?? NO_SESSIONS
   const sessionList = useSyncExternalStore(sessionFace.list.subscribe, sessionFace.list.getSnapshot, sessionFace.list.getSnapshot)
-  const [tab, setTab] = useState<BoardTab>('active')
-  // Extension tabs other plugins registered (board-tabs.ts), drawn after the built-in three.
+  const [tab, setTabState] = useState<BoardTab>('active')
+  // Extension tabs other plugins registered (board-tabs.ts). A negative order is
+  // drawn before the built-in tabs: that is the 调度台 (dsh-agent-hub), which
+  // then opens by default and carries the finished tasks, so 已结束 steps aside.
   const extTabs = useSyncExternalStore(EXT_TABS.subscribe, EXT_TABS.list, EXT_TABS.list)
+  const leadTabs = useMemo(() => extTabs.filter(item => item.order < 0), [extTabs])
+  const trailTabs = useMemo(() => extTabs.filter(item => item.order >= 0), [extTabs])
+  const builtinTabs = leadTabs.length > 0 ? TABS.filter(item => item.id !== 'resolved') : TABS
+  // Once the person picks a tab, nothing moves the selection for them again.
+  const pickedRef = useRef(false)
+  const setTab = useCallback((next: BoardTab): void => {
+    pickedRef.current = true
+    setTabState(next)
+  }, [])
+  const lead = leadTabs[0]
+  useEffect(() => {
+    if (lead !== undefined && !pickedRef.current) setTabState(`${EXT_PREFIX}${lead.id}`)
+  }, [lead])
   const extId = tab.startsWith(EXT_PREFIX) ? tab.slice(EXT_PREFIX.length) : undefined
   const ext = extId === undefined ? undefined : extTabs.find(item => item.id === extId)
   // The tab drawn: a selected extension tab that was just withdrawn reads as 现在
   // until the effect below moves the selection there for good.
   const shownTab: BoardTab = extId !== undefined && ext === undefined ? 'active' : tab
   useEffect(() => {
-    if (extId !== undefined && ext === undefined) setTab('active')
+    if (extId !== undefined && ext === undefined) setTabState('active')
   }, [extId, ext])
   // Filter text: a family stays when any of its tasks matches by title, id or workspace.
   const [query, setQuery] = useState('')
@@ -906,11 +921,11 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   useEffect(() => {
     if (board === null || landed) return
     setLanded(true)
-    // An extension tab the user picked before the first board arrived stays picked.
+    // An extension tab (picked, or the 调度台 opened by default) stays.
     if (!isBuiltin(tab) || (tabCounts.get(tab) ?? 0) > 0) return
-    const next = TABS.find(item => (tabCounts.get(item.id) ?? 0) > 0)
-    if (next !== undefined) setTab(next.id)
-  }, [board, landed, tabCounts, tab])
+    const next = builtinTabs.find(item => (tabCounts.get(item.id) ?? 0) > 0)
+    if (next !== undefined) setTabState(next.id)
+  }, [board, landed, tabCounts, tab, builtinTabs])
 
   const toggle = (id: string): void => {
     setOpen((previous) => {
@@ -1436,6 +1451,19 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
   }
   const movingTask = moving === null ? undefined : (board?.tasks ?? []).find(task => task.id === moving.id)
 
+  const extTabButton = (item: (typeof extTabs)[number]): ReactNode => {
+    const id: BoardTab = `${EXT_PREFIX}${item.id}`
+    return (
+      <button key={id} type="button" role="tab" className="dshrc-tab" data-ext={item.id}
+        data-on={shownTab === id ? '' : undefined} aria-selected={shownTab === id}
+        onClick={() => { setTab(id) }}>
+        {item.label}
+        {item.badge !== undefined && <span className="dshrc-tab-n">{item.badge}</span>}
+        {item.flag !== undefined && <span className="dshrc-tab-flag" title={item.flag} aria-label={item.flag} />}
+      </button>
+    )
+  }
+
   const groups: readonly Group[] = isBuiltin(shownTab) ? TAB_GROUPS[shownTab] : []
   const taskTab = isBuiltin(shownTab)
   const ExtBody = ext === undefined ? undefined : ext.Component as unknown as ComponentType<BoardTabProps>
@@ -1476,29 +1504,19 @@ export function CompactBoard({ controller, t, onOpenSession, onOpenWarRoom, onCl
         </div>
       </header>
       <div className="dshrc-tabs" role="tablist" aria-label={t('panel.title')}>
-        {TABS.map(item => (
+        {leadTabs.map(item => extTabButton(item))}
+        {builtinTabs.map(item => (
           <button key={item.id} type="button" role="tab" className="dshrc-tab"
             data-on={shownTab === item.id ? '' : undefined} aria-selected={shownTab === item.id}
             onClick={() => { setTab(item.id) }}>
-            {t(item.key)}
+            {t(leadTabs.length > 0 && item.id === 'active' ? 'seg.local' : item.key)}
             {(tabCounts.get(item.id) ?? 0) > 0 && <span className="dshrc-tab-n">{tabCounts.get(item.id)}</span>}
             {item.id === 'active' && waiting > 0 && (
               <span className="dshrc-tab-flag" title={t('seg.waiting', { n: waiting })} aria-label={t('seg.waiting', { n: waiting })} />
             )}
           </button>
         ))}
-        {extTabs.map((item) => {
-          const id: BoardTab = `${EXT_PREFIX}${item.id}`
-          return (
-            <button key={id} type="button" role="tab" className="dshrc-tab" data-ext={item.id}
-              data-on={shownTab === id ? '' : undefined} aria-selected={shownTab === id}
-              onClick={() => { setTab(id) }}>
-              {item.label}
-              {item.badge !== undefined && <span className="dshrc-tab-n">{item.badge}</span>}
-              {item.flag !== undefined && <span className="dshrc-tab-flag" title={item.flag} aria-label={item.flag} />}
-            </button>
-          )
-        })}
+        {trailTabs.map(item => extTabButton(item))}
         {taskTab && shownTab !== 'workspace' && <input className="dshrc-find" type="search" value={query} placeholder={t('board.find')} aria-label={t('board.find')}
           onChange={(event) => { setQuery(event.target.value) }}
           onKeyDown={(event) => { if (event.key === 'Escape') setQuery('') }} />}

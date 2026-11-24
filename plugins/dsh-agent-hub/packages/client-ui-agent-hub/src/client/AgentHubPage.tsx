@@ -40,11 +40,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
 
 import { AGENT_STATUSES, TASK_STATUSES } from './contract.ts'
-import type { AgentStatus, AgentView, AgentsDoc, HistoryEvent, Overview, RequestView, RequestsDoc, TaskDetail, TaskDoc, TaskFilter, TaskRow, TaskStatus, TasksDoc } from './contract.ts'
+import type { AgentStatus, AgentView, AgentsDoc, HistoryEvent, Overview, RequestView, RequestsDoc, SessionDoc, SessionEntry, TaskDetail, TaskDoc, TaskFilter, TaskRow, TaskStatus, TasksDoc } from './contract.ts'
+import { LANES, agentGroups, fallbackReason, fallbackTasks, lanesOf, selfWorkers, stageOf, timeline } from './desk.ts'
+import type { AgentGroup, Lane, SelfWorker } from './desk.ts'
 import { absolute, agentCounts, agentStatus, bytes, clock, percent, presence, relative, sortAgents, until } from './format.ts'
 import { HubIcon } from './HubIcon.tsx'
 import type { Translate } from './locales.ts'
-import { SourceError, fetchAgents, fetchOverview, fetchRequests, fetchTask, fetchTasks } from './source.ts'
+import { SourceError, ackTask, fetchAgents, fetchOverview, fetchRequests, fetchSession, fetchTask, fetchTasks } from './source.ts'
 
 /** Auto-refresh period. */
 export const REFRESH_MS = 10_000
@@ -318,9 +320,9 @@ function useShown(target: { readonly current: Element | null }, enabled: boolean
 }
 
 /** The embedded form's foldable groups. */
-type Part = 'agents' | 'requests' | 'tasks'
+type Part = 'agents' | 'requests' | 'tasks' | 'fallback' | 'ended'
 
-const PARTS: readonly Part[] = ['agents', 'requests', 'tasks']
+const PARTS: readonly Part[] = ['agents', 'requests', 'tasks', 'fallback', 'ended']
 
 /** What the person folded or opened by hand; absent = the default. */
 type Folds = Readonly<Partial<Record<Part, boolean>>>
@@ -396,56 +398,138 @@ function EmbeddedFold({ part, title, count, note, open, onToggle, tools, childre
   )
 }
 
-/** Embedded agent list: id and state, then platform · mode · load · client version · heartbeat. */
-function EmbeddedAgents({ agents, loaded, now, t, onTask }: {
+/** One hub agent: id and state, then platform · mode · load · client version · heartbeat. */
+function AgentItem({ agent, now, t, onTask }: {
+  readonly agent: AgentView
+  readonly now: number
+  readonly t: Translate
+  readonly onTask: (id: string) => void
+}): ReactNode {
+  const status = agentStatus(agent)
+  const meta = [
+    agent.platform,
+    agent.mode,
+    // busy / idle is only meaningful while the worker is around.
+    agent.reported_status !== undefined && status === 'online' ? t(`agent.${agent.reported_status}`) : undefined,
+    t('embed.conc', { n: agent.running_tasks.length, max: agent.max_concurrency ?? 1 }),
+    present(agent.version) ? t('agent.version', { v: agent.version }) : undefined,
+    presence(agent, t, now),
+  ].filter(present)
+  const tip = [
+    agent.description,
+    agent.capabilities.length === 0 ? undefined : `${t('agents.col.caps')}: ${agent.capabilities.join(', ')}`,
+    agent.node === undefined ? undefined : `${t('group.node', { name: agent.node })}`,
+    agent.last_seen === undefined ? undefined : `${t('agents.col.seen')}: ${absolute(agent.last_seen)}`,
+    agent.left_at === undefined ? undefined : `${t('agent.status.left')}: ${absolute(agent.left_at)}`,
+  ].filter(present).join('\n')
+  return (
+    <li className="dah-item">
+      <div className="dah-item-row" title={tip === '' ? undefined : tip}>
+        <div className="dah-item-top">
+          <span className="dah-item-title dah-id">{agent.agent_id}</span>
+          <AgentBadge agent={agent} t={t} />
+        </div>
+        <span className="dah-item-meta">{meta.join(' · ')}</span>
+        {agent.running_tasks.length > 0
+          ? (
+            <span className="dah-chips">
+              {agent.running_tasks.map(id => (
+                <button key={id} type="button" className="dah-chip dah-id" onClick={() => { onTask(id) }}>{id}</button>
+              ))}
+            </span>
+          )
+          : null}
+      </div>
+    </li>
+  )
+}
+
+/** One DSH partition worker, shown beside the hub agents of its profile. */
+function SelfItem({ worker, t, onTask }: {
+  readonly worker: SelfWorker
+  readonly t: Translate
+  readonly onTask: (id: string) => void
+}): ReactNode {
+  const meta = [
+    t('self.busy', { n: worker.tasks.length }),
+    worker.quiet > 0 ? t('self.quiet', { n: worker.quiet }) : undefined,
+  ].filter(present)
+  return (
+    <li className="dah-item" data-kind="self">
+      <div className="dah-item-row">
+        <div className="dah-item-top">
+          <span className="dah-item-title dah-id">{worker.id}</span>
+          <span className="dah-badge" data-tone="self">{t('self.badge')}</span>
+        </div>
+        <span className="dah-item-meta">{meta.join(' · ')}</span>
+        <span className="dah-chips">
+          {worker.tasks.map(task => (
+            <button key={task.task_id} type="button" className="dah-chip" title={task.task_id} onClick={() => { onTask(task.task_id) }}>{task.title}</button>
+          ))}
+        </span>
+      </div>
+    </li>
+  )
+}
+
+/** Caption of an agent group. */
+function groupTitle(group: Pick<AgentGroup, 'kind' | 'key'>, t: Translate): string {
+  if (group.kind === 'profile') return t('group.profile', { name: group.key })
+  if (group.kind === 'node') return t('group.node', { name: group.key })
+  return t('group.none')
+}
+
+/**
+ * Embedded agent list: hub agents grouped by DSH profile, DSH's own partition
+ * workers (from the local tasks they hold) in the group of their profile, and
+ * the dormant agents behind one quiet toggle.
+ */
+function EmbeddedAgents({ agents, tasks, loaded, now, t, onTask }: {
   readonly agents: readonly AgentView[]
+  readonly tasks: readonly TaskRow[]
   readonly loaded: boolean
   readonly now: number
   readonly t: Translate
   readonly onTask: (id: string) => void
 }): ReactNode {
-  if (agents.length === 0) return loaded ? <Empty>{t('agents.empty')}</Empty> : null
+  const [showDormant, setShowDormant] = useState(false)
+  const { groups, dormant } = useMemo(() => agentGroups(agents), [agents])
+  const selves = useMemo(() => selfWorkers(tasks), [tasks])
+  // Profiles that only DSH's own workers use still get a group.
+  const all: AgentGroup[] = [...groups]
+  for (const profile of selves.keys()) {
+    if (!all.some(group => group.kind === 'profile' && group.key === profile)) {
+      all.push({ key: profile, kind: profile === '' ? 'none' : 'profile', agents: [] })
+    }
+  }
+  if (all.length === 0 && dormant.length === 0) return loaded ? <Empty>{t('agents.empty')}</Empty> : null
   return (
-    <ul className="dah-list">
-      {agents.map((agent) => {
-        const status = agentStatus(agent)
-        const meta = [
-          agent.platform,
-          agent.mode,
-          // busy / idle is only meaningful while the worker is around.
-          agent.reported_status !== undefined && status === 'online' ? t(`agent.${agent.reported_status}`) : undefined,
-          t('embed.conc', { n: agent.running_tasks.length, max: agent.max_concurrency ?? 1 }),
-          present(agent.version) ? t('agent.version', { v: agent.version }) : undefined,
-          presence(agent, t, now),
-        ].filter(present)
-        const tip = [
-          agent.description,
-          agent.capabilities.length === 0 ? undefined : `${t('agents.col.caps')}: ${agent.capabilities.join(', ')}`,
-          agent.last_seen === undefined ? undefined : `${t('agents.col.seen')}: ${absolute(agent.last_seen)}`,
-          agent.left_at === undefined ? undefined : `${t('agent.status.left')}: ${absolute(agent.left_at)}`,
-        ].filter(present).join('\n')
+    <>
+      {all.map(group => {
+        const mine = group.kind === 'profile' ? selves.get(group.key) ?? [] : group.kind === 'none' ? selves.get('') ?? [] : []
         return (
-          <li key={agent.agent_id} className="dah-item">
-            <div className="dah-item-row" title={tip === '' ? undefined : tip}>
-              <div className="dah-item-top">
-                <span className="dah-item-title dah-id">{agent.agent_id}</span>
-                <AgentBadge agent={agent} t={t} />
-              </div>
-              <span className="dah-item-meta">{meta.join(' · ')}</span>
-              {agent.running_tasks.length > 0
-                ? (
-                  <span className="dah-chips">
-                    {agent.running_tasks.map(id => (
-                      <button key={id} type="button" className="dah-chip dah-id" onClick={() => { onTask(id) }}>{id}</button>
-                    ))}
-                  </span>
-                )
-                : null}
-            </div>
-          </li>
+          <div key={`${group.kind}:${group.key}`} className="dah-sub">
+            {all.length > 1 || group.kind !== 'none' ? <div className="dah-sub-head">{groupTitle(group, t)}</div> : null}
+            <ul className="dah-list">
+              {group.agents.map(agent => <AgentItem key={agent.agent_id} agent={agent} now={now} t={t} onTask={onTask} />)}
+              {mine.map(worker => <SelfItem key={worker.id} worker={worker} t={t} onTask={onTask} />)}
+            </ul>
+          </div>
         )
       })}
-    </ul>
+      {dormant.length > 0
+        ? (
+          <div className="dah-sub" data-kind="dormant">
+            <button type="button" className="dah-link" title={t('dormant.hint')} aria-expanded={showDormant} onClick={() => { setShowDormant(value => !value) }}>
+              {showDormant ? t('dormant.hide') : t('dormant.show', { n: dormant.length })}
+            </button>
+            {showDormant
+              ? <ul className="dah-list">{dormant.map(agent => <AgentItem key={agent.agent_id} agent={agent} now={now} t={t} onTask={onTask} />)}</ul>
+              : null}
+          </div>
+        )
+        : null}
+    </>
   )
 }
 
@@ -493,68 +577,145 @@ function EmbeddedRequests({ section, status, now, t }: {
   )
 }
 
+/** Where a task came from, in a few words. */
+function originText(task: Pick<TaskRow, 'origin' | 'dsh_profile'>, t: Translate): string | undefined {
+  const kind = task.origin?.kind
+  if (kind === 'local') return present(task.dsh_profile) ? t('origin.local', { profile: task.dsh_profile }) : t('origin.local.any')
+  if (kind === 'agent') return t('origin.agent')
+  return undefined
+}
+
+/** One task row of the 调度台; opens its detail right under itself. */
+function TaskItem({ task, on, detail, now, t, onToggle }: {
+  readonly task: TaskRow
+  readonly on: boolean
+  readonly detail: ReactNode
+  readonly now: number
+  readonly t: Translate
+  readonly onToggle: (id: string) => void
+}): ReactNode {
+  const progress = percent(task.progress)
+  const stage = stageOf(task)
+  const holder = task.origin?.kind === 'local'
+    ? task.origin.executor ?? task.assigned_to ?? task.agent
+    : task.assigned_to !== undefined && task.assigned_to !== task.agent ? `${task.agent} → ${task.assigned_to}` : task.agent
+  const meta = [
+    holder,
+    originText(task, t),
+    task.priority === 'normal' ? undefined : t(`priority.${task.priority}`),
+    task.attempts > 1 ? t('embed.attempts', { n: task.attempts }) : undefined,
+    relative(task.updated_at ?? task.created_at, t, now),
+  ].filter(present)
+  const note = task.result === undefined
+    ? task.message
+    : [task.result.error?.code, task.result.needs_input ?? task.result.summary].filter(present).join(' ')
+  return (
+    <li className="dah-item" data-on={on}>
+      <div
+        className="dah-item-row" role="button" tabIndex={0} aria-expanded={on}
+        onClick={() => { onToggle(task.task_id) }} onKeyDown={onActivate(() => { onToggle(task.task_id) })}
+      >
+        <div className="dah-item-top">
+          <span className="dah-item-title" title={`${task.title}\n${task.task_id}`}>{task.title}</span>
+          {stage !== undefined
+            ? <span className="dah-badge" data-tone={stage === 'needs_input' || stage === 'blocked' ? 'pending' : task.status}>{t(`stage.${stage}`)}</span>
+            : <span className="dah-badge" data-tone={task.status}>{statusLabel(task.status, t)}</span>}
+        </div>
+        <span className="dah-item-meta" title={absolute(task.created_at)}>{meta.join(' · ')}</span>
+        {progress !== undefined && (task.status === 'running' || task.status === 'accepted')
+          ? <span className="dah-bar" title={progress}><i style={{ width: progress }} /></span>
+          : null}
+        {present(note)
+          ? <span className="dah-item-note" data-tone={task.result?.error !== undefined ? 'failed' : undefined} title={note}>{note}</span>
+          : null}
+        {task.quiet === true ? <span className="dah-item-note" data-tone="quiet">{t('task.quiet')}</span> : null}
+      </div>
+      {on ? detail : null}
+    </li>
+  )
+}
+
 /**
- * Embedded task list. A row opens its detail right under itself; a task that is
- * not in the list (opened from an agent's running chip) shows its detail on top.
+ * The 调度台's task list: five lanes (排队 → 已领取 → 进行中 → 等你回复 → 已结束),
+ * empty lanes left out; 已结束 folds. A task that is not in the list (opened from
+ * an agent's chip) shows its detail on top.
  */
-function EmbeddedTasks({ tasks, loaded, filtered, selected, detail, now, t, onToggle }: {
+function EmbeddedTasks({ tasks, loaded, history, selected, detail, endedOpen, onEnded, now, t, onToggle }: {
   readonly tasks: readonly TaskRow[]
   readonly loaded: boolean
-  readonly filtered: boolean
+  readonly history: boolean
+  readonly selected: string | undefined
+  readonly detail: ReactNode
+  readonly endedOpen: boolean
+  readonly onEnded: () => void
+  readonly now: number
+  readonly t: Translate
+  readonly onToggle: (id: string) => void
+}): ReactNode {
+  const lanes = useMemo(() => lanesOf(tasks), [tasks])
+  const orphan = selected !== undefined && !tasks.some(task => task.task_id === selected)
+  const item = (task: TaskRow): ReactNode => (
+    <TaskItem key={task.task_id} task={task} on={selected === task.task_id} detail={detail} now={now} t={t} onToggle={onToggle} />
+  )
+  if (history) {
+    return (
+      <>
+        {orphan ? detail : null}
+        <p className="dah-note">{t('history.note')}</p>
+        {tasks.length === 0
+          ? (loaded ? <Empty>{t('history.empty')}</Empty> : null)
+          : <ul className="dah-list">{tasks.map(item)}</ul>}
+      </>
+    )
+  }
+  return (
+    <>
+      {orphan ? detail : null}
+      {tasks.length === 0 && loaded ? <Empty>{t('tasks.empty.all')}</Empty> : null}
+      {LANES.filter(lane => lanes[lane].length > 0).map((lane: Lane) => {
+        const rows = lanes[lane]
+        const folded = lane === 'ended' && !endedOpen
+        return (
+          <div key={lane} className="dah-sub" data-lane={lane}>
+            {lane === 'ended'
+              ? (
+                <button type="button" className="dah-sub-head" data-button="true" aria-expanded={!folded} title={t('lane.ended.hint')} onClick={onEnded}>
+                  <Caret />
+                  {t(`lane.${lane}`)}
+                  <span className="dah-count">{String(rows.length)}</span>
+                </button>
+              )
+              : (
+                <div className="dah-sub-head">
+                  {t(`lane.${lane}`)}
+                  <span className="dah-count">{String(rows.length)}</span>
+                </div>
+              )}
+            {folded ? null : <ul className="dah-list">{rows.map(item)}</ul>}
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
+/** Tasks DSH took over itself, with who did it; the reason is in the detail. */
+function EmbeddedFallback({ tasks, selected, detail, now, t, onToggle }: {
+  readonly tasks: readonly TaskRow[]
   readonly selected: string | undefined
   readonly detail: ReactNode
   readonly now: number
   readonly t: Translate
   readonly onToggle: (id: string) => void
 }): ReactNode {
-  const orphan = selected !== undefined && !tasks.some(task => task.task_id === selected)
+  if (tasks.length === 0) return <Empty>{t('fallback.empty')}</Empty>
   return (
-    <>
-      {orphan ? detail : null}
-      {tasks.length === 0
-        ? (loaded ? <Empty>{filtered ? t('tasks.empty') : t('tasks.empty.all')}</Empty> : null)
-        : (
-          <ul className="dah-list">
-            {tasks.map((task) => {
-              const on = selected === task.task_id
-              const progress = percent(task.progress)
-              const holder = task.assigned_to !== undefined && task.assigned_to !== task.agent ? `${task.agent} → ${task.assigned_to}` : task.agent
-              const meta = [
-                task.task_id,
-                holder,
-                task.type,
-                task.priority === 'normal' ? undefined : t(`priority.${task.priority}`),
-                task.attempts > 1 ? t('embed.attempts', { n: task.attempts }) : undefined,
-                relative(task.created_at, t, now),
-              ].filter(present)
-              const note = task.result === undefined
-                ? task.message
-                : [task.result.error?.code, task.result.summary].filter(present).join(' ')
-              return (
-                <li key={task.task_id} className="dah-item" data-on={on}>
-                  <div
-                    className="dah-item-row" role="button" tabIndex={0} aria-expanded={on}
-                    onClick={() => { onToggle(task.task_id) }} onKeyDown={onActivate(() => { onToggle(task.task_id) })}
-                  >
-                    <div className="dah-item-top">
-                      <span className="dah-item-title" title={task.title}>{task.title}</span>
-                      <span className="dah-badge" data-tone={task.status}>{statusLabel(task.status, t)}</span>
-                    </div>
-                    <span className="dah-item-meta" title={absolute(task.created_at)}>{meta.join(' · ')}</span>
-                    {progress !== undefined && (task.status === 'running' || task.status === 'accepted')
-                      ? <span className="dah-bar" title={progress}><i style={{ width: progress }} /></span>
-                      : null}
-                    {present(note)
-                      ? <span className="dah-item-note" data-tone={task.result?.error !== undefined ? 'failed' : undefined} title={note}>{note}</span>
-                      : null}
-                  </div>
-                  {on ? detail : null}
-                </li>
-              )
-            })}
-          </ul>
-        )}
-    </>
+    <ul className="dah-list">
+      {tasks.map(task => (
+        <TaskItem key={task.task_id} task={{ ...task, message: task.message ?? t('fallback.by', { by: task.fallback_by ?? '' }) }}
+          on={selected === task.task_id} detail={detail} now={now} t={t} onToggle={onToggle} />
+      ))}
+    </ul>
   )
 }
 
@@ -713,16 +874,127 @@ function RequestsSection({ section, status, onStatus, now, t }: {
 }
 
 /** One task's detail block. */
-function TaskDetailView({ detail, t, now, onClose, onTask }: {
+/** Session entries per read. */
+const SESSION_PAGE = 200
+
+/**
+ * A task's stored session (what the executor and the task said, tool calls,
+ * notes), read on demand in pages. The hub redacted it before storing it.
+ */
+function SessionView({ taskId, count, t }: { readonly taskId: string; readonly count: number; readonly t: Translate }): ReactNode {
+  const [open, setOpen] = useState(false)
+  const [entries, setEntries] = useState<readonly SessionEntry[]>([])
+  const [doc, setDoc] = useState<SessionDoc | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(undefined)
+  const ticket = useRef(0)
+  useEffect(() => {
+    ticket.current += 1
+    setOpen(false)
+    setEntries([])
+    setDoc(undefined)
+    setError(undefined)
+  }, [taskId])
+  useEffect(() => () => { ticket.current += 1 }, [])
+  const read = (after: number): void => {
+    ticket.current += 1
+    const mine = ticket.current
+    setBusy(true)
+    fetchSession(taskId, after, SESSION_PAGE).then((next) => {
+      if (mine !== ticket.current) return
+      setDoc(next)
+      setEntries(previous => (after === 0 ? next.entries : [...previous, ...next.entries]))
+      setError(undefined)
+      setBusy(false)
+    }, (failure: unknown) => {
+      if (mine !== ticket.current) return
+      setError(failure)
+      setBusy(false)
+    })
+  }
+  if (!open) {
+    if (count <= 0) return <div className="dah-muted">{t('detail.session.none')}</div>
+    return (
+      <button type="button" className="dah-btn" data-size="sm" onClick={() => { setOpen(true); read(0) }}>
+        {t('detail.session.load', { n: count })}
+      </button>
+    )
+  }
+  const total = doc?.total ?? count
+  const more = doc !== undefined && entries.length < total
+  return (
+    <div className="dah-session">
+      {error !== undefined ? <div className="dah-alert" role="alert">{t('error.section', { error: messageOf(error) })}</div> : null}
+      {entries.length === 0 && busy ? <div className="dah-muted">{t('detail.session.loading')}</div> : null}
+      {doc !== undefined && entries.length === 0 && !busy ? <div className="dah-muted">{t('detail.session.none')}</div> : null}
+      <ol className="dah-session-list">
+        {entries.map((entry, index) => {
+          const role = present(entry.role) ? entry.role : 'note'
+          const label = ['user', 'assistant', 'tool', 'note', 'system'].includes(role) ? t(`role.${role}`) : role
+          return (
+            <li key={`${String(entry.index ?? index)}`} className="dah-session-entry" data-role={role}>
+              <span className="dah-session-who">
+                {present(entry.name) ? `${label} · ${entry.name}` : label}
+                {present(entry.at) ? <span className="dah-muted" title={absolute(entry.at)}>{` ${clockOf(entry.at)}`}</span> : null}
+              </span>
+              <pre className="dah-session-text">{entry.text ?? ''}</pre>
+            </li>
+          )
+        })}
+      </ol>
+      <div className="dah-session-foot">
+        <span className="dah-muted">{t('detail.session.shown', { n: entries.length, total })}</span>
+        {more ? <button type="button" className="dah-btn" data-size="sm" disabled={busy} onClick={() => { read(entries.length) }}>{t('detail.session.more')}</button> : null}
+      </div>
+      {doc?.full === true ? <p className="dah-note">{t('detail.session.full')}</p> : null}
+    </div>
+  )
+}
+
+/** HH:MM:SS of an ISO time, or nothing. */
+function clockOf(iso: string): string {
+  const ms = Date.parse(iso)
+  return Number.isFinite(ms) ? clock(ms) : ''
+}
+
+/** Put a failed task away: one button, its own busy and error state. */
+function AckButton({ task, t, onDone }: { readonly task: TaskDetail; readonly t: Translate; readonly onDone: () => void }): ReactNode {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(undefined)
+  if (task.acknowledged === true || task.in_history === true) return <span className="dah-muted">{t('detail.acked')}</span>
+  return (
+    <>
+      <button
+        type="button" className="dah-btn" data-size="sm" disabled={busy} title={t('detail.ack.hint')}
+        onClick={() => {
+          setBusy(true)
+          ackTask(task.task_id).then(() => { setBusy(false); setError(undefined); onDone() }, (failure: unknown) => { setBusy(false); setError(failure) })
+        }}
+      >
+        {busy ? t('detail.ack.busy') : t('detail.ack')}
+      </button>
+      {error !== undefined ? <span className="dah-error-text">{t('detail.ack.failed', { error: messageOf(error) })}</span> : null}
+    </>
+  )
+}
+
+/** Locale key of a fallback reason. */
+const FALLBACK_KEY = { 'nobody-online': 'fallback.nobody-online', 'waited-out': 'fallback.waited-out', other: 'fallback.other' } as const
+
+function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }: {
   readonly detail: DetailState
   readonly t: Translate
   readonly now: number
   readonly onClose: () => void
   readonly onTask: (id: string) => void
+  /** The task changed here (put away): read the lists again. */
+  readonly onChanged?: () => void
 }): ReactNode {
   const task: TaskDetail | undefined = detail.data?.task
   const result = task?.result
-  const history = task === undefined ? [] : [...task.history].reverse()
+  const history = task === undefined ? [] : timeline(task.history)
+  const reason = task === undefined || task.fallback_by === undefined ? undefined : fallbackReason(task.history)
+  const failed = task !== undefined && (task.status === 'failed' || task.status === 'dead')
   return (
     <div className="dah-detail" role="region" aria-label={t('detail.title')}>
       <div className="dah-detail-head">
@@ -731,6 +1003,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask }: {
           {task !== undefined ? <span className="dah-sub-line dah-id">{task.task_id}</span> : null}
         </h3>
         {task !== undefined ? <span className="dah-badge" data-pill="true" data-tone={task.status}>{statusLabel(task.status, t)}</span> : null}
+        {failed && task !== undefined ? <AckButton task={task} t={t} onDone={() => { onChanged?.() }} /> : null}
         <button type="button" className="dah-btn" data-size="sm" data-icon="true" onClick={onClose} aria-label={t('detail.close')}>×</button>
       </div>
       {detail.error !== undefined ? <div className="dah-alert" role="alert">{t('error.section', { error: messageOf(detail.error) })}</div> : null}
@@ -739,6 +1012,14 @@ function TaskDetailView({ detail, t, now, onClose, onTask }: {
         : (
           <>
             <dl className="dah-meta">
+              {task.origin !== undefined && task.origin.kind !== 'controller'
+                ? <div><dt>{t('detail.meta.origin')}</dt><dd>{originText(task, t) ?? task.origin.kind}{present(task.origin.executor) ? <span className="dah-sub-line dah-id">{task.origin.executor}</span> : null}</dd></div>
+                : null}
+              {present(task.dsh_profile) ? <div><dt>{t('detail.meta.profile')}</dt><dd className="dah-id">{task.dsh_profile}</dd></div> : null}
+              {task.stage !== undefined ? <div><dt>{t('detail.meta.stage')}</dt><dd>{t(`stage.${task.stage}`)}</dd></div> : null}
+              {task.fallback_by !== undefined
+                ? <div><dt>{t('detail.meta.fallback')}</dt><dd>{`${t(FALLBACK_KEY[reason ?? 'other'])} · ${task.fallback_by}`}</dd></div>
+                : null}
               <div><dt>{t('detail.meta.target')}</dt><dd className="dah-id">{task.agent}</dd></div>
               <div><dt>{t('detail.meta.assigned')}</dt><dd className="dah-id">{task.assigned_to ?? t('value.none')}</dd></div>
               {task.preferred_agent !== undefined
@@ -835,7 +1116,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask }: {
             </div>
 
             <div className="dah-block">
-              <h4 className="dah-block-title">{t('detail.history')}</h4>
+              <h4 className="dah-block-title">{t('detail.timeline')}</h4>
               {history.length === 0
                 ? <div className="dah-muted">{t('detail.history.none')}</div>
                 : (
@@ -845,7 +1126,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask }: {
                       return (
                         <li key={`${event.at ?? ''}-${String(index)}`} data-tone={flag === undefined ? undefined : 'warn'}>
                           <span className="dah-history-time" title={absolute(event.at)}>{absolute(event.at)}</span>
-                          <span className="dah-history-event">{event.event ?? ''}</span>
+                          <span className="dah-history-event">{event.stage !== undefined ? t(`stage.${event.stage}`) : event.event ?? ''}</span>
                           <span>
                             {flag === undefined ? null : <span className="dah-history-flag">{t(PRESENCE_KEY[flag])}</span>}
                             {event.message ?? ''}
@@ -855,6 +1136,11 @@ function TaskDetailView({ detail, t, now, onClose, onTask }: {
                     })}
                   </ul>
                 )}
+            </div>
+
+            <div className="dah-block">
+              <h4 className="dah-block-title">{t('detail.session')}</h4>
+              <SessionView taskId={task.task_id} count={task.session_entries ?? 0} t={t} />
             </div>
           </>
         )}
@@ -876,7 +1162,8 @@ export function createAgentHubBoardTab(t: Translate, onOverview: (overview: Over
 
 /** Draw the page, or its embedded form. */
 export function AgentHubPage({ t, embedded = false, onOverview }: AgentHubPageProps): ReactNode {
-  const [filter, setFilter] = useState<TaskFilter>({ status: 'all', agent: '', limit: 50 })
+  // The 调度台 reads every open task at once (lanes, not a status filter); the page keeps its table filter.
+  const [filter, setFilter] = useState<TaskFilter>(embedded ? { status: 'all', agent: '', limit: 200, history: 'hide' } : { status: 'all', agent: '', limit: 50 })
   const [requestStatus, setRequestStatus] = useState<string>('pending')
   const [auto, setAuto] = useState(true)
   const [selected, setSelected] = useState<string | undefined>(undefined)
@@ -1007,19 +1294,62 @@ export function AgentHubPage({ t, embedded = false, onOverview }: AgentHubPagePr
   )
 
   if (embedded) {
-    const isOpen = (part: Part): boolean => folds[part] ?? (part !== 'requests' || pendingRequests > 0 || requestStatus !== 'pending')
+    const isOpen = (part: Part): boolean => folds[part] ?? (part === 'ended' ? false : part !== 'requests' || pendingRequests > 0 || requestStatus !== 'pending')
     const flip = (part: Part): void => {
       const next = !isOpen(part)
       setFolds(previous => ({ ...previous, [part]: next }))
     }
+    const inHistory = filter.history === 'only'
+    const openCount = tasks.filter(task => task.status !== 'completed' && task.status !== 'failed' && task.status !== 'cancelled' && task.status !== 'dead').length
+    const fallback = inHistory ? [] : fallbackTasks(tasks)
     const requestCount = board.requests.data === undefined ? '' : String(board.requests.data.requests.length)
     const detailNode = selected === undefined
       ? null
       : (
         <div ref={detailRef} className="dah-item-detail">
-          <TaskDetailView detail={detail} t={t} now={now} onClose={() => { setSelected(undefined) }} onTask={openTask} />
+          <TaskDetailView detail={detail} t={t} now={now} onClose={() => { setSelected(undefined) }} onTask={openTask} onChanged={() => { load(true) }} />
         </div>
       )
+    const summary = (
+      <div className="dah-summary">
+        <div className="dah-stat" title={t('desk.active.hint')}>
+          <span className="dah-stat-label">{t('desk.active')}</span>
+          <span className="dah-stat-value">{board.tasks.data === undefined || inHistory ? t('value.none') : String(openCount)}</span>
+        </div>
+        <div
+          className="dah-stat" data-tone={statCounts.counts.online > 0 ? 'online' : 'offline'}
+          title={t('stat.online.counts', { list: countsText(statCounts.counts, t, () => true) })}
+        >
+          <span className="dah-stat-label"><span className="dah-dot" aria-hidden="true" />{t('stat.online')}</span>
+          <span className="dah-stat-value">
+            {String(statCounts.counts.online)}
+            <span className="dah-stat-of">{`/${String(statCounts.total - (overview?.dormant_agents ?? 0))}`}</span>
+          </span>
+          <span className="dah-stat-note">{otherStates === '' ? t('stat.online.of', { n: statCounts.total }) : otherStates}</span>
+        </div>
+        <div className="dah-stat" data-tone={pendingRequests > 0 ? 'pending' : undefined}>
+          <span className="dah-stat-label"><span className="dah-dot" aria-hidden="true" />{t('stat.requests')}</span>
+          <span className="dah-stat-value">{overview === undefined ? t('value.none') : String(pendingRequests)}</span>
+        </div>
+      </div>
+    )
+    const taskTools = (
+      <span className="dah-tools">
+        <select
+          className="dah-select" value={filter.agent} aria-label={t('tasks.col.agent')}
+          onChange={(event) => { const value = event.target.value; setFilter(previous => ({ ...previous, agent: value })) }}
+        >
+          <option value="">{t('tasks.filter.agent')}</option>
+          {agentOptions.map(id => <option key={id} value={id}>{id}</option>)}
+        </select>
+        <button
+          type="button" className="dah-btn" data-size="sm" aria-pressed={inHistory}
+          onClick={() => { setSelected(undefined); setFilter(previous => ({ ...previous, history: previous.history === 'only' ? 'hide' : 'only' })) }}
+        >
+          {inHistory ? t('history.back') : t('history.show')}
+        </button>
+      </span>
+    )
     return (
       <div className="dah-page" data-embedded="true" ref={rootRef}>
         <div className="dah-inner">
@@ -1039,40 +1369,52 @@ export function AgentHubPage({ t, embedded = false, onOverview }: AgentHubPagePr
             : (
               <>
                 {staleAlert}
-                {overviewBlock}
+                {summary}
                 <EmbeddedFold
-                  part="agents" title={t('agents.title')} count={`${String(online)} / ${String(agents.length)}`}
+                  part="tasks" title={inHistory ? t('history.show') : t('tasks.title')}
+                  count={board.tasks.data === undefined ? '' : String(tasks.length)}
+                  open={isOpen('tasks')} onToggle={() => { flip('tasks') }} tools={taskTools}
+                >
+                  <SectionError error={board.tasks.error} t={t} />
+                  <EmbeddedTasks
+                    tasks={tasks} loaded={board.tasks.data !== undefined} history={inHistory}
+                    selected={selected} detail={detailNode} endedOpen={isOpen('ended')} onEnded={() => { flip('ended') }}
+                    now={now} t={t} onToggle={toggleTask}
+                  />
+                </EmbeddedFold>
+                <EmbeddedFold
+                  part="agents" title={t('agents.title')} count={`${String(online)} / ${String(agents.filter(agent => agent.dormant !== true && !agent.revoked).length)}`}
                   note={<OfflineNote counts={listCounts.counts} t={t} />}
                   open={isOpen('agents')} onToggle={() => { flip('agents') }}
                 >
                   <SectionError error={board.agents.error} t={t} />
-                  <EmbeddedAgents agents={agents} loaded={board.agents.data !== undefined} now={now} t={t} onTask={openTask} />
+                  <EmbeddedAgents agents={agents} tasks={tasks} loaded={board.agents.data !== undefined} now={now} t={t} onTask={openTask} />
                 </EmbeddedFold>
-                <EmbeddedFold
-                  part="requests" title={t('requests.title')} count={requestCount}
-                  open={isOpen('requests')} onToggle={() => { flip('requests') }}
-                  tools={(
-                    <select className="dah-select" value={requestStatus} onChange={(event) => { setRequestStatus(event.target.value) }} aria-label={t('requests.col.status')}>
-                      {REQUEST_FILTERS.map(value => <option key={value} value={value}>{t(`req.${value}`)}</option>)}
-                    </select>
-                  )}
-                >
-                  {pendingRequests > 0 ? <div className="dah-alert" data-kind="warn">{t('approve.hint', { n: pendingRequests })}</div> : null}
-                  <SectionError error={board.requests.error} t={t} />
-                  <EmbeddedRequests section={board.requests} status={requestStatus} now={now} t={t} />
-                </EmbeddedFold>
-                <EmbeddedFold
-                  part="tasks" title={t('tasks.title')} count={board.tasks.data === undefined ? '' : t('tasks.shown', { n: tasks.length })}
-                  open={isOpen('tasks')} onToggle={() => { flip('tasks') }}
-                >
-                  {taskFilters}
-                  <SectionError error={board.tasks.error} t={t} />
-                  <EmbeddedTasks
-                    tasks={tasks} loaded={board.tasks.data !== undefined} filtered={filter.status !== 'all' || filter.agent !== ''}
-                    selected={selected} detail={detailNode} now={now} t={t} onToggle={toggleTask}
-                  />
-                </EmbeddedFold>
-                <p className="dah-foot">{t('readonly.hint')}</p>
+                {fallback.length > 0
+                  ? (
+                    <EmbeddedFold part="fallback" title={t('fallback.title')} count={String(fallback.length)} open={isOpen('fallback')} onToggle={() => { flip('fallback') }}>
+                      <EmbeddedFallback tasks={fallback} selected={selected} detail={detailNode} now={now} t={t} onToggle={toggleTask} />
+                    </EmbeddedFold>
+                  )
+                  : null}
+                {pendingRequests > 0 || requestStatus !== 'pending' || folds.requests === true
+                  ? (
+                    <EmbeddedFold
+                      part="requests" title={t('requests.title')} count={requestCount}
+                      open={isOpen('requests')} onToggle={() => { flip('requests') }}
+                      tools={(
+                        <select className="dah-select" value={requestStatus} onChange={(event) => { setRequestStatus(event.target.value) }} aria-label={t('requests.col.status')}>
+                          {REQUEST_FILTERS.map(value => <option key={value} value={value}>{t(`req.${value}`)}</option>)}
+                        </select>
+                      )}
+                    >
+                      {pendingRequests > 0 ? <div className="dah-alert" data-kind="warn">{t('approve.hint', { n: pendingRequests })}</div> : null}
+                      <SectionError error={board.requests.error} t={t} />
+                      <EmbeddedRequests section={board.requests} status={requestStatus} now={now} t={t} />
+                    </EmbeddedFold>
+                  )
+                  : null}
+                <p className="dah-foot">{t('desk.hint')}</p>
               </>
             )}
         </div>
@@ -1206,7 +1548,7 @@ export function AgentHubPage({ t, embedded = false, onOverview }: AgentHubPagePr
           {selected !== undefined
             ? (
               <div ref={detailRef}>
-                <TaskDetailView detail={detail} t={t} now={now} onClose={() => { setSelected(undefined) }} onTask={openTask} />
+                <TaskDetailView detail={detail} t={t} now={now} onClose={() => { setSelected(undefined) }} onTask={openTask} onChanged={() => { load(true) }} />
               </div>
             )
             : null}

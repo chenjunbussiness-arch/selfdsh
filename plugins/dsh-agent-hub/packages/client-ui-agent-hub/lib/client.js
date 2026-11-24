@@ -38,6 +38,93 @@ var import_react = require("react");
 var TASK_STATUSES = ["pending", "accepted", "running", "completed", "failed", "cancelled", "dead"];
 var AGENT_STATUSES = ["online", "pending", "offline", "left", "revoked"];
 
+// src/client/desk.ts
+var LANES = ["queued", "claimed", "running", "waiting", "ended"];
+var SELF_PREFIX = "dsh-self";
+function laneOf(task) {
+  const finished = task.status === "completed" || task.status === "failed" || task.status === "cancelled" || task.status === "dead";
+  const asks = task.stage === "needs_input" || task.result?.needs_input !== void 0 && task.result.needs_input !== "";
+  if (asks && (!finished || task.result?.status === "partial")) return "waiting";
+  if (finished) return "ended";
+  if (task.status === "pending") return "queued";
+  if (task.status === "accepted") return "claimed";
+  return "running";
+}
+function lanesOf(tasks) {
+  const out = { queued: [], claimed: [], running: [], waiting: [], ended: [] };
+  for (const task of tasks) out[laneOf(task)].push(task);
+  const at = (task) => task.updated_at ?? task.finished_at ?? task.created_at;
+  for (const lane of LANES) out[lane].sort((a, b) => at(b).localeCompare(at(a)));
+  out.queued.reverse();
+  return out;
+}
+function agentGroups(agents) {
+  const live = /* @__PURE__ */ new Map();
+  const dormant = [];
+  for (const agent of agents) {
+    if (agent.dormant === true || agent.revoked) {
+      dormant.push(agent);
+      continue;
+    }
+    const kind = agent.dsh_profile !== void 0 && agent.dsh_profile !== "" ? "profile" : agent.node !== void 0 && agent.node !== "" ? "node" : "none";
+    const key = kind === "profile" ? agent.dsh_profile ?? "" : kind === "node" ? agent.node ?? "" : "";
+    const id = `${kind}:${key}`;
+    const slot = live.get(id) ?? { kind, agents: [] };
+    slot.agents.push(agent);
+    live.set(id, slot);
+  }
+  const rank = { profile: 0, node: 1, none: 2 };
+  const groups = [...live.entries()].map(([id, slot]) => ({ key: id.slice(id.indexOf(":") + 1), kind: slot.kind, agents: slot.agents })).sort((a, b) => rank[a.kind] - rank[b.kind] || a.key.localeCompare(b.key));
+  return { groups, dormant };
+}
+function selfParts(id) {
+  const parts = id.split("/");
+  if (parts[0] !== SELF_PREFIX) return {};
+  return { profile: parts[1] === "" ? void 0 : parts[1], partition: parts.slice(2).join("/") || void 0 };
+}
+function selfWorkers(tasks) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const task of tasks) {
+    if (task.origin?.kind !== "local" || laneOf(task) === "ended") continue;
+    const id = task.origin.executor ?? task.assigned_to ?? SELF_PREFIX;
+    byId.set(id, [...byId.get(id) ?? [], task]);
+  }
+  const out = /* @__PURE__ */ new Map();
+  for (const [id, held] of [...byId.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const { profile, partition } = selfParts(id);
+    const worker = { id, profile: profile ?? held[0]?.dsh_profile, partition, tasks: held, quiet: held.filter((task) => task.quiet === true).length };
+    const key = worker.profile ?? "";
+    out.set(key, [...out.get(key) ?? [], worker]);
+  }
+  return out;
+}
+function fallbackTasks(tasks) {
+  return tasks.filter((task) => task.origin?.kind !== "local" && task.fallback_by !== void 0 && task.fallback_by !== "");
+}
+function fallbackReason(history) {
+  const entry = [...history].reverse().find((event) => event.event === "fallback");
+  if (entry === void 0) return void 0;
+  const text = entry.message ?? "";
+  if (/no worker .*online/i.test(text)) return "nobody-online";
+  if (/nobody took it in time/i.test(text)) return "waited-out";
+  return "other";
+}
+function timeline(history) {
+  const out = [];
+  for (const event of history) {
+    const empty = (event.message === void 0 || event.message === "") && event.stage === void 0;
+    if (event.event === "progress" && empty) continue;
+    const last = out.at(-1);
+    if (last !== void 0 && event.event === "progress" && last.event === "progress" && event.stage === last.stage && event.message === last.message) continue;
+    out.push(event);
+  }
+  return out.reverse();
+}
+function stageOf(task) {
+  if (task.status === "completed" || task.status === "cancelled") return void 0;
+  return task.stage;
+}
+
 // src/client/format.ts
 function ageMs(iso, now = Date.now()) {
   if (iso === void 0) return void 0;
@@ -170,16 +257,18 @@ function errorOf(body) {
     message: typeof message === "string" ? message : void 0
   };
 }
-async function getJson(path, params = {}) {
+function getJson(path, params = {}) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== void 0 && value !== "") query.set(key, String(value));
   }
   const text = query.toString();
-  const url = `${ADMIN_BASE}/${path}${text === "" ? "" : `?${text}`}`;
+  return send(`${ADMIN_BASE}/${path}${text === "" ? "" : `?${text}`}`, { method: "GET" });
+}
+async function send(url, init) {
   let response;
   try {
-    response = await fetch(url, { method: "GET", credentials: "same-origin", cache: "no-store", headers: { accept: "application/json" } });
+    response = await fetch(url, { credentials: "same-origin", cache: "no-store", ...init, headers: { accept: "application/json", ...init.headers ?? {} } });
   } catch (error) {
     throw new SourceError(error instanceof Error ? error.message : String(error), 0);
   }
@@ -209,7 +298,8 @@ function fetchTasks(filter) {
   return getJson("tasks", {
     status: filter.status === "all" ? void 0 : filter.status,
     agent: filter.agent === "" ? void 0 : filter.agent,
-    limit: filter.limit
+    limit: filter.limit,
+    history: filter.history === void 0 || filter.history === "hide" ? void 0 : filter.history
   });
 }
 function fetchTask(taskId) {
@@ -217,6 +307,17 @@ function fetchTask(taskId) {
 }
 function fetchRequests(status) {
   return getJson("requests", { status });
+}
+function fetchSession(taskId, after = 0, limit = 200) {
+  return getJson("session", { task_id: taskId, after, limit });
+}
+async function ackTask(taskId) {
+  const body = await send(`${ADMIN_BASE}/ack`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task_id: taskId })
+  });
+  return body.task;
 }
 
 // src/client/AgentHubPage.tsx
@@ -395,7 +496,7 @@ function useShown(target, enabled) {
   }, [target, enabled]);
   return shown;
 }
-var PARTS = ["agents", "requests", "tasks"];
+var PARTS = ["agents", "requests", "tasks", "fallback", "ended"];
 var FOLDS_KEY = "dah.embed.open";
 function readFolds() {
   try {
@@ -453,36 +554,85 @@ function EmbeddedFold({ part, title, count, note, open, onToggle, tools, childre
     open ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-group-body", children }) : null
   ] });
 }
-function EmbeddedAgents({ agents, loaded, now, t, onTask }) {
-  if (agents.length === 0) return loaded ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: t("agents.empty") }) : null;
-  return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-list", children: agents.map((agent) => {
-    const status = agentStatus(agent);
-    const meta = [
-      agent.platform,
-      agent.mode,
-      // busy / idle is only meaningful while the worker is around.
-      agent.reported_status !== void 0 && status === "online" ? t(`agent.${agent.reported_status}`) : void 0,
-      t("embed.conc", { n: agent.running_tasks.length, max: agent.max_concurrency ?? 1 }),
-      present(agent.version) ? t("agent.version", { v: agent.version }) : void 0,
-      presence(agent, t, now)
-    ].filter(present);
-    const tip = [
-      agent.description,
-      agent.capabilities.length === 0 ? void 0 : `${t("agents.col.caps")}: ${agent.capabilities.join(", ")}`,
-      agent.last_seen === void 0 ? void 0 : `${t("agents.col.seen")}: ${absolute(agent.last_seen)}`,
-      agent.left_at === void 0 ? void 0 : `${t("agent.status.left")}: ${absolute(agent.left_at)}`
-    ].filter(present).join("\n");
-    return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("li", { className: "dah-item", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-item-row", title: tip === "" ? void 0 : tip, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-item-top", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-title dah-id", children: agent.agent_id }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AgentBadge, { agent, t })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-meta", children: meta.join(" \xB7 ") }),
-      agent.running_tasks.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-chips", children: agent.running_tasks.map((id) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-chip dah-id", onClick: () => {
-        onTask(id);
-      }, children: id }, id)) }) : null
-    ] }) }, agent.agent_id);
-  }) });
+function AgentItem({ agent, now, t, onTask }) {
+  const status = agentStatus(agent);
+  const meta = [
+    agent.platform,
+    agent.mode,
+    // busy / idle is only meaningful while the worker is around.
+    agent.reported_status !== void 0 && status === "online" ? t(`agent.${agent.reported_status}`) : void 0,
+    t("embed.conc", { n: agent.running_tasks.length, max: agent.max_concurrency ?? 1 }),
+    present(agent.version) ? t("agent.version", { v: agent.version }) : void 0,
+    presence(agent, t, now)
+  ].filter(present);
+  const tip = [
+    agent.description,
+    agent.capabilities.length === 0 ? void 0 : `${t("agents.col.caps")}: ${agent.capabilities.join(", ")}`,
+    agent.node === void 0 ? void 0 : `${t("group.node", { name: agent.node })}`,
+    agent.last_seen === void 0 ? void 0 : `${t("agents.col.seen")}: ${absolute(agent.last_seen)}`,
+    agent.left_at === void 0 ? void 0 : `${t("agent.status.left")}: ${absolute(agent.left_at)}`
+  ].filter(present).join("\n");
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("li", { className: "dah-item", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-item-row", title: tip === "" ? void 0 : tip, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-item-top", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-title dah-id", children: agent.agent_id }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AgentBadge, { agent, t })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-meta", children: meta.join(" \xB7 ") }),
+    agent.running_tasks.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-chips", children: agent.running_tasks.map((id) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-chip dah-id", onClick: () => {
+      onTask(id);
+    }, children: id }, id)) }) : null
+  ] }) });
+}
+function SelfItem({ worker, t, onTask }) {
+  const meta = [
+    t("self.busy", { n: worker.tasks.length }),
+    worker.quiet > 0 ? t("self.quiet", { n: worker.quiet }) : void 0
+  ].filter(present);
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("li", { className: "dah-item", "data-kind": "self", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-item-row", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-item-top", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-title dah-id", children: worker.id }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-tone": "self", children: t("self.badge") })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-meta", children: meta.join(" \xB7 ") }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-chips", children: worker.tasks.map((task) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-chip", title: task.task_id, onClick: () => {
+      onTask(task.task_id);
+    }, children: task.title }, task.task_id)) })
+  ] }) });
+}
+function groupTitle(group, t) {
+  if (group.kind === "profile") return t("group.profile", { name: group.key });
+  if (group.kind === "node") return t("group.node", { name: group.key });
+  return t("group.none");
+}
+function EmbeddedAgents({ agents, tasks, loaded, now, t, onTask }) {
+  const [showDormant, setShowDormant] = (0, import_react.useState)(false);
+  const { groups, dormant } = (0, import_react.useMemo)(() => agentGroups(agents), [agents]);
+  const selves = (0, import_react.useMemo)(() => selfWorkers(tasks), [tasks]);
+  const all = [...groups];
+  for (const profile of selves.keys()) {
+    if (!all.some((group) => group.kind === "profile" && group.key === profile)) {
+      all.push({ key: profile, kind: profile === "" ? "none" : "profile", agents: [] });
+    }
+  }
+  if (all.length === 0 && dormant.length === 0) return loaded ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: t("agents.empty") }) : null;
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+    all.map((group) => {
+      const mine = group.kind === "profile" ? selves.get(group.key) ?? [] : group.kind === "none" ? selves.get("") ?? [] : [];
+      return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-sub", children: [
+        all.length > 1 || group.kind !== "none" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-sub-head", children: groupTitle(group, t) }) : null,
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("ul", { className: "dah-list", children: [
+          group.agents.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AgentItem, { agent, now, t, onTask }, agent.agent_id)),
+          mine.map((worker) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(SelfItem, { worker, t, onTask }, worker.id))
+        ] })
+      ] }, `${group.kind}:${group.key}`);
+    }),
+    dormant.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-sub", "data-kind": "dormant", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-link", title: t("dormant.hint"), "aria-expanded": showDormant, onClick: () => {
+        setShowDormant((value) => !value);
+      }, children: showDormant ? t("dormant.hide") : t("dormant.show", { n: dormant.length }) }),
+      showDormant ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-list", children: dormant.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AgentItem, { agent, now, t, onTask }, agent.agent_id)) }) : null
+    ] }) : null
+  ] });
 }
 function EmbeddedRequests({ section, status, now, t }) {
   const requests = section.data?.requests ?? [];
@@ -513,52 +663,99 @@ function EmbeddedRequests({ section, status, now, t }) {
     ] }) }, request.request_id);
   }) });
 }
-function EmbeddedTasks({ tasks, loaded, filtered, selected, detail, now, t, onToggle }) {
+function originText(task, t) {
+  const kind = task.origin?.kind;
+  if (kind === "local") return present(task.dsh_profile) ? t("origin.local", { profile: task.dsh_profile }) : t("origin.local.any");
+  if (kind === "agent") return t("origin.agent");
+  return void 0;
+}
+function TaskItem({ task, on, detail, now, t, onToggle }) {
+  const progress = percent(task.progress);
+  const stage = stageOf(task);
+  const holder = task.origin?.kind === "local" ? task.origin.executor ?? task.assigned_to ?? task.agent : task.assigned_to !== void 0 && task.assigned_to !== task.agent ? `${task.agent} \u2192 ${task.assigned_to}` : task.agent;
+  const meta = [
+    holder,
+    originText(task, t),
+    task.priority === "normal" ? void 0 : t(`priority.${task.priority}`),
+    task.attempts > 1 ? t("embed.attempts", { n: task.attempts }) : void 0,
+    relative(task.updated_at ?? task.created_at, t, now)
+  ].filter(present);
+  const note = task.result === void 0 ? task.message : [task.result.error?.code, task.result.needs_input ?? task.result.summary].filter(present).join(" ");
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("li", { className: "dah-item", "data-on": on, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
+      "div",
+      {
+        className: "dah-item-row",
+        role: "button",
+        tabIndex: 0,
+        "aria-expanded": on,
+        onClick: () => {
+          onToggle(task.task_id);
+        },
+        onKeyDown: onActivate(() => {
+          onToggle(task.task_id);
+        }),
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-item-top", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-title", title: `${task.title}
+${task.task_id}`, children: task.title }),
+            stage !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-tone": stage === "needs_input" || stage === "blocked" ? "pending" : task.status, children: t(`stage.${stage}`) }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-tone": task.status, children: statusLabel(task.status, t) })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-meta", title: absolute(task.created_at), children: meta.join(" \xB7 ") }),
+          progress !== void 0 && (task.status === "running" || task.status === "accepted") ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-bar", title: progress, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("i", { style: { width: progress } }) }) : null,
+          present(note) ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-note", "data-tone": task.result?.error !== void 0 ? "failed" : void 0, title: note, children: note }) : null,
+          task.quiet === true ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-note", "data-tone": "quiet", children: t("task.quiet") }) : null
+        ]
+      }
+    ),
+    on ? detail : null
+  ] });
+}
+function EmbeddedTasks({ tasks, loaded, history, selected, detail, endedOpen, onEnded, now, t, onToggle }) {
+  const lanes = (0, import_react.useMemo)(() => lanesOf(tasks), [tasks]);
   const orphan = selected !== void 0 && !tasks.some((task) => task.task_id === selected);
+  const item = (task) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(TaskItem, { task, on: selected === task.task_id, detail, now, t, onToggle }, task.task_id);
+  if (history) {
+    return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+      orphan ? detail : null,
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dah-note", children: t("history.note") }),
+      tasks.length === 0 ? loaded ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: t("history.empty") }) : null : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-list", children: tasks.map(item) })
+    ] });
+  }
   return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
     orphan ? detail : null,
-    tasks.length === 0 ? loaded ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: filtered ? t("tasks.empty") : t("tasks.empty.all") }) : null : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-list", children: tasks.map((task) => {
-      const on = selected === task.task_id;
-      const progress = percent(task.progress);
-      const holder = task.assigned_to !== void 0 && task.assigned_to !== task.agent ? `${task.agent} \u2192 ${task.assigned_to}` : task.agent;
-      const meta = [
-        task.task_id,
-        holder,
-        task.type,
-        task.priority === "normal" ? void 0 : t(`priority.${task.priority}`),
-        task.attempts > 1 ? t("embed.attempts", { n: task.attempts }) : void 0,
-        relative(task.created_at, t, now)
-      ].filter(present);
-      const note = task.result === void 0 ? task.message : [task.result.error?.code, task.result.summary].filter(present).join(" ");
-      return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("li", { className: "dah-item", "data-on": on, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
-          "div",
-          {
-            className: "dah-item-row",
-            role: "button",
-            tabIndex: 0,
-            "aria-expanded": on,
-            onClick: () => {
-              onToggle(task.task_id);
-            },
-            onKeyDown: onActivate(() => {
-              onToggle(task.task_id);
-            }),
-            children: [
-              /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-item-top", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-title", title: task.title, children: task.title }),
-                /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-tone": task.status, children: statusLabel(task.status, t) })
-              ] }),
-              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-meta", title: absolute(task.created_at), children: meta.join(" \xB7 ") }),
-              progress !== void 0 && (task.status === "running" || task.status === "accepted") ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-bar", title: progress, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("i", { style: { width: progress } }) }) : null,
-              present(note) ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-item-note", "data-tone": task.result?.error !== void 0 ? "failed" : void 0, title: note, children: note }) : null
-            ]
-          }
-        ),
-        on ? detail : null
-      ] }, task.task_id);
-    }) })
+    tasks.length === 0 && loaded ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: t("tasks.empty.all") }) : null,
+    LANES.filter((lane) => lanes[lane].length > 0).map((lane) => {
+      const rows = lanes[lane];
+      const folded = lane === "ended" && !endedOpen;
+      return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-sub", "data-lane": lane, children: [
+        lane === "ended" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("button", { type: "button", className: "dah-sub-head", "data-button": "true", "aria-expanded": !folded, title: t("lane.ended.hint"), onClick: onEnded, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Caret, {}),
+          t(`lane.${lane}`),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-count", children: String(rows.length) })
+        ] }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-sub-head", children: [
+          t(`lane.${lane}`),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-count", children: String(rows.length) })
+        ] }),
+        folded ? null : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-list", children: rows.map(item) })
+      ] }, lane);
+    })
   ] });
+}
+function EmbeddedFallback({ tasks, selected, detail, now, t, onToggle }) {
+  if (tasks.length === 0) return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: t("fallback.empty") });
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-list", children: tasks.map((task) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+    TaskItem,
+    {
+      task: { ...task, message: task.message ?? t("fallback.by", { by: task.fallback_by ?? "" }) },
+      on: selected === task.task_id,
+      detail,
+      now,
+      t,
+      onToggle
+    },
+    task.task_id
+  )) });
 }
 function AgentsSection({ agents, section, now, t, onTask }) {
   const { counts } = agentCounts(agents);
@@ -648,10 +845,114 @@ function RequestsSection({ section, status, onStatus, now, t }) {
     ] }) })
   ] });
 }
-function TaskDetailView({ detail, t, now, onClose, onTask }) {
+var SESSION_PAGE = 200;
+function SessionView({ taskId, count, t }) {
+  const [open, setOpen] = (0, import_react.useState)(false);
+  const [entries, setEntries] = (0, import_react.useState)([]);
+  const [doc, setDoc] = (0, import_react.useState)(void 0);
+  const [busy, setBusy] = (0, import_react.useState)(false);
+  const [error, setError] = (0, import_react.useState)(void 0);
+  const ticket = (0, import_react.useRef)(0);
+  (0, import_react.useEffect)(() => {
+    ticket.current += 1;
+    setOpen(false);
+    setEntries([]);
+    setDoc(void 0);
+    setError(void 0);
+  }, [taskId]);
+  (0, import_react.useEffect)(() => () => {
+    ticket.current += 1;
+  }, []);
+  const read = (after) => {
+    ticket.current += 1;
+    const mine = ticket.current;
+    setBusy(true);
+    fetchSession(taskId, after, SESSION_PAGE).then((next) => {
+      if (mine !== ticket.current) return;
+      setDoc(next);
+      setEntries((previous) => after === 0 ? next.entries : [...previous, ...next.entries]);
+      setError(void 0);
+      setBusy(false);
+    }, (failure) => {
+      if (mine !== ticket.current) return;
+      setError(failure);
+      setBusy(false);
+    });
+  };
+  if (!open) {
+    if (count <= 0) return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-muted", children: t("detail.session.none") });
+    return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-btn", "data-size": "sm", onClick: () => {
+      setOpen(true);
+      read(0);
+    }, children: t("detail.session.load", { n: count }) });
+  }
+  const total = doc?.total ?? count;
+  const more = doc !== void 0 && entries.length < total;
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-session", children: [
+    error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-alert", role: "alert", children: t("error.section", { error: messageOf(error) }) }) : null,
+    entries.length === 0 && busy ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-muted", children: t("detail.session.loading") }) : null,
+    doc !== void 0 && entries.length === 0 && !busy ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-muted", children: t("detail.session.none") }) : null,
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ol", { className: "dah-session-list", children: entries.map((entry, index) => {
+      const role = present(entry.role) ? entry.role : "note";
+      const label = ["user", "assistant", "tool", "note", "system"].includes(role) ? t(`role.${role}`) : role;
+      return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("li", { className: "dah-session-entry", "data-role": role, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { className: "dah-session-who", children: [
+          present(entry.name) ? `${label} \xB7 ${entry.name}` : label,
+          present(entry.at) ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-muted", title: absolute(entry.at), children: ` ${clockOf(entry.at)}` }) : null
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("pre", { className: "dah-session-text", children: entry.text ?? "" })
+      ] }, `${String(entry.index ?? index)}`);
+    }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-session-foot", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-muted", children: t("detail.session.shown", { n: entries.length, total }) }),
+      more ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-btn", "data-size": "sm", disabled: busy, onClick: () => {
+        read(entries.length);
+      }, children: t("detail.session.more") }) : null
+    ] }),
+    doc?.full === true ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dah-note", children: t("detail.session.full") }) : null
+  ] });
+}
+function clockOf(iso) {
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? clock(ms) : "";
+}
+function AckButton({ task, t, onDone }) {
+  const [busy, setBusy] = (0, import_react.useState)(false);
+  const [error, setError] = (0, import_react.useState)(void 0);
+  if (task.acknowledged === true || task.in_history === true) return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-muted", children: t("detail.acked") });
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+      "button",
+      {
+        type: "button",
+        className: "dah-btn",
+        "data-size": "sm",
+        disabled: busy,
+        title: t("detail.ack.hint"),
+        onClick: () => {
+          setBusy(true);
+          ackTask(task.task_id).then(() => {
+            setBusy(false);
+            setError(void 0);
+            onDone();
+          }, (failure) => {
+            setBusy(false);
+            setError(failure);
+          });
+        },
+        children: busy ? t("detail.ack.busy") : t("detail.ack")
+      }
+    ),
+    error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-error-text", children: t("detail.ack.failed", { error: messageOf(error) }) }) : null
+  ] });
+}
+var FALLBACK_KEY = { "nobody-online": "fallback.nobody-online", "waited-out": "fallback.waited-out", other: "fallback.other" };
+function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
   const task = detail.data?.task;
   const result = task?.result;
-  const history = task === void 0 ? [] : [...task.history].reverse();
+  const history = task === void 0 ? [] : timeline(task.history);
+  const reason = task === void 0 || task.fallback_by === void 0 ? void 0 : fallbackReason(task.history);
+  const failed = task !== void 0 && (task.status === "failed" || task.status === "dead");
   return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-detail", role: "region", "aria-label": t("detail.title"), children: [
     /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-detail-head", children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("h3", { className: "dah-detail-title", children: [
@@ -659,11 +960,33 @@ function TaskDetailView({ detail, t, now, onClose, onTask }) {
         task !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-sub-line dah-id", children: task.task_id }) : null
       ] }),
       task !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-pill": "true", "data-tone": task.status, children: statusLabel(task.status, t) }) : null,
+      failed && task !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AckButton, { task, t, onDone: () => {
+        onChanged?.();
+      } }) : null,
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-btn", "data-size": "sm", "data-icon": "true", onClick: onClose, "aria-label": t("detail.close"), children: "\xD7" })
     ] }),
     detail.error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-alert", role: "alert", children: t("error.section", { error: messageOf(detail.error) }) }) : null,
     task === void 0 ? detail.error === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: t("detail.loading") }) : null : /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("dl", { className: "dah-meta", children: [
+        task.origin !== void 0 && task.origin.kind !== "controller" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("detail.meta.origin") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("dd", { children: [
+            originText(task, t) ?? task.origin.kind,
+            present(task.origin.executor) ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-sub-line dah-id", children: task.origin.executor }) : null
+          ] })
+        ] }) : null,
+        present(task.dsh_profile) ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("detail.meta.profile") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { className: "dah-id", children: task.dsh_profile })
+        ] }) : null,
+        task.stage !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("detail.meta.stage") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: t(`stage.${task.stage}`) })
+        ] }) : null,
+        task.fallback_by !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("detail.meta.fallback") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: `${t(FALLBACK_KEY[reason ?? "other"])} \xB7 ${task.fallback_by}` })
+        ] }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("detail.meta.target") }),
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { className: "dah-id", children: task.agent })
@@ -754,18 +1077,22 @@ function TaskDetailView({ detail, t, now, onClose, onTask }) {
         ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-block", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h4", { className: "dah-block-title", children: t("detail.history") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h4", { className: "dah-block-title", children: t("detail.timeline") }),
         history.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-muted", children: t("detail.history.none") }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-history", children: history.map((event, index) => {
           const flag = presenceEvent(event);
           return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("li", { "data-tone": flag === void 0 ? void 0 : "warn", children: [
             /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-time", title: absolute(event.at), children: absolute(event.at) }),
-            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-event", children: event.event ?? "" }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-event", children: event.stage !== void 0 ? t(`stage.${event.stage}`) : event.event ?? "" }),
             /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
               flag === void 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-flag", children: t(PRESENCE_KEY[flag]) }),
               event.message ?? ""
             ] })
           ] }, `${event.at ?? ""}-${String(index)}`);
         }) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-block", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h4", { className: "dah-block-title", children: t("detail.session") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(SessionView, { taskId: task.task_id, count: task.session_entries ?? 0, t })
       ] })
     ] })
   ] });
@@ -776,7 +1103,7 @@ function createAgentHubBoardTab(t, onOverview) {
   };
 }
 function AgentHubPage({ t, embedded = false, onOverview }) {
-  const [filter, setFilter] = (0, import_react.useState)({ status: "all", agent: "", limit: 50 });
+  const [filter, setFilter] = (0, import_react.useState)(embedded ? { status: "all", agent: "", limit: 200, history: "hide" } : { status: "all", agent: "", limit: 50 });
   const [requestStatus, setRequestStatus] = (0, import_react.useState)("pending");
   const [auto, setAuto] = (0, import_react.useState)(true);
   const [selected, setSelected] = (0, import_react.useState)(void 0);
@@ -938,15 +1265,84 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
     )
   ] });
   if (embedded) {
-    const isOpen = (part) => folds[part] ?? (part !== "requests" || pendingRequests > 0 || requestStatus !== "pending");
+    const isOpen = (part) => folds[part] ?? (part === "ended" ? false : part !== "requests" || pendingRequests > 0 || requestStatus !== "pending");
     const flip = (part) => {
       const next = !isOpen(part);
       setFolds((previous) => ({ ...previous, [part]: next }));
     };
+    const inHistory = filter.history === "only";
+    const openCount = tasks.filter((task) => task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled" && task.status !== "dead").length;
+    const fallback = inHistory ? [] : fallbackTasks(tasks);
     const requestCount = board.requests.data === void 0 ? "" : String(board.requests.data.requests.length);
     const detailNode = selected === void 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { ref: detailRef, className: "dah-item-detail", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(TaskDetailView, { detail, t, now, onClose: () => {
       setSelected(void 0);
-    }, onTask: openTask }) });
+    }, onTask: openTask, onChanged: () => {
+      load(true);
+    } }) });
+    const summary = /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-summary", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-stat", title: t("desk.active.hint"), children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-stat-label", children: t("desk.active") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-stat-value", children: board.tasks.data === void 0 || inHistory ? t("value.none") : String(openCount) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
+        "div",
+        {
+          className: "dah-stat",
+          "data-tone": statCounts.counts.online > 0 ? "online" : "offline",
+          title: t("stat.online.counts", { list: countsText(statCounts.counts, t, () => true) }),
+          children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { className: "dah-stat-label", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-dot", "aria-hidden": "true" }),
+              t("stat.online")
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { className: "dah-stat-value", children: [
+              String(statCounts.counts.online),
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-stat-of", children: `/${String(statCounts.total - (overview?.dormant_agents ?? 0))}` })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-stat-note", children: otherStates === "" ? t("stat.online.of", { n: statCounts.total }) : otherStates })
+          ]
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-stat", "data-tone": pendingRequests > 0 ? "pending" : void 0, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { className: "dah-stat-label", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-dot", "aria-hidden": "true" }),
+          t("stat.requests")
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-stat-value", children: overview === void 0 ? t("value.none") : String(pendingRequests) })
+      ] })
+    ] });
+    const taskTools = /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { className: "dah-tools", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
+        "select",
+        {
+          className: "dah-select",
+          value: filter.agent,
+          "aria-label": t("tasks.col.agent"),
+          onChange: (event) => {
+            const value = event.target.value;
+            setFilter((previous) => ({ ...previous, agent: value }));
+          },
+          children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value: "", children: t("tasks.filter.agent") }),
+            agentOptions.map((id) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value: id, children: id }, id))
+          ]
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+        "button",
+        {
+          type: "button",
+          className: "dah-btn",
+          "data-size": "sm",
+          "aria-pressed": inHistory,
+          onClick: () => {
+            setSelected(void 0);
+            setFilter((previous) => ({ ...previous, history: previous.history === "only" ? "hide" : "only" }));
+          },
+          children: inHistory ? t("history.back") : t("history.show")
+        }
+      )
+    ] });
     return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-page", "data-embedded": "true", ref: rootRef, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-inner", children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-toolbar", children: [
         /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-updated", children: board.loadedAt === void 0 ? "" : t("updated", { time: clock(board.loadedAt) }) }),
@@ -963,13 +1359,46 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
       ] }),
       nothing ? board.first || board.lastError === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: t("loading") }) : failedAlert : /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
         staleAlert,
-        overviewBlock,
+        summary,
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
+          EmbeddedFold,
+          {
+            part: "tasks",
+            title: inHistory ? t("history.show") : t("tasks.title"),
+            count: board.tasks.data === void 0 ? "" : String(tasks.length),
+            open: isOpen("tasks"),
+            onToggle: () => {
+              flip("tasks");
+            },
+            tools: taskTools,
+            children: [
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(SectionError, { error: board.tasks.error, t }),
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+                EmbeddedTasks,
+                {
+                  tasks,
+                  loaded: board.tasks.data !== void 0,
+                  history: inHistory,
+                  selected,
+                  detail: detailNode,
+                  endedOpen: isOpen("ended"),
+                  onEnded: () => {
+                    flip("ended");
+                  },
+                  now,
+                  t,
+                  onToggle: toggleTask
+                }
+              )
+            ]
+          }
+        ),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
           EmbeddedFold,
           {
             part: "agents",
             title: t("agents.title"),
-            count: `${String(online)} / ${String(agents.length)}`,
+            count: `${String(online)} / ${String(agents.filter((agent) => agent.dormant !== true && !agent.revoked).length)}`,
             note: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(OfflineNote, { counts: listCounts.counts, t }),
             open: isOpen("agents"),
             onToggle: () => {
@@ -977,11 +1406,14 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
             },
             children: [
               /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(SectionError, { error: board.agents.error, t }),
-              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(EmbeddedAgents, { agents, loaded: board.agents.data !== void 0, now, t, onTask: openTask })
+              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(EmbeddedAgents, { agents, tasks, loaded: board.agents.data !== void 0, now, t, onTask: openTask })
             ]
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
+        fallback.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(EmbeddedFold, { part: "fallback", title: t("fallback.title"), count: String(fallback.length), open: isOpen("fallback"), onToggle: () => {
+          flip("fallback");
+        }, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(EmbeddedFallback, { tasks: fallback, selected, detail: detailNode, now, t, onToggle: toggleTask }) }) : null,
+        pendingRequests > 0 || requestStatus !== "pending" || folds.requests === true ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
           EmbeddedFold,
           {
             part: "requests",
@@ -1000,37 +1432,8 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
               /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(EmbeddedRequests, { section: board.requests, status: requestStatus, now, t })
             ]
           }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
-          EmbeddedFold,
-          {
-            part: "tasks",
-            title: t("tasks.title"),
-            count: board.tasks.data === void 0 ? "" : t("tasks.shown", { n: tasks.length }),
-            open: isOpen("tasks"),
-            onToggle: () => {
-              flip("tasks");
-            },
-            children: [
-              taskFilters,
-              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(SectionError, { error: board.tasks.error, t }),
-              /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
-                EmbeddedTasks,
-                {
-                  tasks,
-                  loaded: board.tasks.data !== void 0,
-                  filtered: filter.status !== "all" || filter.agent !== "",
-                  selected,
-                  detail: detailNode,
-                  now,
-                  t,
-                  onToggle: toggleTask
-                }
-              )
-            ]
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dah-foot", children: t("readonly.hint") })
+        ) : null,
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dah-foot", children: t("desk.hint") })
       ] })
     ] }) });
   }
@@ -1129,7 +1532,9 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
       ] }) }),
       selected !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { ref: detailRef, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(TaskDetailView, { detail, t, now, onClose: () => {
         setSelected(void 0);
-      }, onTask: openTask }) }) : null
+      }, onTask: openTask, onChanged: () => {
+        load(true);
+      } }) }) : null
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dah-foot", children: t("readonly.hint") })
   ] }) });
@@ -1387,7 +1792,7 @@ var zh = {
   "in.h": "{n} \u5C0F\u65F6\u540E",
   "lease.expired": "\u5DF2\u8FC7\u671F",
   // Router board tab (board-tabs.ts) and the embedded form of the page.
-  "board.tab": "Agent",
+  "board.tab": "\u8C03\u5EA6\u53F0",
   "embed.auto": "\u81EA\u52A8\u5237\u65B0",
   "embed.auto.hint": "\u6BCF {n} \u79D2\u81EA\u52A8\u5237\u65B0\uFF1B\u6807\u7B7E\u9875\u4E0D\u5728\u5C4F\u5E55\u4E0A\u65F6\u6682\u505C",
   "embed.states": "\u6309\u4EFB\u52A1\u72B6\u6001\u7B5B\u9009",
@@ -1415,7 +1820,69 @@ var zh = {
   "history.worker-lost": "worker \u5931\u8054\uFF0C\u4EFB\u52A1\u5DF2\u91CD\u6392",
   "history.worker-offline": "worker \u79BB\u7EBF\uFF0C\u4EFB\u52A1\u5DF2\u91CD\u6392",
   "history.agent-offline": "\u6D3E\u53D1\u65F6 agent \u4E0D\u5728\u7EBF",
-  "board.flag.stranded": "{n} \u4E2A\u79BB\u7EBF agent \u8FD8\u5360\u7740 {tasks} \u4E2A\u4EFB\u52A1\uFF08\u6389\u7EBF\u540E\u4F1A\u81EA\u52A8\u91CD\u6392\uFF09"
+  "board.flag.stranded": "{n} \u4E2A\u79BB\u7EBF agent \u8FD8\u5360\u7740 {tasks} \u4E2A\u4EFB\u52A1\uFF08\u6389\u7EBF\u540E\u4F1A\u81EA\u52A8\u91CD\u6392\uFF09",
+  // 调度台 (the board tab): lanes, stages, origin, profile groups, DSH's own workers, fallback, history, session.
+  "desk.active": "\u5728\u529E",
+  "desk.active.hint": "\u6392\u961F\u3001\u5DF2\u9886\u53D6\u3001\u8FDB\u884C\u4E2D\u548C\u7B49\u4F60\u56DE\u590D\u7684\u4EFB\u52A1",
+  "lane.queued": "\u6392\u961F",
+  "lane.claimed": "\u5DF2\u9886\u53D6",
+  "lane.running": "\u8FDB\u884C\u4E2D",
+  "lane.waiting": "\u7B49\u4F60\u56DE\u590D",
+  "lane.ended": "\u5DF2\u7ED3\u675F",
+  "lane.ended.hint": "\u5B8C\u6210 12 \u5C0F\u65F6\u3001\u5931\u8D25 2 \u5929\u540E\u81EA\u52A8\u6536\u8FDB\u5386\u53F2",
+  "stage.received": "\u5DF2\u6536\u5230",
+  "stage.started": "\u5DF2\u5F00\u5DE5",
+  "stage.step": "\u505A\u5B8C\u4E00\u6B65",
+  "stage.blocked": "\u5361\u4F4F",
+  "stage.needs_input": "\u8981\u4F60\u56DE\u7B54",
+  "stage.uploading": "\u4EA4\u7ED3\u679C",
+  "origin.local": "\u672C\u673A {profile}",
+  "origin.local.any": "\u672C\u673A",
+  "origin.controller": "\u4E91\u7AEF\u6D3E\u53D1",
+  "origin.agent": "agent \u6D3E\u53D1",
+  "task.quiet": "\u672C\u673A DSH \u6682\u65F6\u6CA1\u6709\u4E0A\u62A5\uFF0C\u4E0D\u4F1A\u56E0\u6B64\u5224\u5931\u8D25",
+  "group.profile": "profile {name}",
+  "group.node": "\u673A\u5668 {name}",
+  "group.none": "\u672A\u6807 profile",
+  "self.badge": "DSH \u5206\u533A",
+  "self.busy": "\u6B63\u5728\u5E72 {n} \u4EF6",
+  "self.quiet": "{n} \u4EF6\u6682\u672A\u4E0A\u62A5",
+  "dormant.show": "\u5DF2\u505C\u7528 {n} \u4E2A",
+  "dormant.hide": "\u6536\u8D77\u5DF2\u505C\u7528",
+  "dormant.hint": "\u79BB\u7EBF\u8D85\u8FC7 3 \u5929\u6216\u5DF2\u540A\u9500\u7684 agent",
+  "fallback.title": "\u515C\u5E95",
+  "fallback.empty": "\u6CA1\u6709 DSH \u81EA\u5DF1\u63A5\u624B\u7684\u4EFB\u52A1\u3002",
+  "fallback.by": "{by} \u63A5\u624B",
+  "fallback.nobody-online": "\u6CA1\u4EBA\u5728\u7EBF\uFF0C\u7ACB\u5373\u63A5\u624B",
+  "fallback.waited-out": "\u6709\u4EBA\u5728\u7EBF\u4F46\u6CA1\u4EBA\u9886\uFF0C\u7B49\u6EE1\u65F6\u9650\u540E\u63A5\u624B",
+  "fallback.other": "\u515C\u5E95\u63A5\u624B",
+  "history.show": "\u5386\u53F2",
+  "history.back": "\u56DE\u5230\u5F53\u524D",
+  "history.note": "\u8FD9\u91CC\u662F\u5DF2\u6536\u8D77\u7684\u4EFB\u52A1\uFF1A\u5B8C\u6210\u6216\u53D6\u6D88 12 \u5C0F\u65F6\u540E\u3001\u5931\u8D25 2 \u5929\u540E\uFF08\u6216\u4F60\u6536\u8D77\u540E\uFF09\u30027 \u5929\u540E\u538B\u7F29\u5B58\u6863\u3002",
+  "history.empty": "\u5386\u53F2\u91CC\u8FD8\u6CA1\u6709\u4EFB\u52A1\u3002",
+  "detail.meta.origin": "\u6765\u6E90",
+  "detail.meta.profile": "profile",
+  "detail.meta.stage": "\u9636\u6BB5",
+  "detail.meta.fallback": "\u515C\u5E95",
+  "detail.timeline": "\u65F6\u95F4\u7EBF",
+  "detail.ack": "\u6536\u8D77",
+  "detail.ack.hint": "\u653E\u8FDB\u5386\u53F2\uFF0C\u5217\u8868\u91CC\u4E0D\u518D\u663E\u793A",
+  "detail.ack.busy": "\u6536\u8D77\u4E2D\u2026",
+  "detail.ack.failed": "\u6536\u8D77\u5931\u8D25\uFF1A{error}",
+  "detail.acked": "\u5DF2\u6536\u8D77",
+  "detail.session": "\u4F1A\u8BDD",
+  "detail.session.load": "\u67E5\u770B\u4F1A\u8BDD\uFF08{n} \u6761\uFF09",
+  "detail.session.more": "\u518D\u8BFB\u540E\u9762\u7684",
+  "detail.session.none": "\u8FD9\u4E2A\u4EFB\u52A1\u6CA1\u6709\u4E0A\u4F20\u4F1A\u8BDD\u3002",
+  "detail.session.loading": "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u2026",
+  "detail.session.full": "\u4F1A\u8BDD\u592A\u957F\uFF0C\u540E\u9762\u7684\u6761\u76EE\u6CA1\u6709\u4FDD\u5B58\u3002",
+  "detail.session.shown": "{n} / {total} \u6761",
+  "role.user": "\u4EFB\u52A1",
+  "role.assistant": "\u6267\u884C\u8005",
+  "role.tool": "\u5DE5\u5177",
+  "role.note": "\u5907\u6CE8",
+  "role.system": "\u7CFB\u7EDF",
+  "desk.hint": "\u6570\u636E\u90FD\u6765\u81EA\u4E91\u7AEF\u4FE1\u9053\uFF1A\u672C\u673A\u6D3E\u7684\u6D3B\u3001\u5916\u90E8 agent \u7684\u6D3B\u90FD\u5728\u8FD9\u91CC\u3002\u4EE4\u724C\u548C\u5185\u7F51\u5730\u5740\u4E0D\u4F1A\u663E\u793A\u3002"
 };
 var en = {
   "page.title": "Agent hub",
@@ -1532,7 +1999,7 @@ var en = {
   "in.h": "in {n} h",
   "lease.expired": "expired",
   // Router board tab (board-tabs.ts) and the embedded form of the page.
-  "board.tab": "Agents",
+  "board.tab": "Dispatch",
   "embed.auto": "Auto-refresh",
   "embed.auto.hint": "Refresh every {n}s; paused while the tab is off screen",
   "embed.states": "Filter by task status",
@@ -1560,7 +2027,68 @@ var en = {
   "history.worker-lost": "worker lost; task requeued",
   "history.worker-offline": "worker offline; task requeued",
   "history.agent-offline": "agent was offline at dispatch",
-  "board.flag.stranded": "{n} offline agent(s) still hold {tasks} task(s) (they are requeued automatically)"
+  "board.flag.stranded": "{n} offline agent(s) still hold {tasks} task(s) (they are requeued automatically)",
+  "desk.active": "Open",
+  "desk.active.hint": "queued, claimed, running and waiting on you",
+  "lane.queued": "Queued",
+  "lane.claimed": "Claimed",
+  "lane.running": "Running",
+  "lane.waiting": "Waiting on you",
+  "lane.ended": "Ended",
+  "lane.ended.hint": "moves to history 12 h after done, 2 days after failing",
+  "stage.received": "received",
+  "stage.started": "started",
+  "stage.step": "step done",
+  "stage.blocked": "blocked",
+  "stage.needs_input": "needs your answer",
+  "stage.uploading": "uploading",
+  "origin.local": "local {profile}",
+  "origin.local.any": "local",
+  "origin.controller": "from the cloud",
+  "origin.agent": "from an agent",
+  "task.quiet": "the local DSH has not reported for a while; it is not failed for that",
+  "group.profile": "profile {name}",
+  "group.node": "machine {name}",
+  "group.none": "no profile",
+  "self.badge": "DSH partition",
+  "self.busy": "{n} running",
+  "self.quiet": "{n} not reporting",
+  "dormant.show": "{n} dormant",
+  "dormant.hide": "Hide dormant",
+  "dormant.hint": "offline for more than 3 days, or revoked",
+  "fallback.title": "Fallback",
+  "fallback.empty": "No task DSH took over.",
+  "fallback.by": "taken by {by}",
+  "fallback.nobody-online": "nobody online, taken at once",
+  "fallback.waited-out": "workers online but nobody took it in time",
+  "fallback.other": "taken over",
+  "history.show": "History",
+  "history.back": "Back to current",
+  "history.note": "Put-away tasks: 12 h after done or cancelled, 2 days after failing (or when you put them away). Archived after 7 days.",
+  "history.empty": "Nothing in history yet.",
+  "detail.meta.origin": "Origin",
+  "detail.meta.profile": "Profile",
+  "detail.meta.stage": "Stage",
+  "detail.meta.fallback": "Fallback",
+  "detail.timeline": "Timeline",
+  "detail.ack": "Put away",
+  "detail.ack.hint": "move it to history",
+  "detail.ack.busy": "Putting away\u2026",
+  "detail.ack.failed": "Could not put it away: {error}",
+  "detail.acked": "Put away",
+  "detail.session": "Session",
+  "detail.session.load": "Show session ({n} entries)",
+  "detail.session.more": "Read more",
+  "detail.session.none": "No session was uploaded for this task.",
+  "detail.session.loading": "Reading the session\u2026",
+  "detail.session.full": "The session got too long; later entries were not kept.",
+  "detail.session.shown": "{n} / {total}",
+  "role.user": "task",
+  "role.assistant": "executor",
+  "role.tool": "tool",
+  "role.note": "note",
+  "role.system": "system",
+  "desk.hint": "Everything comes from the cloud channel: tasks dispatched here and by other agents alike. Tokens and internal addresses are never shown."
 };
 var DICTIONARIES = { zh: { ...zh }, en: { ...en } };
 
@@ -1862,6 +2390,44 @@ button.dah-chip:focus-visible { outline: 2px solid var(--dah-accent); outline-of
 .dah-history li[data-tone="warn"]:hover { background: color-mix(in srgb, var(--dah-warn) 18%, var(--dah-base)); }
 .dah-history-flag { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; font-size: 12px; line-height: 20px; font-weight: 500; color: var(--dah-text-2); white-space: nowrap; }
 .dah-history-flag::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dah-tone, var(--dah-warn)); }
+
+/* ---------- \u8C03\u5EA6\u53F0: lanes, profile groups, DSH's own workers, session ---------- */
+.dah-page [data-tone="self"] { --dah-tone: var(--dah-accent); }
+.dah-badge[data-tone="self"] { color: var(--dah-accent); }
+.dah-sub { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dah-sub + .dah-sub { margin-top: 6px; }
+.dah-sub-head {
+  display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 0; border: 0; background: transparent;
+  font-size: 12px; line-height: 16px; font-weight: 600; color: var(--dah-text-2); text-align: left;
+}
+.dah-sub-head .dah-count { font-weight: 400; color: var(--dah-text-3); font-variant-numeric: tabular-nums; }
+.dah-sub-head[data-button="true"] { margin-left: -8px; padding: 0 8px; border-radius: 10px; cursor: pointer; transition: background 0.15s; }
+.dah-sub-head[data-button="true"]:hover { background: var(--dah-hover); }
+.dah-sub-head[data-button="true"]:focus-visible { outline: 2px solid var(--dah-accent); outline-offset: -2px; }
+.dah-sub-head[aria-expanded="true"] .dah-caret { transform: rotate(90deg); }
+.dah-sub[data-lane="waiting"] > .dah-sub-head { color: var(--dah-warn); }
+.dah-item[data-kind="self"] .dah-item-row { background: color-mix(in srgb, var(--dah-accent) 5%, transparent); }
+.dah-item-row .dah-chips .dah-chip:not(.dah-id) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dah-item-note[data-tone="quiet"] { color: var(--dah-text-3); }
+.dah-link {
+  align-self: flex-start; height: 26px; margin-left: -8px; padding: 0 8px; border: 0; border-radius: 10px; background: transparent;
+  font-size: 12px; color: var(--dah-text-3); cursor: pointer; transition: background 0.15s;
+}
+.dah-link:hover { background: var(--dah-hover); color: var(--dah-text-2); }
+.dah-link:focus-visible { outline: 2px solid var(--dah-accent); outline-offset: -2px; }
+.dah-tools { flex: none; display: inline-flex; align-items: center; gap: 6px; }
+.dah-page[data-embedded="true"] .dah-tools .dah-select { max-width: 120px; }
+.dah-session { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.dah-session-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 420px; overflow-y: auto; }
+.dah-session-entry { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 12px; background: var(--dah-fill); min-width: 0; }
+.dah-session-entry[data-role="assistant"] { background: var(--dah-accent-soft); }
+.dah-session-entry[data-role="tool"] { background: var(--dah-fill-2); }
+.dah-session-who { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--dah-text-2); }
+.dah-session-text { margin: 0; font-family: var(--dah-mono); font-size: 12px; line-height: 18px; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; }
+.dah-session-foot { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .dah-sub-head[data-button="true"], .dah-link { transition: none; }
+}
 `;
 function installStyles() {
   if (typeof document === "undefined") return;
@@ -1877,7 +2443,7 @@ function installStyles() {
 // src/client/index.ts
 var PANEL_ID = "agent-hub/page";
 var BOARD_TAB_ID = "agent-hub";
-var BOARD_TAB_ORDER = 100;
+var BOARD_TAB_ORDER = -100;
 var FALLBACK_DELAY_MS = 3e3;
 var BADGE_POLL_MS = 3e4;
 var inject = ["slots", "locale"];

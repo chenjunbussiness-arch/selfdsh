@@ -2,10 +2,11 @@
  * Browser entry of `dsh-agent-hub`'s dispatch panel.
  *
  * Where it shows up:
- *   1. the router board's 「Agent」 tab (primary). The board (`dsh-router-b`) is
- *      another plugin's bundle, so the tab goes through the `globalThis`
- *      registry in `board-tabs.ts` (identical copy in both plugins): id
- *      `agent-hub`, order 100, body = {@link AgentHubPage} in its embedded form.
+ *   1. the router board's 「调度台」 tab (primary): it replaces the old 工作板 view
+ *      and opens first. The board (`dsh-router-b`) is another plugin's bundle,
+ *      so the tab goes through the `globalThis` registry in `board-tabs.ts`
+ *      (identical copy in both plugins): id `agent-hub`, order -100 (before the
+ *      built-in tabs), body = {@link AgentHubPage} in its embedded form.
  *      Its badge counts pending enrollment requests; when there is nothing to
  *      approve but an offline (or left) agent still holds tasks, it shows the
  *      attention dot (`flag`, board-tabs v1 optional field) instead;
@@ -20,7 +21,8 @@
  * package at runtime (inside the Web module loader `@deepseek-ai/*` specifiers
  * are module-table entries; the shim in src/shims only supplies types).
  *
- * The page is read-only: it only GETs `/api/agent-hub/admin/*`.
+ * The page reads `/api/agent-hub/admin/*`; its one write is putting a failed
+ * task away (`POST …/admin/ack`).
  *
  * Why pending requests and not offline agents for the badge: a pending
  * enrollment request is the one thing on this page that waits for a person
@@ -48,8 +50,8 @@ export const PANEL_ID = 'agent-hub/page'
 /** Id of the router board tab (the board addresses it as `ext:agent-hub`). */
 export const BOARD_TAB_ID = 'agent-hub'
 
-/** Position after the board's built-in tabs. */
-export const BOARD_TAB_ORDER = 100
+/** Negative: the 调度台 goes before the board's built-in tabs and opens by default. */
+export const BOARD_TAB_ORDER = -100
 
 /** How long a board has to declare itself before the Sidebar row is added. */
 export const FALLBACK_DELAY_MS = 3000
