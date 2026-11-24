@@ -1324,6 +1324,7 @@ export class AgentHub {
       updated_at: task.history.at(-1)?.at ?? task.created_at, finished_at: task.result?.finished_at,
       acknowledged: task.acknowledged === true ? true : undefined, in_history: this.inHistory(task),
       session_entries: task.sessionEntries ?? 0, session_updated_at: task.sessionUpdatedAt,
+      quiet: task.origin?.kind === 'local' && isActive(task) && task.leaseUntil !== undefined && Date.parse(task.leaseUntil) < this.clock() ? true : undefined,
       result: task.result === undefined ? undefined : { status: task.result.status, summary: task.result.summary, outputs: task.result.outputs, error: task.result.error, needs_input: task.result.needs_input },
     }
     if (full) { out.instruction = task.instruction; out.inputs = task.inputs; out.output = task.output; out.history = task.history; out.context = task.context }
@@ -1997,6 +1998,9 @@ export class AgentHub {
       let changed = 0
       const now = this.clock()
       for (const task of Object.values(state.tasks)) {
+        // A task a DSH registered and runs itself is never failed for silence: that DSH may simply be
+        // offline for a while and sends its updates once it is back. It only shows as quiet (`quiet`).
+        if (task.origin?.kind === 'local') continue
         if (isActive(task) && task.assignedTo === FALLBACK_AGENT && task.leaseUntil && Date.parse(task.leaseUntil) < now) {
           task.status = 'failed'
           task.leaseUntil = undefined

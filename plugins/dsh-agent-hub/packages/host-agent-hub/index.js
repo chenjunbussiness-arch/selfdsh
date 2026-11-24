@@ -15,7 +15,10 @@
  *     controller.env is re-read on every call, so editing it needs no restart.
  *     Never <DSH home>/.env for a DSH_* name: DSH refuses to start when its own
  *     .env sets any DSH_* variable, so that file is skipped with a warning,
- *   - registers the 11 DSH-only control tools (tools.js -> /v1/ctl/*),
+ *   - registers the DSH-only control tools (tools.js -> /v1/ctl/*),
+ *   - keeps this DSH on the cloud channel (sync.js): local router tasks are
+ *     registered on the hub and kept up to date (stage, session, result), and
+ *     hub events become 【进度提醒】 lines in the 作战室,
  *   - mounts the login-guarded read-only panel routes /api/agent-hub/admin/*
  *     (bridge.js), which forward to the hub.
  *
@@ -26,8 +29,10 @@
  * @module host-agent-hub
  */
 
+import { basename, join } from 'node:path'
 import { ADMIN_BASE, createRoutes, requireLogin } from './bridge.js'
-import { createHubClient, tokenMissingMessage } from './hub-client.js'
+import { createHubClient, dshHomeDir, tokenMissingMessage } from './hub-client.js'
+import { createSync } from './sync.js'
 import { TOOL_NAMES, createTools } from './tools.js'
 
 export const name = 'dsh-host-agent-hub'
@@ -46,6 +51,37 @@ export function describeSources(config) {
     `proxy=${proxy} (${s.proxy})`,
     `caFile=${config.caFile ?? '(none)'} (${s.caFile})`,
   ].join(', ') + (s.envFile ? `; envFile ${s.envFile}` : '')
+}
+
+/**
+ * This DSH's profile name: config `dshProfile`, else the profile dsh launched (`ctx.profileContext`),
+ * else the folder name when the process runs inside <DSH home>/profiles/<name>.
+ */
+export function profileName(ctx, config, cwd = globalThis.process?.cwd?.() ?? '') {
+  const ok = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value)
+  if (ok(config.dshProfile)) return config.dshProfile
+  let launched
+  try { launched = ctx.profileContext?.name } catch { launched = undefined }
+  if (ok(launched)) return launched
+  const parts = cwd.split(/[\\/]+/)
+  const at = parts.lastIndexOf('profiles')
+  return at >= 0 && ok(parts[at + 1]) ? parts[at + 1] : (ok(basename(cwd)) ? basename(cwd) : 'default')
+}
+
+/** Start the cloud-channel sync (sync.js) unless `sync: false`. */
+function startSync(ctx, config, client, env) {
+  const options = config.sync === false ? { mirror: false, notices: false } : { ...(typeof config.sync === 'object' ? config.sync : {}) }
+  if (options.mirror === false && options.notices === false) { ctx.logger.info('agent-hub: cloud sync off (sync: false)'); return }
+  if (!client.config.ok || !client.hasToken()) { ctx.logger.info('agent-hub: cloud sync waits for a configured hub and token'); return }
+  const profile = profileName(ctx, config)
+  const get = name => () => { try { return typeof ctx.get === 'function' ? ctx.get(name) : undefined } catch { return undefined } }
+  const sync = createSync({
+    client, logger: ctx.logger, profile, options,
+    router: get('hostRouter'), sessions: get('sessionQuery'),
+    stateFile: join(dshHomeDir(env), 'agent-hub', `sync-${profile}.json`),
+  })
+  ctx.effect(() => sync.start(), 'agent-hub: cloud sync')
+  ctx.logger.info(`agent-hub: cloud sync on for profile ${profile} (local router tasks -> hub${options.notices === false ? '' : '; hub events -> 作战室'})`)
 }
 
 export function apply(ctx, config = {}) {
@@ -76,6 +112,7 @@ export function apply(ctx, config = {}) {
   else ctx.logger.info(`agent-hub: controller token from ${source === 'env' ? `environment variable ${tokenEnv}` : `${envFile} (${tokenEnv})`}`)
 
   for (const tool of createTools({ client })) ctx.effect(() => ctx.tools.register(tool))
+  startSync(ctx, config, client, env)
 
   if (typeof ctx.inject === 'function') {
     ctx.inject(['webServer'], (webCtx) => {

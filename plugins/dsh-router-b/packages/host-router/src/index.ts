@@ -3277,11 +3277,15 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
     task: async (taskId: string): Promise<TaskView | undefined> =>
       (await publishSnapshot()).tasks.find(task => task.id === taskId),
     snapshotPath,
+    /** One line for the 作战室 (coalesced into 【进度提醒】) and the panel's notice list: e.g. cloud task news from dsh-agent-hub. */
+    notice: (text: string): void => {
+      if (typeof text === 'string' && text.trim() !== '') notice(text.trim().slice(0, 500))
+    },
   }
   if (typeof ctx.set === 'function') {
     try {
       ctx.set('hostRouter', service)
-      ctx.logger.info('host-router: published ctx.hostRouter { snapshot, task, snapshotPath }')
+      ctx.logger.info('host-router: published ctx.hostRouter { snapshot, task, snapshotPath, notice }')
     } catch (error) {
       ctx.logger.warn(`host-router: could not publish ctx.hostRouter: ${String(error)}`)
     }

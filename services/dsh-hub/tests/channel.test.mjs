@@ -99,6 +99,20 @@ test('run_here: a DSH registers a task it runs itself; it is never offered to a 
   assert.deepEqual((await hub.listTasks({ origin: 'local' })).map(x => x.task_id), ['local_web_t1'])
 })
 
+test('a local task is not failed while its DSH is silent; it shows as quiet and goes on when the DSH is back', async (t) => {
+  const { hub, clock } = await makeHub(t)
+  await hub.dispatch(CTL, { title: 'Long', instruction: 'x', run_here: true, task_id: 'local_long' })
+  clock.advance(3 * HOUR)
+  await hub.sweep()
+  const quiet = await hub.getTask('local_long')
+  assert.equal(quiet.status, 'running')
+  assert.equal(quiet.quiet, true)
+  await hub.fallbackProgress(CTL, { task_id: 'local_long', stage: 'step', message: 'back' })
+  assert.equal((await hub.getTask('local_long')).quiet, undefined)
+  await hub.fallbackResult(CTL, { task_id: 'local_long', status: 'completed', summary: 'ok' })
+  assert.equal((await hub.getTask('local_long')).status, 'completed')
+})
+
 test('run_here is for controllers only and takes no inputs', async (t) => {
   const { hub } = await makeHub(t)
   await provision(hub, 'boss', { role: 'dispatcher' })
