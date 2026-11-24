@@ -3199,9 +3199,14 @@ export async function apply(ctx, config) {
                 notice(text.trim().slice(0, 500));
         },
     };
-    if (typeof ctx.set === 'function') {
+    // `provide` registers the service; `set` alone throws on a name nobody
+    // provided, which left ctx.hostRouter unpublished on DSH 0.2.2.
+    if (typeof ctx.provide === 'function' || typeof ctx.set === 'function') {
         try {
-            ctx.set('hostRouter', service);
+            if (typeof ctx.provide === 'function')
+                ctx.provide('hostRouter', service);
+            else
+                ctx.set('hostRouter', service);
             ctx.logger.info('host-router: published ctx.hostRouter { snapshot, task, snapshotPath, notice }');
         }
         catch (error) {

@@ -92,9 +92,14 @@ export function sessionEntriesOf(events) {
     if (event?.type === 'tool/call') {
       entry = { role: 'tool', name: typeof data.name === 'string' ? data.name : 'tool', text: `调用 ${preview(data.arguments ?? data.input)}` }
     } else if (event?.type === 'tool/result') {
-      const body = textBlocks(data.output ?? data.content) || preview(data.output ?? data.result)
-      entry = { role: 'tool', name: typeof data.name === 'string' ? data.name : 'result', text: body }
-      if (data.isError === true || data.error !== undefined) entry.error = true
+      // Compaction re-surfaces older results (surfaceOp other than append): history, not new output.
+      if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') continue
+      // DSH 0.2.2 keeps the result under data.message ({ toolCallId, toolName, content, isError }).
+      const message = data.message && typeof data.message === 'object' ? data.message : data
+      const body = textBlocks(message.content ?? message.output) || preview(message.output ?? message.result ?? data.error)
+      const name = typeof message.toolName === 'string' ? message.toolName : typeof data.name === 'string' ? data.name : 'result'
+      entry = { role: 'tool', name, text: body }
+      if (message.isError === true || data.error !== undefined) entry.error = true
     } else if (event?.type === 'turn/end') {
       const kind = data?.reason?.kind
       entry = { role: 'note', text: `回合结束：${typeof kind === 'string' ? kind : 'unknown'}` }
@@ -122,14 +127,35 @@ export function isOffline(error) {
   return error?.status === undefined || error.status >= 500 || ['hub-unreachable', 'hub-timeout'].includes(error.code)
 }
 
+/** First non-empty line of a text, at most `max` characters. */
+function oneLine(text, max) {
+  const line = String(text ?? '').split(/\r?\n/).map(part => part.trim()).find(part => part !== '') ?? ''
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+/**
+ * Whether a hub stream event is about a task this DSH mirrored itself. The
+ * hub's feed carries `origin` as a kind string ('local' / 'controller') plus
+ * `created_by` and `dsh_profile`; older builds sent an object.
+ */
+export function isOwnMirror(event, controllerId, profile) {
+  const kind = typeof event.origin === 'string' ? event.origin : event.origin?.kind
+  if (kind !== 'local') return false
+  const by = event.created_by ?? event.origin?.by
+  if (by !== controllerId) return false
+  return event.dsh_profile === undefined || event.dsh_profile === profile
+}
+
 /** Hub stream event -> one 作战室 line, or undefined when it is not worth a line. */
 export function noticeOf(event) {
   const who = event.agent && event.agent !== 'dsh-self' ? `（${event.agent}）` : ''
-  const title = `「${event.title ?? event.task_id}」${who}`
-  const msg = event.message ? `：${event.message}` : ''
+  const title = `「${oneLine(event.title ?? event.task_id, 60)}」${who}`
+  const said = oneLine(String(event.message ?? '').split(/^--- report ---$/m)[0], 120)
+  const msg = said ? `：${said}` : ''
+  const where = event.dsh_profile ? `${event.created_by ?? 'DSH'}（${event.dsh_profile}）` : event.created_by ?? event.origin?.by ?? '另一台 DSH'
   switch (event.kind) {
     case 'created': return `云端新任务 ${title}`
-    case 'registered': return `${event.origin?.by ?? '另一台 DSH'} 在本地开始 ${title}`
+    case 'registered': return `${where} 在本地开始 ${title}`
     case 'leased': return `${title} 已被领取`
     case 'progress': {
       if (event.stage === 'blocked') return `${title} 卡住了${msg}`
@@ -316,7 +342,7 @@ export function createSync(deps) {
     }
     const lines = []
     for (const event of out.events ?? []) {
-      if (event.origin?.kind === 'local' && event.origin?.by === client.config?.controllerId) continue // our own mirror
+      if (isOwnMirror(event, client.config?.controllerId, profile)) continue // our own mirror
       if (event.kind === 'progress' && (event.stage === 'step' || event.stage === undefined)) {
         const last = lastStep.get(`stream:${event.task_id}`) ?? 0
         if (now() - last < opts.stepEveryMs) continue

@@ -95,6 +95,14 @@ test('a DSH session log becomes hub session entries', () => {
   ])
 })
 
+test('sessionEntriesOf reads DSH 0.2.2 tool results (data.message) and skips compaction re-surfacing', () => {
+  const entries = sessionEntriesOf([
+    { type: 'tool/result', seq: 1, time: 1, surfaceOp: 'append', data: { message: { role: 'toolResult', toolCallId: 'c1', toolName: 'bash', content: [{ type: 'text', text: 'Error: invalid arguments' }], isError: true } } },
+    { type: 'tool/result', seq: 2, time: 2, surfaceOp: 'replace', data: { message: { toolCallId: 'c0', toolName: 'bash', content: [{ type: 'text', text: 'old' }] } } },
+  ])
+  assert.deepEqual(entries.map(e => [e.role, e.name, e.text, e.error]), [['tool', 'bash', 'Error: invalid arguments', true]])
+})
+
 test('isOffline: network and 5xx wait; a hub refusal does not', () => {
   assert.equal(isOffline(offline()), true)
   assert.equal(isOffline(new HubError(409, 'x', 'y', { fromHub: true })), false)
@@ -211,6 +219,22 @@ test('stream: starts at the head, then other DSHs\' and workers\' events become 
   ])
   assert.deepEqual(s.client.of('events').at(-1), ['events', 7, 0])
   assert.equal(s.sync.state.cursor, 12)
+})
+
+test('stream: the hub feed shape (origin as a kind string, created_by, dsh_profile) is filtered right', async (t) => {
+  const s = await setup(t)
+  s.sync.state.cursor = 0
+  s.client.feed = {
+    next: 4, latest: 4, reset: false, events: [
+      { seq: 1, kind: 'registered', task_id: 'local_web_t1', title: '自己的', origin: 'local', created_by: 'dsh-home', dsh_profile: 'web' },
+      { seq: 2, kind: 'completed', task_id: 'local_web_t1', title: '自己的', message: '好了', origin: 'local', created_by: 'dsh-home', dsh_profile: 'web' },
+      { seq: 3, kind: 'registered', task_id: 'local_ops_t1', title: '备份', origin: 'local', created_by: 'dsh-home', dsh_profile: 'ops' },
+      { seq: 4, kind: 'completed', task_id: 'task_9', title: '写周报', agent: 'quick-mydesk', origin: 'controller', created_by: 'dsh-home',
+        message: '周报写好了。\n--- report ---\nsummary: x\ntouched: none\nleft: none' },
+    ],
+  }
+  await s.sync.streamOnce(0)
+  assert.deepEqual(s.notices, ['dsh-home（ops） 在本地开始 「备份」', '「写周报」（quick-mydesk） 完成：周报写好了。'])
 })
 
 test('stream: step lines of one task at most every 30 s; a reset jumps to the head', async (t) => {

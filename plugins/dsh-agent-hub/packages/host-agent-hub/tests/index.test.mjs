@@ -8,7 +8,7 @@ import { apply, inject, name } from '../index.js'
 import { TOKEN, assertNoToken, callRoute, fakeCtx, findRoute } from './helpers.mjs'
 
 const OVERVIEW = `${ADMIN_BASE}/overview`
-const ADMIN_PATHS = ['overview', 'agents', 'tasks', 'task', 'requests'].map(p => `${ADMIN_BASE}/${p}`)
+const ADMIN_PATHS = ['overview', 'agents', 'tasks', 'task', 'requests', 'session', 'ack'].map(p => `${ADMIN_BASE}/${p}`)
 /** Port 1 on loopback: connection refused at once (no hub is ever contacted by these tests). */
 const NO_ENV_FILE = join(tmpdir(), 'dsh-agent-hub-test-no-such-dir', '.env')
 const DEAD_HUB = { hubUrl: 'http://127.0.0.1:1', controllerId: 'dsh-test', timeoutMs: 3000, envFile: NO_ENV_FILE }
@@ -49,7 +49,7 @@ test('plugin identity', () => {
   assert.deepEqual(inject, ['tools'])
 })
 
-test('apply registers 16 tools and the 5 login-guarded admin routes, nothing under /v1', (t) => {
+test('apply registers 16 tools and the 7 login-guarded admin routes, nothing under /v1', (t) => {
   withToken(t, TOKEN)
   const fake = mount(t, { connection: { requestRejection: () => 401 } }, DEAD_HUB)
   assert.equal(fake.tools.size, 16)
@@ -141,12 +141,12 @@ test('no sweeper: the only background work is the cloud sync, and dispose stops 
   withToken(t, TOKEN)
   const fake = fakeCtx()
   apply(fake.ctx, { ...DEAD_HUB, sync: false })
-  assert.equal(fake.routes.length, 5)
-  assert.equal(fake.cleanups.length, 21, '16 tools + 5 routes, no sweeper, sync off')
+  assert.equal(fake.routes.length, 7)
+  assert.equal(fake.cleanups.length, 23, '16 tools + 7 routes, no sweeper, sync off')
   fake.dispose()
   const on = fakeCtx()
   apply(on.ctx, DEAD_HUB)
-  assert.equal(on.cleanups.length, 22, '+ the cloud sync')
+  assert.equal(on.cleanups.length, 24, '+ the cloud sync')
   on.dispose()
   fake.dispose()
   assert.equal(fake.tools.size, 0)

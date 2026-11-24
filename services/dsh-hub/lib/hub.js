@@ -1770,7 +1770,7 @@ export class AgentHub {
       else if (status === 'partial') { task.status = 'failed'; task.result.error = task.result.error ?? { code: 'NEEDS_HUMAN', message: task.result.needs_input ?? '', retryable: false } }
       else if (error?.retryable && retry) { this.requeue(state, task, `retryable failure: ${error.code}`) }
       else task.status = 'failed'
-      if (task.status !== 'pending') this.event(task, task.status, (task.result.needs_input ?? task.result.summary).slice(0, 200), { stage: task.result.needs_input === undefined ? undefined : 'needs_input' })
+      if (task.status !== 'pending') this.event(task, task.status, (task.result.needs_input ?? (task.result.summary || task.result.error?.message || '')).slice(0, 200), { stage: task.result.needs_input === undefined ? undefined : 'needs_input' })
       this.wakes.add(agentId) // a slot was freed
       if (task.status === 'completed') {
         for (const other of Object.values(state.tasks)) if (other.status === 'pending' && other.depends_on.includes(task.task_id)) this.wakeFor(state, other)
