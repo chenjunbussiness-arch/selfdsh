@@ -42,7 +42,7 @@ class Exchange:
         self.ex = we.Executor(self.root, self.logs.append, **kwargs)
         self.ex.ensure_boxes()
 
-    def task(self, task_id, instruction="", title="t", type="custom", context=None, workspace=None):
+    def task(self, task_id, instruction="", title="t", type="custom", context=None, workspace=None, duties=None):
         d = os.path.join(self.root, "inbox", task_id)
         os.makedirs(d, exist_ok=True)
         task = {"protocol": we.PROTOCOL, "task_id": task_id, "type": type, "title": title,
@@ -50,6 +50,8 @@ class Exchange:
                 "workspace_path": workspace if workspace is not None else self.workspace,
                 "inputs": [], "output": {}, "context": context or {}, "attempt": 1,
                 "exchange": {"result_dir": f"outbox/{task_id}", "failed_dir": f"failed/{task_id}"}}
+        if duties is not None:
+            task["duties"] = duties
         with open(os.path.join(d, "task.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(task, ensure_ascii=False, indent=2))
         return self.ex.claim(task_id) and self.ex.handle(task_id)
@@ -176,6 +178,13 @@ class ExecutorTest(unittest.TestCase):
         self.x.task("t-deny", "命令: Remove-Item -Recurse -Force .\\out")
         r = self.x.result("t-deny", "failed")
         self.assertEqual(r["error"]["code"], "COMMAND_DENIED")
+
+    def test_a_coder_runs_nothing_and_hands_the_task_back(self):
+        self.x.task("t-coder", "命令: Write-Output 'hi'", title="跑命令", duties={"role": "coder", "can": ["改代码"], "cannot": ["执行命令或脚本"]})
+        r = self.x.result("t-coder", "failed")
+        self.assertEqual(r["error"]["code"], "ROLE_OUT_OF_SCOPE")
+        self.assertIn("越界", r["needs_input"])
+        self.assertIn("改派给 worker", r["needs_input"])
 
     def test_denied_git_push_is_refused(self):
         self.x.task("t-deny-git", "命令: git push origin main")

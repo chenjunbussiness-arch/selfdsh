@@ -56,6 +56,16 @@ export interface LiveAgent {
   followup?(message: unknown): void
   /** Idle or running; read to pick queue vs steer. */
   readonly status?: string
+  /** `dsh-agent-loop` inbox: messages not taken yet, which can be replaced or removed. */
+  readonly inbox?: AgentInbox
+}
+
+/** The part of a DSH Agent's inbox the router uses to keep one progress notice queued. */
+export interface AgentInbox {
+  readonly nextTurn?: readonly unknown[]
+  readonly nextStep?: readonly unknown[]
+  replace?(messageId: unknown, message: unknown): boolean
+  remove?(messageId: unknown): unknown
 }
 
 /** Why a child run ended, in the subagent seam's vocabulary. */

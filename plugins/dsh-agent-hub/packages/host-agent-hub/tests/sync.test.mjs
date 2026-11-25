@@ -211,10 +211,9 @@ test('stream: starts at the head, then other DSHs\' and workers\' events become 
     ],
   }
   await s.sync.streamOnce(0)
+  // One line per task per read: its latest state.
   assert.deepEqual(s.notices, [
     'dsh-office 在本地开始 「备份」',
-    '「查日志」（code-desk） 已被领取',
-    '「查日志」（code-desk） 进度：跑测试',
     '「查日志」（code-desk） 完成：找到了',
   ])
   assert.deepEqual(s.client.of('events').at(-1), ['events', 7, 0])
@@ -235,6 +234,30 @@ test('stream: the hub feed shape (origin as a kind string, created_by, dsh_profi
   }
   await s.sync.streamOnce(0)
   assert.deepEqual(s.notices, ['dsh-home（ops） 在本地开始 「备份」', '「写周报」（quick-mydesk） 完成：周报写好了。'])
+})
+
+test('stream: the same news for a task is told once, also after a restart; an old client\'s "working" is not news', async (t) => {
+  const s = await setup(t)
+  s.sync.state.cursor = 0
+  const step = (seq, m) => ({ seq, kind: 'progress', stage: 'step', message: m, task_id: 'task_7', title: 'P7 收口', agent: 'quick-ws' })
+  const keepAlive = seq => ({ seq, kind: 'progress', message: 'working', task_id: 'task_8', title: '另一件', agent: 'quick-ws' })
+  s.client.feed = { events: [step(1, '测试已 7/7 通过'), keepAlive(2)], next: 2, latest: 2, reset: false }
+  await s.sync.streamOnce(0)
+  for (let i = 0; i < 50; i++) {
+    s.tick(31_000)
+    s.client.feed = { events: [step(3 + 2 * i, '测试已 7/7 通过'), keepAlive(4 + 2 * i)], next: 4 + 2 * i, latest: 4 + 2 * i, reset: false }
+    await s.sync.streamOnce(0)
+  }
+  assert.deepEqual(s.notices, ['「P7 收口」（quick-ws） 进度：测试已 7/7 通过'])
+  // A new DSH process with the same state file still remembers what it said.
+  const again = s.make()
+  s.tick(31_000)
+  s.client.feed = { events: [step(200, '测试已 7/7 通过')], next: 200, latest: 200, reset: false }
+  await again.streamOnce(0)
+  assert.equal(s.notices.length, 1)
+  s.client.feed = { events: [{ ...step(201, ''), kind: 'completed', message: '好了' }], next: 201, latest: 201, reset: false }
+  await again.streamOnce(0)
+  assert.deepEqual(s.notices.slice(1), ['「P7 收口」（quick-ws） 完成：好了'])
 })
 
 test('stream: step lines of one task at most every 30 s; a reset jumps to the head', async (t) => {

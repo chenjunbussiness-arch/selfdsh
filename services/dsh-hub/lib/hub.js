@@ -60,7 +60,7 @@ import { appendFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/pr
 import { basename, join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 
-import { DEFAULT_ROLE, ROLES, agentRole, roleAccepts, roleOf, roleRefusal, roleTakesWork, roleWidening } from './roles.js'
+import { DEFAULT_ROLE, ROLES, agentRole, needsOf, needsProblem, roleAccepts, roleBoundary, roleDuties, roleOf, roleRefusal, roleTakesWork, roleWidening } from './roles.js'
 
 export const PROTOCOL = 'dsh-agent/2.0'
 export const VERSION = '2.0.0'
@@ -452,6 +452,8 @@ export class AgentHub {
     this.events.setMaxListeners(0)
     this.wakes = new Set()
     this.waiters = new Map()
+    /** agent id -> the widening role it last reported (warned once, see heartbeat). */
+    this.roleWarned = new Map()
     this.closed = false
   }
 
@@ -874,7 +876,7 @@ export class AgentHub {
       max_concurrency: agent.maxConcurrency, description: agent.description, runtime: agent.runtime, revoked: agent.revoked,
       status, online: status === 'online', last_seen: agent.lastSeen, left_at: agent.leftAt, version: agent.clientVersion,
       reported_status: agent.reportedStatus, running_tasks: running, created_at: agent.createdAt,
-      role: agentRole(agent), pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
+      role: agentRole(agent), duties: roleDuties(agentRole(agent)), pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
       dormant: this.dormant(agent, status),
     }
   }
@@ -1065,6 +1067,10 @@ export class AgentHub {
     if (t.require_online !== undefined && typeof t.require_online !== 'boolean') throw new HubError(400, 'bad-task', 'require_online must be true or false')
     const requireOnline = t.require_online === true
     const effort = validateEffort(t.effort)
+    // What the work needs (code / test / git / cmd): a coder only edits (roles.js).
+    const badNeeds = needsProblem(t.needs)
+    if (badNeeds !== undefined) throw new HubError(400, badNeeds.code, badNeeds.message)
+    const needs = needsOf(t.needs)
     // What kind of work this is (browser / test / code ...), so a worker that does many
     // things knows which of its lanes runs it and the hub can keep per-lane limits.
     const fallback = t.fallback ?? 'dsh'
@@ -1100,7 +1106,7 @@ export class AgentHub {
         }
         if (agent.revoked) throw new HubError(409, 'agent-revoked', `${target} is revoked`)
         if (!hasCapability(agent, capability)) throw new HubError(409, 'unroutable', `${target} does not offer capability ${capability} (it offers ${agent.capabilities.join(', ')})`)
-        const refused = roleRefusal({ type, title: t.title }, agentRole(agent), target)
+        const refused = roleRefusal({ type, title: t.title, instruction: t.instruction, needs }, agentRole(agent), target)
         if (refused !== undefined) throw new HubError(400, refused.code, refused.message)
         // Fail fast instead of leaving a task no one can ever lease.
         if (workspace !== undefined && !agent.workspaces.includes(workspace)) throw new HubError(409, 'unroutable', `${target} was not granted workspace ${workspace}`)
@@ -1115,7 +1121,7 @@ export class AgentHub {
           warnings.push('agent-offline')
         }
       } else {
-        const probe = { agent: target, workspace, node, type, title: t.title }
+        const probe = { agent: target, workspace, node, type, title: t.title, instruction: t.instruction, needs }
         const members = Object.values(state.agents).filter(a => !a.revoked && this.targets(probe, a))
         if (members.length > 0 && members.every(a => !roleAccepts(agentRole(a), probe))) {
           const refused = roleRefusal(probe, agentRole(members[0]), members[0].id)
@@ -1148,7 +1154,7 @@ export class AgentHub {
       }
       const task = {
         protocol: PROTOCOL, task_id: id, agent: target, type, title: t.title.trim(), instruction: t.instruction,
-        workspace, node, ref, effort, capability, dsh_profile: dshProfile,
+        workspace, node, ref, effort, capability, dsh_profile: dshProfile, needs,
         origin: { kind: asAgent === undefined ? 'controller' : 'agent', by: creator },
         inputs: inputNames, output: t.output ?? {}, priority, deadline: t.deadline, lease_seconds: leaseSeconds,
         parent_task_id: t.parent_task_id, depends_on: deps, context: t.context ?? {},
@@ -1314,7 +1320,7 @@ export class AgentHub {
 
   publicTask(task, { full = false } = {}) {
     const out = {
-      task_id: task.task_id, agent: task.agent, assigned_to: task.assignedTo, type: task.type, title: task.title,
+      task_id: task.task_id, agent: task.agent, assigned_to: task.assignedTo, type: task.type, title: task.title, needs: task.needs,
       workspace: task.workspace, node: task.node, ref: task.ref, effort: task.effort, capability: task.capability, created_by: task.created_by,
       status: task.status, priority: task.priority, attempts: task.attempts, progress: task.progress, message: task.message,
       created_at: task.created_at, lease_until: task.leaseUntil, depends_on: task.depends_on,
@@ -1486,9 +1492,25 @@ export class AgentHub {
     // Its own schedule, not a grant: it only widens the silence allowed before it counts as offline.
     const pullEvery = b.pull_every_seconds === undefined ? undefined : validatePullEvery(b.pull_every_seconds, { allowNull: true })
     const profile = validProfile(b.dsh_profile, 'bad-profile')
+    const role = b.role === undefined || b.role === null ? undefined : roleOf(b.role)
+    if (b.role !== undefined && b.role !== null && role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')}`)
     return this.mutate((state) => {
       const agent = this.liveAgent(state, agentId)
       this.seen(agent)
+      // The role is a grant: a worker may NARROW its own (worker -> coder when its machine
+      // turns out to have no shell), never widen it; widening needs a new approval.
+      if (role !== undefined && role !== agentRole(agent)) {
+        if (roleWidening(agentRole(agent), role) === undefined) {
+          this.log(`dsh-hub: ${agentId} role ${agentRole(agent)} -> ${role} (narrowed by the worker)`)
+          agent.role = role
+          this.wakes.add(agentId)
+        } else if (this.roleWarned.get(agentId) !== role) {
+          // Once per reported role: a client left on the default "worker" after approval
+          // narrowed it would otherwise log this on every heartbeat.
+          this.roleWarned.set(agentId, role)
+          this.warn(`dsh-hub: ${agentId} reported role ${role} but was approved as ${agentRole(agent)} (ignored: widening needs a new approval)`)
+        }
+      }
       // The profile is part of the grant: a worker enrolled without one (older client) may name it
       // once; after that a different name is ignored, so it cannot pull another machine's work.
       let profileMismatch
@@ -1645,6 +1667,8 @@ export class AgentHub {
           inputs: task.inputs.map(name => ({ name, from_task: task.task_id })).concat(upstream),
           output: task.output, priority: task.priority, deadline: task.deadline, lease_until: task.leaseUntil,
           parent_task_id: task.parent_task_id, context: task.context, attempt: task.attempts,
+          // What this worker may do here, so its agent reads the boundary before the instruction.
+          needs: task.needs, duties: roleDuties(agentRole(agent)), boundary: roleBoundary(agentRole(agent)),
         })
       }
       return { tasks: leased }
@@ -1720,15 +1744,24 @@ export class AgentHub {
 
   /**
    * Progress renews the lease. `renew: true` with nothing else is only that
-   * (a "still working" keep-alive): no history entry, no event. Otherwise the
-   * stage / percentage / message are stored and one event goes out.
+   * (a "still working" keep-alive): no history entry, no event. So is a report
+   * that changes nothing. Otherwise the stage / percentage / message are stored
+   * and one event goes out.
    */
   applyProgress(task, b, stage) {
     task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000)
     const said = stage !== undefined || typeof b.message === 'string' || typeof b.progress === 'number'
     if (b.renew === true && !said) return { ok: true, lease_until: task.leaseUntil }
-    if (typeof b.progress === 'number' && b.progress >= 0 && b.progress <= 1) task.progress = b.progress
-    if (typeof b.message === 'string') task.message = redact(b.message.slice(0, 1000))
+    const progress = typeof b.progress === 'number' && b.progress >= 0 && b.progress <= 1 ? b.progress : undefined
+    const message = typeof b.message === 'string' ? redact(b.message.slice(0, 1000)) : undefined
+    // A report that repeats what the task already says (an older client re-sends "working"
+    // every cycle to keep its lease) is a keep-alive too: no history entry, no event.
+    const changed = (stage !== undefined && stage !== task.stage)
+      || (message !== undefined && message !== task.message)
+      || (progress !== undefined && progress !== task.progress)
+    if (!changed) return { ok: true, lease_until: task.leaseUntil }
+    if (progress !== undefined) task.progress = progress
+    if (message !== undefined) task.message = message
     if (stage !== undefined) task.stage = stage
     this.event(task, 'progress', task.message, { stage })
     return { ok: true, lease_until: task.leaseUntil }

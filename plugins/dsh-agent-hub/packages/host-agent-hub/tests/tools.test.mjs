@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { roleDuties } from '../roles.js'
 import test from 'node:test'
 import { HubError } from '../hub-client.js'
 import { TOOL_NAMES, createTools } from '../tools.js'
@@ -127,7 +128,7 @@ test('each tool is one /v1/ctl call with the right method, query and body', asyn
   await call('task_retry', { task_id: 't1', agent: 'quick-mydesk' })
   assert.deepEqual([last().path, last().json], ['/v1/ctl/retry', { task_id: 't1', agent: 'quick-mydesk' }])
 
-  assert.deepEqual(await call('agent_list'), { agents: [{ agent_id: 'quick-mydesk', role: 'worker' }] }, 'role is always reported (worker when the hub sends none)')
+  assert.deepEqual(await call('agent_list'), { agents: [{ agent_id: 'quick-mydesk', role: 'worker', duties: roleDuties('worker') }] }, 'role and duties are always reported (worker when the hub sends none)')
   assert.deepEqual(await call('agent_requests'), { requests: [{ request_id: 'req_1' }] })
   assert.deepEqual(q(), { id: CONTROLLER, status: 'pending' }, 'agent_requests defaults to pending')
   await call('agent_requests', { status: 'all' })
@@ -232,9 +233,18 @@ test('task_dispatch forwards require_online and hands the hub warnings back unch
 
 test('agent_list passes status / last_seen / version through (and adds the role, worker by default)', async () => {
   const agent = { agent_id: 'quick-mydesk', status: 'left', online: false, last_seen: '2026-11-22T10:00:00.000Z', left_at: '2026-11-22T10:01:00.000Z', version: 'agent_client/2.1.0' }
-  const { call } = setup(() => ({ body: { agents: [agent] } }))
+  const { call } = setup(() => ({ body: { agents: [agent, { agent_id: 'quick-2', role: 'coder', duties: { role: 'coder', can: ['x'], cannot: ['y'] } }] } }))
   const out = await call('agent_list')
-  assert.deepEqual(out.agents[0], { ...agent, role: 'worker' })
+  assert.deepEqual(out.agents[0], { ...agent, role: 'worker', duties: roleDuties('worker') })
+  assert.deepEqual(out.agents[1].duties, { role: 'coder', can: ['x'], cannot: ['y'] }, 'the hub\'s own duties win')
+})
+
+test('task_dispatch: a coder is refused a task that runs tests or git, before the hub sees it', async () => {
+  const { call, calls } = setup((c) => (c.path === '/v1/ctl/agents' ? { body: { agents: [{ agent_id: 'quick-mydesk', role: 'coder', capabilities: ['code'] }] } } : { body: { task_id: 't1' } }))
+  await assert.rejects(call('task_dispatch', { agent: 'quick-mydesk', title: '修首页', instruction: '改完跑测试并 git push' }), /role-not-coding/)
+  assert.equal(calls.some(c => c.path === '/v1/ctl/dispatch'), false)
+  await call('task_dispatch', { agent: 'quick-mydesk', title: '修首页', instruction: '只改 index.css', needs: ['code'] })
+  assert.deepEqual(calls.at(-1).json.needs, ['code'])
 })
 
 test('fallback tools: list, take (inputs inlined as text), submit (text files as base64)', async () => {
