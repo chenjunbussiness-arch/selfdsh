@@ -175,6 +175,13 @@ export interface RouterConfig {
     /** Notices arriving within this window are posted as one message. Default 3000 ms. */
     readonly progressNoticeDelayMs?: number;
     /**
+     * Least time between two notices that each start a turn of the 作战室. A notice still
+     * waiting in its queue is replaced instead (one queued notice at most). Default 60000 ms.
+     */
+    readonly progressNoticeMinGapMs?: number;
+    /** Most lines in one notice; older ones are folded into a count. Default 12. */
+    readonly progressNoticeMaxLines?: number;
+    /**
      * Headless screenshot command used by `browser_capture`:
      * `<command> <url> <out.png> [--full] [--wait ms]`. Default `/srv/workspace/bin/screenshot`.
      */

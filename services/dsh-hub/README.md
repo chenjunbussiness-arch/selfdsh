@@ -226,7 +226,7 @@ Quick 这类 agent 一般按自己的计划定时跑一次「调 `next_task`，�
 - `status`：`pending`（已批准、令牌未领）/ `online`（最近一次 heartbeat、poll、event 或 result 在 `offlineAfterMs` 内，默认 90 s；声明了 `pull_every_seconds` 的定时 worker 再加上这个周期）/ `offline` / `left`（调用了 `/v1/leave`，之后没再出现）/ `revoked`。再次 heartbeat 或 poll 就回到 `online`。
 - 心跳带 `running` 时对账：`running` 里不再属于它的任务列进 `abort`；hub 记为它持有、它却没报的任务立即重排（`worker-lost`，计一次尝试），租出不到 30 秒的除外（poll 的响应可能还在路上）。不带 `running` 不对账。
 - 认领：任务因为持有者离线、租约过期或失联被重排后，只要还没有别人领走，原持有者在 `running` 里报它（列进 `reclaimed`，不叫停），或直接交进度 / 结果，任务就还给它，不算新的一次尝试。
-- 角色：`worker`（默认）接任何任务，`tester` 只接测试类任务，`dispatcher`、`observer` 不接任务。注册和 provision 时可带 `role`，批准时只能收窄（`role-widened`）；派给不接这类任务的 worker，或整个 pool 没有一个能接，直接 400（`role-not-dispatchable` / `role-not-testable`）。
+- 角色：`worker`（默认）接任何任务，`coder` 只改代码（要跑测试、执行命令或 git 的任务不接），`tester` 只接测试类任务，`dispatcher`、`observer` 不接任务。注册和 provision 时可带 `role`，批准时只能收窄（`role-widened`），worker 也能在心跳里自己收窄；派给不接这类任务的 worker，或整个 pool 没有一个能接，直接 400（`role-not-dispatchable` / `role-not-testable` / `role-not-coding`）。任务可带 `needs`（`code` / `test` / `git` / `cmd`），没写时 hub 从标题和说明里读；领到的任务带 `duties` 和 `boundary`，写明这个 worker 能做和不能做什么。详见 docs/DSH-HUB-PROTOCOL-v2.md 的「职责边界」。
 - sweep：持有任务的 worker 变成 `offline` / `left` 时立即重排（`worker-offline`），不等租约到期；租约到期的规则不变。
 - dispatch：具体 agent 未注册 404 `agent-not-found`、已申请未批准 409 `agent-not-approved`、已吊销 409 `agent-revoked`；不在线照常入队但返回 `warnings: ["agent-offline"]`，`require_online: true` 时改为 409 `agent-offline`。`pool:` 任务没有任何在线且满足条件的 worker 时返回 `warnings: ["no-online-worker"]`（`require_online` 时 409）。分配仍然只发生在 worker 自己 poll 的时候。
 

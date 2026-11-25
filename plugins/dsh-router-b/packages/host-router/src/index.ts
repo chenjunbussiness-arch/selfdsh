@@ -76,6 +76,8 @@ import type { Approval, OutletKind, OutletMode } from './outlets.ts'
 import { createScmClient, defaultTokenEnv, envToken } from './scm.ts'
 import type { ScmClient } from './scm.ts'
 import { liveSegments } from './live.ts'
+import { mergeNoticeLines, noticeLinesOf, noticeText } from './notices.ts'
+import type { NoticeMessage } from './notices.ts'
 import type { ModelOption, Tier, TierDecision, TierRoute } from './tier.ts'
 import type { ContentBlock, CredentialsServiceLike, LiveAgent, LlmRuntimeLike, PluginContext, SubagentActivation, ToolRunContext, WebRouteLike } from './types.ts'
 
@@ -233,6 +235,10 @@ function anchorInstructions(partitions: readonly Partition[]): string {
       `   - 快任务：不属于任何工作区的小活（改电脑配置、git 命令、装工具、查端口/进程/磁盘），\`partition\` 填 \`${QUICK_PARTITION}\`，`,
       '     由快模型 worker 直接做。纯问答仍按规则 1 直接回答。',
     ] : [],
+    '   - 有云端 worker（`task_dispatch`）时按职责派：先 `agent_list` 看每个 worker 的 `role` 和 `duties`。coder（如 quick）',
+    '     只改代码，不跑测试、不执行命令、不碰 git；这些交给 role 为 worker 的（如本地 DSH worker）。既要改代码又要测试、',
+    '     提交的，拆成两条：改代码派给 coder（`needs: ["code"]`），测试和 git 派给 worker（`needs: ["test","git"]`，',
+    '     `depends_on` 改代码那条）。不要把整件事丢给一个 worker；被拒（`role-not-coding`）就按提示拆开重派。',
     '3. 你自己不动手：不用 bash、pwsh、write、edit、apply_patch、web_fetch、browser 等。可以用 `task_board` /',
     '   `task_progress` 查进度，用 `read` / `read_image` 看产出。',
     '4. 派完用一两句话告诉用户交给了哪个分区、任务号，然后结束这一轮，不等待、不轮询。',
@@ -1341,18 +1347,49 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
   // so a stage of six workers finishing does not post six times.
   const noticesEnabled = config.progressNotices !== false
   const NOTICE_DEBOUNCE_MS = config.progressNoticeDelayMs ?? 3_000
+  /** Least time between two notices that each start a turn of the anchor. */
+  const NOTICE_GAP_MS = config.progressNoticeMinGapMs ?? 60_000
+  /** Most lines one notice carries; older ones are folded into a count. */
+  const NOTICE_MAX_LINES = config.progressNoticeMaxLines ?? 12
   const pendingNotices: string[] = []
   /** Last notices, newest first, for the panel. */
   let recentNotices: readonly { readonly at: string; readonly text: string }[] = []
   let noticeTimer: ReturnType<typeof setTimeout> | undefined
+  let lastNoticeAt = 0
+  const scheduleNotices = (ms: number): void => {
+    if (noticeTimer !== undefined) return
+    noticeTimer = setTimeout(() => { void flushNotices() }, ms)
+    noticeTimer.unref?.()
+  }
+  /**
+   * Deliver the waiting lines. While a 【进度提醒】 is still queued in the anchor's
+   * inbox (the anchor is busy), it is replaced by one message with the latest line
+   * per subject, so the queue never holds more than one notice. A notice that
+   * starts a new turn goes out at most once per NOTICE_GAP_MS.
+   */
   const flushNotices = async (): Promise<void> => {
     noticeTimer = undefined
     if (pendingNotices.length === 0) return
-    const lines = pendingNotices.splice(0, pendingNotices.length)
     const agent = liveAgent(anchorSessionId) ?? await ensureAnchor().catch(() => undefined)
-    if (agent === undefined || typeof agent.followup !== 'function') return
+    if (agent === undefined || typeof agent.followup !== 'function') { pendingNotices.length = 0; return }
+    const inbox = agent.inbox
+    const waiting = inbox === undefined ? [] : [...(inbox.nextTurn ?? []), ...(inbox.nextStep ?? [])]
+      .filter((message): message is NoticeMessage => message !== null && typeof message === 'object' && noticeLinesOf(message as NoticeMessage) !== undefined)
+    const canReplace = waiting.length > 0 && typeof inbox?.replace === 'function'
+    if (!canReplace) {
+      const wait = lastNoticeAt + NOTICE_GAP_MS - Date.now()
+      if (wait > 0) { scheduleNotices(wait); return }
+    }
+    const lines = pendingNotices.splice(0, pendingNotices.length)
     try {
-      agent.followup(userMessage(['【进度提醒】', ...lines.map(line => `- ${line}`)].join('\n')))
+      if (canReplace) {
+        const [first, ...rest] = waiting
+        const merged = mergeNoticeLines(waiting.flatMap(message => noticeLinesOf(message) ?? []), lines, NOTICE_MAX_LINES)
+        for (const message of rest) inbox?.remove?.(message.id)
+        if (first !== undefined && inbox?.replace?.(first.id, userMessage(noticeText(merged))) === true) return
+      }
+      agent.followup(userMessage(noticeText(mergeNoticeLines([], lines, NOTICE_MAX_LINES))))
+      lastNoticeAt = Date.now()
     } catch (error) {
       ctx.logger.warn(`host-router: progress notice not delivered: ${String(error)}`)
     }
@@ -1368,10 +1405,7 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
     ctx.logger.info(`host-router notice: ${line}`)
     if (!noticesEnabled) return
     pendingNotices.push(line)
-    if (noticeTimer === undefined) {
-      noticeTimer = setTimeout(() => { void flushNotices() }, NOTICE_DEBOUNCE_MS)
-      noticeTimer.unref?.()
-    }
+    scheduleNotices(NOTICE_DEBOUNCE_MS)
   }
   ctx.effect(() => () => { if (noticeTimer !== undefined) clearTimeout(noticeTimer) }, 'host-router: notice timer')
 

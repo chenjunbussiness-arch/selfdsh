@@ -165,9 +165,16 @@ CODE_LANGS = {"python": "python", "py": "python", "python3": "python", "pwsh": "
 class Refused(Exception):
     """The task (or one of its steps) is not allowed to run. Becomes a failed result."""
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, needs_input=None):
         super().__init__(f"{code}: {message}")
-        self.code, self.message = code, message
+        self.code, self.message, self.needs_input = code, message, needs_input
+
+
+def worker_role(task):
+    """This worker's role as the hub told it with the task (`duties.role`), or None from an older hub."""
+    duties = task.get("duties")
+    role = duties.get("role") if isinstance(duties, dict) else None
+    return role if isinstance(role, str) else None
 
 
 # --- small helpers -----------------------------------------------------------
@@ -549,7 +556,7 @@ class Executor:
             self.finish(task_id, outcome, started)
         except Refused as exc:
             self.log(f"refused {task_id}: {exc.code}: {exc.message}")
-            self.finish_failed(task_id, exc.code, exc.message, started)
+            self.finish_failed(task_id, exc.code, exc.message, started, needs_input=exc.needs_input)
         except Exception as exc:  # noqa: BLE001 -- never leave a task hanging
             self.log(f"ERROR {task_id}: {type(exc).__name__}: {exc}")
             self.finish_failed(task_id, "EXECUTOR_ERROR", f"{type(exc).__name__}: {exc}", started)
@@ -608,6 +615,11 @@ class Executor:
     # --- actions ----------------------------------------------------------
     def execute(self, task, spec):
         action = spec["action"]
+        # A coder edits code and runs nothing: hand a run/script task back so DSH re-sends it to a worker.
+        if action in ("run", "script") and worker_role(task) == "coder":
+            raise Refused("ROLE_OUT_OF_SCOPE",
+                          f"this worker is a coder (edits code only); a {action} task runs a command",
+                          needs_input=f"越界：这台 worker 是 coder，只改代码，不执行命令或脚本（{action}）。请改派给 worker。")
         if action == "file":
             return self.action_file(task, spec)
         if action == "run":
@@ -850,9 +862,11 @@ class Executor:
         self.drop_working(task_id)
         self.log(f"done {task_id}: status={result.get('status')} in {time.time() - started:.2f}s -> {dest}")
 
-    def finish_failed(self, task_id, code, message, started):
+    def finish_failed(self, task_id, code, message, started, needs_input=None):
         result = {"status": "failed", "summary": f"failed: {code}: {message}",
                   "error": {"code": code, "message": truncate(message, 1800), "retryable": False}}
+        if needs_input:
+            result["needs_input"] = truncate(needs_input, 1800)
         self.trail(task_id, progress={"stage": "uploading", "message": f"failed: {code}"},
                    session=[{"role": "assistant", "text": result["summary"], "error": True}])
         dest = self.write_result(task_id, result, {"summary.md": result["summary"] + "\n"}, started)

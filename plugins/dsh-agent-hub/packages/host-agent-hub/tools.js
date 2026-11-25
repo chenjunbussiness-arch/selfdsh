@@ -16,7 +16,7 @@
  */
 
 import { HubError } from './hub-client.js'
-import { DEFAULT_ROLE, ROLES, agentRole, roleRefusal } from './roles.js'
+import { DEFAULT_ROLE, NEEDS, ROLES, agentRole, roleDuties, roleRefusal } from './roles.js'
 
 const objectSchema = { type: 'object' }
 const renderJson = (_args, value) => [{ type: 'text', text: JSON.stringify(value, undefined, 2) }]
@@ -24,7 +24,7 @@ const str = { type: 'string' }
 const strList = { type: 'array', items: str }
 const roleParam = description => ({ type: 'string', enum: [...ROLES], description })
 
-const ROLE_HINT = 'tester: test tasks only; dispatcher / observer: no tasks.'
+const ROLE_HINT = 'coder: edits code only (no tests, commands or git); tester: test tasks only; dispatcher / observer: no tasks.'
 
 /**
  * Roles the hub reported for its agents, for the task_dispatch pre-check.
@@ -55,7 +55,7 @@ async function dispatchRoleRefusal(client, task) {
   if (typeof task.agent !== 'string') return undefined
   const index = await roleIndex(client)
   if (!index.ok) return undefined
-  const probe = { type: task.type ?? 'custom', title: String(task.title ?? '') }
+  const probe = { type: task.type ?? 'custom', title: String(task.title ?? ''), instruction: String(task.instruction ?? ''), needs: task.needs }
   if (task.agent.startsWith('pool:')) {
     const capability = task.agent.slice(5)
     const members = index.agents.filter(agent => agent.capabilities.includes(capability))
@@ -135,10 +135,10 @@ export function createTools({ client }) {
 
   define({
     name: 'agent_list',
-    description: 'Workers: status, node, workspaces, capabilities, role, running tasks, runtime (efforts it accepts). Read before task_dispatch.',
+    description: 'Workers: status, node, workspaces, capabilities, role and duties (what it may and may not do), running tasks, runtime (efforts it accepts). Read before task_dispatch.',
     parameters: { properties: {} },
     isConcurrencySafe: () => true,
-    execute: async () => ({ agents: (await client.listAgents()).map(agent => ({ ...agent, role: agentRole(agent) })) }),
+    execute: async () => ({ agents: (await client.listAgents()).map(agent => ({ ...agent, role: agentRole(agent), duties: agent.duties ?? roleDuties(agentRole(agent)) })) }),
   })
 
   define({
@@ -159,7 +159,7 @@ export function createTools({ client }) {
         capabilities: strList,
         workspaces: { ...strList, description: 'Subset of the requested workspaces.' },
         max_concurrency: { type: 'integer', minimum: 1, maximum: 32 },
-        role: roleParam('Narrow only (worker -> tester). Omit to keep the request.'),
+        role: roleParam('Narrow only (worker -> coder or tester). Omit to keep the request.'),
         pull_every_seconds: { type: 'integer', minimum: 60, maximum: 86400, description: 'Scheduled workers only: seconds between pulls. Omit for always-on.' },
       },
     },
@@ -175,7 +175,10 @@ export function createTools({ client }) {
 
   define({
     name: 'task_dispatch',
-    description: 'Send a task to a worker id or pool:<capability>. Instruction must stand alone. depends_on chains tasks; upstream outputs become inputs. fallback_in_seconds 0 = nobody can take it now: do it yourself (fallback_take).',
+    description: 'Send a task to a worker id or pool:<capability>. Instruction must stand alone. depends_on chains tasks; upstream outputs become inputs. fallback_in_seconds 0 = nobody can take it now: do it yourself (fallback_take). '
+      + 'Dispatch by role (agent_list shows each worker\'s duties): a coder only edits code and is refused any task that runs tests, commands or git. '
+      + 'Work that edits AND tests/commits is two tasks: the edit to a coder (needs ["code"]), then the tests and git to a worker (needs ["test","git"], depends_on the edit; its changes.patch arrives as an input). '
+      + 'Never send one worker the whole chain when a coder is online, and never do the work yourself while a worker can take it.',
     parameters: {
       required: ['agent', 'title', 'instruction'],
       properties: {
@@ -210,6 +213,7 @@ export function createTools({ client }) {
         require_online: { type: 'boolean', description: 'Refuse instead of queueing when nobody is online.' },
         sticky_key: { type: 'string', description: 'Same key (session, browser login, test suite) goes back to the worker that handled it last.' },
         sticky: { type: 'boolean', description: 'false: no preference for the last worker.' },
+        needs: { type: 'array', items: { type: 'string', enum: [...NEEDS] }, description: 'What the task needs: code (edit), test, git (commit/push/PR), cmd (other commands). A coder takes only ["code"]; the instruction text is checked too.' },
       },
     },
     async execute(raw) {
