@@ -856,6 +856,7 @@ class TestScheduleSettings(TempCase):
         c.heartbeat("idle", [], running=[])
         self.assertEqual((sent[0][1]["role"], sent[0][1]["pull_every_seconds"]), ("tester", 900))
         self.assertEqual(sent[1][1]["pull_every_seconds"], 900)
+        self.assertEqual(sent[1][1]["role"], "tester", "the hub takes a role from a heartbeat only if it narrows the grant")
         plain = Spy("https://hub.example:7891", None, agent_id="quick-mydesk")
         plain.heartbeat("idle", [])
         self.assertNotIn("pull_every_seconds", sent[2][1])
@@ -1187,6 +1188,20 @@ class TestWorkerDir(TempCase):
         ac.ensure_exchange(ex)
         self.assertEqual(sorted(os.listdir(ex)), sorted(list(ac.EXCHANGE_DIRS) + ["README.md"]))
         self.assertEqual(ac.ensure_exchange(ex), [])
+
+    def test_an_older_exchange_readme_gets_the_role_section_a_hand_written_one_is_kept(self):
+        ex = self.path("old-ex")
+        ac.ensure_exchange(ex)
+        readme = os.path.join(ex, "README.md")
+        with open(readme, "w", encoding="utf-8") as f:
+            f.write("# dsh 交换目录（worker 本机）\n\n旧版说明\n")
+        self.assertEqual(ac.ensure_exchange(ex), ["README.md (updated)"])
+        with open(readme, encoding="utf-8") as f:
+            self.assertIn("职责边界", f.read())
+        with open(readme, "w", encoding="utf-8") as f:
+            f.write("# my own notes\n")
+        self.assertEqual(ac.ensure_exchange(ex), [])
+        self.assertIn("coder", ac.ROLES)
 
     def test_main_reads_worker_env(self):
         with open(os.path.join(self.wd, ".env"), "w", encoding="utf-8") as f:

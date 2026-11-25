@@ -122,8 +122,10 @@ An empty value (DSH_HUB_CAFILE=) counts as not set.
   DSH_HEARTBEAT_SECONDS  --heartbeat-seconds  heartbeat period of run, 5..3600 seconds; the hub
                                               marks a worker offline after 90 s without a
                                               heartbeat / poll. Default: 30.
-  DSH_ROLE               --role               worker | tester | dispatcher | observer, asked at
+  DSH_ROLE               --role               worker | coder | tester | dispatcher | observer, asked at
                                               register (approval may narrow it). Default: worker.
+                                              coder = edits code only (AWS Quick: no shell): the hub
+                                              never hands it a task that runs tests, commands or git.
   DSH_PULL_EVERY_SECONDS --pull-every-seconds how often this worker comes back when it is not
                                               always on (cron / scheduled `bridge --once`),
                                               60..86400; the hub then waits 90 s + this long
@@ -203,7 +205,7 @@ DEFAULT_HEARTBEAT = 30
 # Keys worker/.env carries (what `init` writes). The older agent keys (DSH_AGENT_ID, DSH_NODE, ...) are
 # still read from the environment / .env for one release; `doctor` says where they belong now.
 ENV_KEYS = ("DSH_HUB_URL", "DSH_HUB_PROXY", "DSH_HUB_CAFILE", "DSH_AGENT")
-ROLES = ("worker", "tester", "dispatcher", "observer")
+ROLES = ("worker", "coder", "tester", "dispatcher", "observer")
 PROXY_OFF = ("off", "direct", "none", "false", "no")
 EFFORT_MODES = ("fast", "balanced", "smart")
 EFFORT_THINKING = ("off", "low", "medium", "high")
@@ -420,6 +422,8 @@ class HubClient:
             body["running"] = list(running)
         if self.dsh_profile is not None:
             body["dsh_profile"] = self.dsh_profile
+        if self.role is not None:
+            body["role"] = self.role  # the hub takes it only if it narrows the grant (worker -> coder)
         return self._req("POST", "heartbeat", body)
 
     def me(self):
@@ -1420,6 +1424,13 @@ EXCHANGE_README = """\
 
 写结果时把这两个文件也拷进 `outbox/`（或 `failed/`）的结果目录，再最后写 `result.json`。它们不会作为结果文件上传。
 
+**职责边界（先读）**：`task.json` 里的 `boundary` 一句话写明本机 worker 能做什么、不能做什么，`duties` 是同样内容的列表（`role`、`can`、`cannot`、`handoff`）。
+按它做，不要越界：
+
+- `coder`（如 AWS Quick）：只改代码，交 `changes.patch` 和 `summary.md`（写清改了哪些文件）。**不跑测试、不执行命令、不碰 git**，也不要"顺手验证一下"。跑测试和提交由 DSH 另派给 worker。
+- 任务里有越界的部分：只做能做的，越界部分不做；全都越界就不做。在 `result.json` 里写 `"needs_input": "越界：<哪一步>，请改派给 worker"`，调度方会拆开改派。
+- `worker`：什么都能做；有 coder 在线时，DSH 会先把改代码派给 coder，再把测试和 git 派给你，上游的 `changes.patch` 会出现在输入文件里。
+
 协议：docs/DSH-HUB-PROTOCOL-v2.md；配置：plugins/dsh-agent-hub/README.md。
 """
 
@@ -1436,6 +1447,17 @@ def ensure_exchange(root):
     if not os.path.exists(readme):
         write_atomic(readme, EXCHANGE_README)
         created.append("README.md")
+    else:
+        # Our own README from an older client (it lacks the role section): bring it up to date.
+        # A README someone wrote by hand (other first line) is left alone.
+        try:
+            with open(readme, encoding="utf-8") as fh:
+                old = fh.read()
+        except OSError:
+            old = None
+        if old is not None and old != EXCHANGE_README and old.startswith("# dsh 交换目录") and "职责边界" not in old:
+            write_atomic(readme, EXCHANGE_README)
+            created.append("README.md (updated)")
     return created
 
 
@@ -2484,7 +2506,7 @@ def cmd_doctor(wd, env, dotenv, agent, agent_src, wm, st, a, out=print):
     out(f"工作区       {', '.join(names) if names else '-'}")
     for d in wm.dropped:
         notes.append(f"工作区 {d['name']} 没上报：{d['reason']}（{d.get('path') or '-'}）")
-    if not names and st.get("role") in ("worker", "tester"):
+    if not names and st.get("role") in ("worker", "coder", "tester"):
         notes.append("没有可用的工作区：只能接不指定工作区的任务")
     tf = st["token_file"]
     if os.path.isfile(tf):

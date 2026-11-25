@@ -53,6 +53,15 @@ export interface LiveAgent {
     followup?(message: unknown): void;
     /** Idle or running; read to pick queue vs steer. */
     readonly status?: string;
+    /** `dsh-agent-loop` inbox: messages not taken yet, which can be replaced or removed. */
+    readonly inbox?: AgentInbox;
+}
+/** The part of a DSH Agent's inbox the router uses to keep one progress notice queued. */
+export interface AgentInbox {
+    readonly nextTurn?: readonly unknown[];
+    readonly nextStep?: readonly unknown[];
+    replace?(messageId: unknown, message: unknown): boolean;
+    remove?(messageId: unknown): unknown;
 }
 /** Why a child run ended, in the subagent seam's vocabulary. */
 export type StopReason = 'completed' | 'aborted' | 'error' | 'max-tokens' | (string & {});
@@ -413,6 +422,12 @@ export interface PluginContext {
      * cordis build offers one.
      */
     set?(name: string, value: unknown): void;
+    /**
+     * Cordis's service registration. `set` only overwrites a service that was
+     * already provided (it throws "cannot set property ... without provide"), so
+     * a new service has to be provided first. Feature-detected like `set`.
+     */
+    provide?(name: string, value?: unknown): unknown;
 }
 /**
  * The context an `inject` callback receives: the plugin's own context plus the

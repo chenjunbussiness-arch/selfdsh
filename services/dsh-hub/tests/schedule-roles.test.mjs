@@ -105,3 +105,49 @@ test('approval may narrow the role and set the schedule, never widen the role', 
   assert.equal(ok.agent.role, 'observer')
   assert.equal(ok.agent.pull_every_seconds, 1800)
 })
+
+test('a coder only edits: a task that runs tests, commands or git is refused or left to a worker', async (t) => {
+  const { hub } = await makeHub(t)
+  await provision(hub, 'quick', { role: 'coder', capabilities: ['code'] })
+  await provision(hub, 'dsh', { capabilities: ['code', 'test'] })
+  // Sent straight to the coder: refused, with the split spelled out.
+  const err = await hub.dispatch(CTL, { agent: 'quick', title: '修首页布局', instruction: '改 index.css，改完跑一下测试再 git push' }).catch(e => e)
+  assert.equal(err.code, 'role-not-coding')
+  assert.match(err.message, /不能跑测试、git/)
+  assert.match(err.message, /另派给 worker/)
+  await expectHubError(() => dispatchTask(hub, { agent: 'quick', title: '修首页布局', instruction: '改 index.css', needs: ['code', 'git'] }), 400, 'role-not-coding')
+  // `needs` cannot hide an ask in the text.
+  await expectHubError(() => dispatchTask(hub, { agent: 'quick', title: '修首页', instruction: '改完运行 npm test', needs: ['code'] }), 400, 'role-not-coding')
+  await expectHubError(() => dispatchTask(hub, { agent: 'quick', title: 'x', instruction: 'y', needs: ['code', 'fly'] }), 400, 'bad-needs')
+  // Editing only (also "write tests" and "don't run the tests") goes to the coder.
+  await dispatchTask(hub, { task_id: 'edit', agent: 'quick', title: '修首页布局', instruction: '改 index.css，写单元测试覆盖 parse()，不要跑测试', needs: ['code'] })
+  // In a pool, the coder leaves the test + git task to the worker.
+  await dispatchTask(hub, { task_id: 'ship', agent: 'pool:code', title: '跑测试并提交', instruction: '跑 npm test，通过后 git push' })
+  await hub.heartbeat('quick', {})
+  await hub.heartbeat('dsh', {})
+  const coder = await hub.poll('quick', { max: 5 })
+  assert.deepEqual(coder.tasks.map(x => x.task_id), ['edit'])
+  assert.equal(coder.tasks[0].duties.role, 'coder')
+  assert.deepEqual(coder.tasks[0].needs, ['code'])
+  assert.match(coder.tasks[0].boundary, /coder.*不能跑测试/)
+  const worker = await hub.poll('dsh', { max: 5 })
+  assert.deepEqual(worker.tasks.map(x => x.task_id), ['ship'])
+  assert.equal(worker.tasks[0].duties.role, 'worker')
+  // agent_list shows what each may and may not do.
+  const agents = Object.fromEntries((await hub.listAgents()).map(a => [a.agent_id, a]))
+  assert.deepEqual(agents.quick.duties.cannot, ['跑测试', '执行命令或脚本', 'git（提交、推送、开 PR）'])
+  assert.deepEqual(agents.dsh.duties.cannot, [])
+})
+
+test('a worker may narrow its own role by heartbeat, never widen it', async (t) => {
+  const { hub } = await makeHub(t)
+  await provision(hub, 'quick', { capabilities: ['code'] })
+  await hub.heartbeat('quick', { role: 'coder' })
+  assert.equal((await hub.listAgents())[0].role, 'coder')
+  await hub.heartbeat('quick', { role: 'worker' })
+  assert.equal((await hub.listAgents())[0].role, 'coder')
+  await expectHubError(() => hub.heartbeat('quick', { role: 'boss' }), 400, 'bad-role')
+  // Approval: worker -> coder narrows; tester -> coder is another kind of work, refused.
+  const req = await hub.requestEnrollment({ agent_id: 'qa', role: 'tester' })
+  await expectHubError(() => hub.approveRequest(CTL, req.request_id, { role: 'coder' }), 400, 'role-widened')
+})
