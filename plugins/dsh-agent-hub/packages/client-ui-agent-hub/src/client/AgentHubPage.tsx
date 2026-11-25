@@ -41,12 +41,12 @@ import type { KeyboardEvent, ReactNode } from 'react'
 
 import { AGENT_STATUSES, TASK_STATUSES } from './contract.ts'
 import type { AgentStatus, AgentView, AgentsDoc, HistoryEvent, Overview, RequestView, RequestsDoc, SessionDoc, SessionEntry, TaskDetail, TaskDoc, TaskFilter, TaskRow, TaskStatus, TasksDoc } from './contract.ts'
-import { LANES, agentGroups, fallbackReason, fallbackTasks, lanesOf, registeredBy, selfWorkers, stageOf, timeline } from './desk.ts'
+import { LANES, agentGroups, clearActionOf, fallbackReason, fallbackTasks, laneOf, lanesOf, registeredBy, selfWorkers, stageOf, timeline } from './desk.ts'
 import type { AgentGroup, Lane, SelfWorker } from './desk.ts'
 import { absolute, agentCounts, agentStatus, bytes, clock, percent, presence, relative, sortAgents, until } from './format.ts'
 import { HubIcon } from './HubIcon.tsx'
 import type { Translate } from './locales.ts'
-import { SourceError, ackTask, fetchAgents, fetchOverview, fetchRequests, fetchSession, fetchTask, fetchTasks } from './source.ts'
+import { SourceError, ackTask, cancelTask, fetchAgents, fetchOverview, fetchRequests, fetchSession, fetchTask, fetchTasks } from './source.ts'
 
 /** Auto-refresh period. */
 export const REFRESH_MS = 10_000
@@ -599,13 +599,14 @@ function originText(task: Pick<TaskRow, 'origin' | 'dsh_profile'>, t: Translate)
 }
 
 /** One task row of the 调度台; opens its detail right under itself. */
-function TaskItem({ task, on, detail, now, t, onToggle }: {
+function TaskItem({ task, on, detail, now, t, onToggle, onChanged }: {
   readonly task: TaskRow
   readonly on: boolean
   readonly detail: ReactNode
   readonly now: number
   readonly t: Translate
   readonly onToggle: (id: string) => void
+  readonly onChanged?: () => void
 }): ReactNode {
   const progress = percent(task.progress)
   const stage = stageOf(task)
@@ -643,6 +644,9 @@ function TaskItem({ task, on, detail, now, t, onToggle }: {
           : null}
         {task.quiet === true ? <span className="dah-item-note" data-tone="quiet">{t('task.quiet')}</span> : null}
       </div>
+      {onChanged !== undefined && laneOf(task) === 'waiting'
+        ? <div className="dah-item-actions"><ClearWaiting task={task} t={t} onDone={onChanged} /></div>
+        : null}
       {on ? detail : null}
     </li>
   )
@@ -653,7 +657,7 @@ function TaskItem({ task, on, detail, now, t, onToggle }: {
  * empty lanes left out; 已结束 folds. A task that is not in the list (opened from
  * an agent's chip) shows its detail on top.
  */
-function EmbeddedTasks({ tasks, loaded, history, selected, detail, endedOpen, onEnded, now, t, onToggle }: {
+function EmbeddedTasks({ tasks, loaded, history, selected, detail, endedOpen, onEnded, now, t, onToggle, onChanged }: {
   readonly tasks: readonly TaskRow[]
   readonly loaded: boolean
   readonly history: boolean
@@ -664,11 +668,13 @@ function EmbeddedTasks({ tasks, loaded, history, selected, detail, endedOpen, on
   readonly now: number
   readonly t: Translate
   readonly onToggle: (id: string) => void
+  /** A task was put away or cancelled here: read the lists again. */
+  readonly onChanged?: () => void
 }): ReactNode {
   const lanes = useMemo(() => lanesOf(tasks), [tasks])
   const orphan = selected !== undefined && !tasks.some(task => task.task_id === selected)
   const item = (task: TaskRow): ReactNode => (
-    <TaskItem key={task.task_id} task={task} on={selected === task.task_id} detail={detail} now={now} t={t} onToggle={onToggle} />
+    <TaskItem key={task.task_id} task={task} on={selected === task.task_id} detail={detail} now={now} t={t} onToggle={onToggle} onChanged={onChanged} />
   )
   if (history) {
     return (
@@ -991,6 +997,46 @@ function AckButton({ task, t, onDone }: { readonly task: TaskDetail; readonly t:
   )
 }
 
+/**
+ * Clear one task out of 等你回复: put a finished one away (历史), cancel one that is
+ * still open. Cancelling stops a worker, so it asks once more on the same spot.
+ */
+function ClearWaiting({ task, t, onDone }: { readonly task: TaskRow; readonly t: Translate; readonly onDone: () => void }): ReactNode {
+  const [busy, setBusy] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const [error, setError] = useState<unknown>(undefined)
+  const action = clearActionOf(task)
+  const run = (): void => {
+    setBusy(true)
+    const call = action === 'ack' ? ackTask(task.task_id) : cancelTask(task.task_id)
+    call.then(() => { setBusy(false); setAsking(false); setError(undefined); onDone() }, (failure: unknown) => { setBusy(false); setAsking(false); setError(failure) })
+  }
+  return (
+    <>
+      {asking
+        ? (
+          <>
+            <span className="dah-muted">{t('waiting.cancel.ask')}</span>
+            <button type="button" className="dah-btn" data-size="sm" data-tone="danger" disabled={busy} onClick={run}>
+              {busy ? t('waiting.busy') : t('waiting.cancel.confirm')}
+            </button>
+            <button type="button" className="dah-btn" data-size="sm" disabled={busy} onClick={() => { setAsking(false) }}>{t('waiting.cancel.keep')}</button>
+          </>
+        )
+        : (
+          <button
+            type="button" className="dah-btn" data-size="sm" disabled={busy}
+            title={t(action === 'ack' ? 'waiting.ack.hint' : 'waiting.cancel.hint')}
+            onClick={() => { if (action === 'ack') run(); else setAsking(true) }}
+          >
+            {busy ? t('waiting.busy') : t(action === 'ack' ? 'waiting.ack' : 'waiting.cancel')}
+          </button>
+        )}
+      {error !== undefined ? <span className="dah-error-text">{t('waiting.failed', { error: messageOf(error) })}</span> : null}
+    </>
+  )
+}
+
 /** Locale key of a fallback reason. */
 const FALLBACK_KEY = { 'nobody-online': 'fallback.nobody-online', 'waited-out': 'fallback.waited-out', other: 'fallback.other' } as const
 
@@ -1018,7 +1064,9 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }: {
           {task !== undefined ? <span className="dah-sub-line dah-id">{task.task_id}</span> : null}
         </h3>
         {task !== undefined ? <span className="dah-badge" data-pill="true" data-tone={task.status}>{statusLabel(task.status, t)}</span> : null}
-        {failed && task !== undefined ? <AckButton task={task} t={t} onDone={() => { onChanged?.() }} /> : null}
+        {task !== undefined && laneOf(task) === 'waiting'
+          ? <ClearWaiting task={task} t={t} onDone={() => { onChanged?.() }} />
+          : failed && task !== undefined ? <AckButton task={task} t={t} onDone={() => { onChanged?.() }} /> : null}
         <button type="button" className="dah-btn" data-size="sm" data-icon="true" onClick={onClose} aria-label={t('detail.close')}>×</button>
       </div>
       {detail.error !== undefined ? <div className="dah-alert" role="alert">{t('error.section', { error: messageOf(detail.error) })}</div> : null}
@@ -1394,7 +1442,7 @@ export function AgentHubPage({ t, embedded = false, onOverview }: AgentHubPagePr
                   <EmbeddedTasks
                     tasks={tasks} loaded={board.tasks.data !== undefined} history={inHistory}
                     selected={selected} detail={detailNode} endedOpen={isOpen('ended')} onEnded={() => { flip('ended') }}
-                    now={now} t={t} onToggle={toggleTask}
+                    now={now} t={t} onToggle={toggleTask} onChanged={() => { load(true) }}
                   />
                 </EmbeddedFold>
                 <EmbeddedFold

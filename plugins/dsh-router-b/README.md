@@ -82,7 +82,8 @@
 | `classifierTimeoutMs` | `20000` | 模型分类器超时 |
 | `resumeDelayMs` | `8000` | 重启后多久恢复被中断的任务 |
 | `credentialRefs` | DeepSeek（`DEEPSEEK_API_KEY`）、Exa（`EXA_API_KEY`） | 左侧小栏里显示“是否已配置”的凭据名单 |
-| `progressNotices` / `progressNoticeDelayMs` | `true` / `3000` | 任务挂起、继续、前置失败时往作战室发【进度提醒】 |
+| `progressNotices` / `progressNoticeDelayMs` | `true` / `3000` | 任务挂起、继续、前置失败时往作战室发【进度提醒】。manager / worker 用 `task_control block` 停下来问人时也会发（「需要你决定」）；这类提问不受 60 秒间隔限制，也不会被后面的进度合并掉，作战室会直接问你 |
+| `stallNoticeMinutes` | `20` | 在跑的 worker 日志多少分钟没有新动静，就在作战室提醒一次「没有动静」并问你怎么办；`0` 关掉 |
 | `screenshotCommand` | `/srv/workspace/bin/screenshot` | `browser_capture` 用的截图命令（换机器要改） |
 | `hostScripts` | 无 | `build`（构建宿主代码、不动在跑的那份）/ `restart`（安全重启，人来跑）。配了才写进 worker 提示，不配就不提 |
 | `quick` | 开启（目录 = 用户主目录，并发 2） | 「快任务」：不属于任何工作区的小活；写 `false` 关闭 |

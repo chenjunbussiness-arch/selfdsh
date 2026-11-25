@@ -84,7 +84,7 @@ v1 时 hub 运行在 DSH web server 里；v2 把 hub 拆成**独立服务 dsh-hu
 | `envFile` | `<DSH home>/agent-hub/controller.env` | 换配置文件位置；**绝不能**指向 `<DSH home>/.env` |
 | `hubUrl` / `controllerId` / `proxy` / `caFile` | 不写 | 写了就覆盖 `controller.env` 里对应的项（日志会提醒）；bundle 自带的配置故意不写 |
 | `dshProfile` | DSH 启动时的 profile 名 | 这台 DSH 在 hub 上的名字：本机任务的 id（`local_<profile>_<编号>`）、执行者（`dsh-self/<profile>/<工作区>`）和调度台分组都用它 |
-| `sync` | 开 | 本机任务上云和【进度提醒】。`false` 全关；也可以写对象 `{ mirror, notices, intervalMs, stepEveryMs, backfillHours, waitSeconds }`，默认 `true / true / 10000 / 30000 / 12 / 20` |
+| `sync` | 开 | 本机任务上云和【进度提醒】。`false` 全关；也可以写对象 `{ mirror, notices, intervalMs, stepEveryMs, backfillHours, waitSeconds, stallMinutes, stallCheckMs }`，默认 `true / true / 10000 / 30000 / 12 / 20 / 20 / 120000`。`stallMinutes`：云端任务多久没有新进展（进度、阶段或会话上传都算）就在作战室提醒一次「没有动静」，`0` 关掉 |
 
 worker 端其余可选项（`DSH_MAX_CONCURRENCY`、`DSH_HEARTBEAT_SECONDS`、`DSH_AGENT_TOKEN_FILE`、`profile.json` 的 `dshProfile`）见 `python agent_client.py --help` 和第 8 节。
 
@@ -262,10 +262,11 @@ v1 的 11 个工具名称不变，另加 3 个兜底工具。每个工具对应�
 | `/api/agent-hub/admin/task?task_id=` | `/v1/ctl/task` | `{generated_at, task:{…}}` |
 | `/api/agent-hub/admin/requests?status=` | `/v1/ctl/requests` | `{generated_at, filter, requests:[…]}` |
 | `/api/agent-hub/admin/session?task_id=&after=&limit=` | `/v1/ctl/session/read` | `{task_id, total, next, full, entries:[{index, at, role, name?, text, by}]}`，`limit` 1..500，默认 200 |
-| `/api/agent-hub/admin/ack`（POST，JSON，≤4KB） | `/v1/ctl/ack` | 把一个已结束的任务标为已看过，调度台的「知道了」按钮用它 |
+| `/api/agent-hub/admin/ack`（POST，JSON，≤4KB） | `/v1/ctl/ack` | 把一个已结束的任务收起（进历史），调度台的「收起」按钮用它 |
+| `/api/agent-hub/admin/cancel`（POST，JSON，≤4KB） | `/v1/ctl/cancel` | 取消一个还开着的任务（只有创建它的 DSH 能取消），「等你回复」里还在等回答的任务用它 |
 
 - 登录校验（`requireLogin`）在请求 hub **之前**完成：未登录返回 401，无权限返回 403，登录服务不可用返回 503。
-- query 参数先在本地校验，非法时返回 400 `bad-query`，不会请求 hub。除 `ack` 外非 GET 请求返回 405；`ack` 要求 `Content-Type: application/json`（否则 415）。
+- query 参数先在本地校验，非法时返回 400 `bad-query`，不会请求 hub。除 `ack`、`cancel` 外非 GET 请求返回 405；这两个要求 `Content-Type: application/json`（否则 415）。
 - hub 的返回会重新按 v1 的白名单投影（`adminAgent` / `adminTaskRow` / `adminTaskDetail` / `adminRequest` / `adminOverview`）。`context` 只返回键名；产出文件只返回文件名、大小、类型和描述，不返回路径和内容。agent 行新增 `status`（pending / online / offline / left / revoked）和 `version`（客户端版本），原有字段不变；agent 行还会带 `left_at`（主动下线时间），overview 带 `agent_counts`（各状态的 agent 数，只保留 5 种状态的非负整数）；`contract.ts` 里它们是可选字段，旧版 hub 没有这两个字段时面板退回 `last_seen` 和自己统计 agent 列表；v2 新增的 `node` / `workspaces` / `workspace` / `ref` / `created_by` 目前**不会**出现在面板接口里，因为 `contract.ts` 还没有定义这些字段。
 
 错误码：
@@ -290,6 +291,7 @@ v1 的 11 个工具名称不变，另加 3 个兜底工具。每个工具对应�
 - 徽标 = **待审批的加入申请数**（为 0 时不显示）。选它而不是离线 agent 数：申请是这页上唯一需要人去处理的东西（在 DSH 对话里 `agent_approve` / `agent_reject`）；离线常常是正常状态（机器休眠、按需启动的 runner），一直挂着数字反而让人忽略它。tab 没打开时每 30 秒读一次 `overview`（只在有任务板、浏览器标签页可见时）；tab 打开时由页面自己的 10 秒刷新顺带更新。**警示点**：没有待审批申请、但有离线或已下线的 agent 还占着任务时，tab 上显示一个小圆点（任务板的 `.dshrc-tab-flag`，和「现在」tab 的等待点同一样式），悬停和读屏文字是「n 个离线 agent 还占着 m 个任务（掉线后会自动重排）」。有待审批时只显示数字，不显示圆点，避免两个信号叠在一起。hub 会自己把这些任务按 `worker-offline` 重排，所以圆点只是提醒，不需要操作。实现上用的是 board-tabs v1 新增的可选字段 `flag`；旧版任务板不认识它，只会不显示圆点。
 - 在线状态（协议第 9 节，整页和嵌入模式都一样）：agent 的状态点和文字按 `status` 显示 5 种状态，tone 为 在线 = ok、待接入（pending）= warn、离线 = idle、已下线（left）= idle、已吊销 = bad；旧版 bridge 没有 `status` 字段时按 `revoked` / `online` 推断（已吊销 / 在线 / 离线）。第二行显示客户端版本（有才显示）和「最后心跳 n 秒前」，离线或已下线时显示「离线 n 分钟」（已下线优先按 `left_at` 计算，没有就用 `last_seen`），忙 / 闲只在在线时显示。列表顺序是 在线 → 待接入 → 离线 → 已下线 → 已吊销，同一状态内保持 hub 返回的顺序；Agent 分组标题旁会弱化显示离线数（离线 + 已下线，大于 0 时才显示）。统计格「在线 agent」显示 在线/总数，悬停时列出各状态的数量（有 `agent_counts` 就用它，否则统计 agent 列表）。任务详情的历史记录里，凡是 event 或 message 里带有 `worker-lost` / `worker-offline` / `agent-offline` 的条目都会用 warn 色标出，并附一句说明。
 - 嵌入模式（调度台）：三个统计格（在办 / 在线 agent / 待批申请）；任务按五条泳道分组，工具条可按 agent 筛选、打开「历史」；Agent 按 DSH profile 分组，DSH 自己的 worker 并列，休眠的 agent 收在一个开关后面；「兜底」一栏只在有 DSH 兜底任务时出现，写明是「没人在线」还是「没人及时领」；加入申请只在有申请时出现；任务详情在列表里该行下方展开，含来源、profile、阶段、时间线和会话记录（每页 200 条）。分组折叠状态记在 sessionStorage。
+- 「等你回复」里每一行都能清掉：已结束的点「收起」（进历史），还开着的点「取消任务」（再确认一次，worker 会停下）。作战室用 `task_dispatch` 的 `replaces` 带着回答重派时，原任务自动收起。
 - 过期数据默认不显示（hub 的规则）：完成 12 小时、失败 2 天后进历史，agent 3 天没心跳算休眠，7 天后归档；旧配置启动时自动迁移，原文件留 `.bak`。自动刷新周期不变，tab 不在屏幕上（切到别的 tab、右侧栏收起、浏览器标签页隐藏）时暂停，回到屏幕立刻补刷一次。
 - **左侧栏入口只作兜底**：插件启动 3 秒后注册表里仍没有任务板声明自己（`hasConsumer()` 为假，即 router-b 没装或没加载），才注册 `sidebar.panellist` 那一行，点开是原来的整页（`main` 面板 `agent-hub/page` 一直保留）。之后任务板一出现，这一行就撤掉；任务板消失 3 秒后再加回来。
 - 只装 agent-hub、不装 router-b：行为和以前一样（左侧栏一行 + 整页），只是晚 3 秒出现。
@@ -300,7 +302,9 @@ hub 是唯一的任务账本，本机 DSH 只是其中一个执行者：
 
 1. **上传**：路由器（dsh-router-b）每个任务登记成 hub 上「由本机自己做」的任务（`run_here`，来源 `local`），id 固定为 `local_<profile>_<编号>`，重启不会重复登记。阶段、当前一步、worker 会话记录（提示、回答、工具调用，已脱敏）和最终结果都会上传。本机任务不会因为一段时间没进度被判失败，只标「安静」。
 2. **提醒**：hub 的事件流（`/v1/ctl/events` 长轮询）里不是本机做的任务，变成一句【进度提醒】发到本机作战室（路由器的 `hostRouter.notice`）。
-3. **离线**：已被 hub 接受的进度记在 `<DSH home>/agent-hub/sync-<profile>.json`；没发出去的下次连上时补发（最新阶段、未上传的会话条目、结果），DSH 重启也不丢。
+3. **提问优先**：worker 交回问题（`needs_input`）读作「需要回答」而不是「失败」；云端任务超过 `stallMinutes` 没有新进展，提醒一次「没有动静」。这几类条目作战室会直接问你（路由器规则 8），不会被后面的进度冲掉。
+4. **清理**：本机任务在路由器看板上不见了（看板重置、换了 profile）而 hub 上还开着，10 分钟后在 hub 上取消，不再一直挂着。
+5. **离线**：已被 hub 接受的进度记在 `<DSH home>/agent-hub/sync-<profile>.json`；没发出去的下次连上时补发（最新阶段、未上传的会话条目、结果），DSH 重启也不丢。
 
 ## 6. 测试
 

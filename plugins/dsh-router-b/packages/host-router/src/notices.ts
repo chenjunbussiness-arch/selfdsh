@@ -24,7 +24,7 @@ export function noticeLinesOf(message: NoticeMessage): string[] | undefined {
   const parts = Array.isArray(message.content) ? message.content : []
   const text = parts.map(part => (part !== null && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') ? (part as { text: string }).text : '').join('')
   if (!text.startsWith(NOTICE_HEAD)) return undefined
-  return text.slice(NOTICE_HEAD.length).split('\n').map(line => line.replace(/^- /, '').trim()).filter(line => line !== '' && !line.startsWith('（另有 '))
+  return text.slice(NOTICE_HEAD.length).split('\n').map(line => line.replace(/^- /, '').trim()).filter(line => line !== '' && !line.startsWith('（另有 ') && line !== ASK_FOOTER)
 }
 
 /**
@@ -40,23 +40,57 @@ export function noticeSubject(line: string): string {
 }
 
 /**
+ * Words that mark a line as waiting on the human (a question, a stop, no progress).
+ * Such a line is never replaced by a later progress line about the same subject:
+ * the 作战室 has to put it to the user, and a "进度" line arriving a minute later
+ * used to wipe the question out before anyone read it.
+ */
+const ASK_RE = /需要你决定|需要回答|卡住了|没法开始|没法继续|没有动静|需要你处理|等你决定/
+
+/** Lines that close a subject: an open question about it is moot then. */
+const DONE_RE = /^「[^」]*」(?:（[^）]*）)? (?:完成|已取消)|^任务 \S+?（.*）(?:已完成|已取消)/
+
+/** Whether a notice line waits on the human. */
+export function isAskLine(line: string): boolean {
+  return ASK_RE.test(line)
+}
+
+/**
  * Older lines (still waiting) then newer ones, one per subject, the latest kept, in the
  * order their subjects last changed; at most `max` lines, with a note on how many were folded.
+ * A line that waits on the human ({@link isAskLine}) is kept beside later progress about the
+ * same subject; only a newer question or the subject finishing replaces it. Questions are
+ * never folded away.
  */
 export function mergeNoticeLines(older: readonly string[], newer: readonly string[], max = 12): string[] {
   const bySubject = new Map<string, string>()
   for (const line of [...older, ...newer]) {
-    const key = noticeSubject(line)
+    const subject = noticeSubject(line)
+    const ask = isAskLine(line)
+    const key = ask ? `ask:${subject}` : subject
+    if (!ask && DONE_RE.test(line)) bySubject.delete(`ask:${subject}`)
     bySubject.delete(key)
     bySubject.set(key, line)
   }
-  const lines = [...bySubject.values()]
-  if (lines.length <= max) return lines
-  const kept = lines.slice(lines.length - max)
-  return [`（另有 ${String(lines.length - max)} 条较早的提醒已合并）`, ...kept]
+  const entries = [...bySubject.entries()]
+  if (entries.length <= max) return entries.map(([, line]) => line)
+  const asks = entries.filter(([key]) => key.startsWith('ask:')).length
+  const room = Math.max(0, max - asks)
+  let others = entries.length - asks
+  const kept: string[] = []
+  for (const [key, line] of entries) {
+    if (key.startsWith('ask:')) kept.push(line)
+    else if (others-- <= room) kept.push(line)
+  }
+  return [`（另有 ${String(entries.length - kept.length)} 条较早的提醒已合并）`, ...kept]
 }
+
+/** Closing line of a notice that carries questions: what the 作战室 has to do with them. */
+export const ASK_FOOTER = '（带「需要你决定 / 需要回答 / 卡住了 / 没有动静」的条目在等用户：按规则 8 直接问用户。）'
 
 /** The text of one 【进度提醒】 message. */
 export function noticeText(lines: readonly string[]): string {
-  return [NOTICE_HEAD, ...lines.map(line => `- ${line}`)].join('\n')
+  const body = [NOTICE_HEAD, ...lines.map(line => `- ${line}`)]
+  if (lines.some(isAskLine)) body.push(ASK_FOOTER)
+  return body.join('\n')
 }

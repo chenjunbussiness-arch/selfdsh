@@ -56,7 +56,7 @@ import { MemoryStore, entryOf, memoryBrief, renderTranscript, sessionRoster, wor
 import { DEFAULT_POLICY, OutletStore, classifyCommand, gitFacts, hostAllowed, pushableBranch, run, runShell } from "./outlets.js";
 import { createScmClient, defaultTokenEnv, envToken } from "./scm.js";
 import { liveSegments } from "./live.js";
-import { mergeNoticeLines, noticeLinesOf, noticeText } from "./notices.js";
+import { mergeNoticeLines, noticeLinesOf, noticeText, isAskLine } from "./notices.js";
 /** Stable plugin name. */
 export const name = 'host-router';
 /** The tool registry and the subagent seam are hard dependencies. */
@@ -141,13 +141,15 @@ function managerPrompt(input) {
         '  each worker its slice plus the context it needs. Independent workers start in the same turn; ordered',
         '  ones use `stage` or `depends_on`.',
         '- Reuse an earlier worker (`task_resume`) only when its `touched` files overlap this piece; otherwise a new one.',
-        `- Do not wait for approval. Ask only when the request reads two ways or could destroy data: \`task_control\` \`block\` on "${input.taskId}" with the question, then end.`,
+        '- Routine work needs no approval. Ask the human when the request reads two ways, when it needs something only they',
+        '  have (access, a credential, a choice), when a step could destroy data, or when a piece failed twice: put one clear',
+        `  question with two or three options in \`task_control\` \`block\` on "${input.taskId}", then end. Never guess past such a point.`,
         '- Code ships with `git_publish`, merges only via `pr_merge` (the human approves); server changes via `ops_run`;',
         '  hand a failure another partition or model would fix to `task_reassign`.',
         '- For a split, keep a `todo_write` checklist: one step per worker.',
         '',
         `Then call \`wait_agent\` until every worker reports (\`task_wait\` with parent_task "${input.taskId}" for staged or suspended ones).`,
-        'Retry a failed piece once; if it fails again, say so. Note lasting facts with `partition_memory` `note`',
+        'Retry a failed piece once; if it fails again, ask the human as above (block) instead of giving up silently. Note lasting facts with `partition_memory` `note`',
         '(`forget` wrong ones). Your closing message goes to the human in the request\'s language: what was done,',
         'the results the workers observed, and every artifact path verbatim.',
         '',
@@ -206,7 +208,11 @@ function anchorInstructions(partitions) {
         '   `partition_memory`（action `read`）。',
         '7. 用户要把任务挂起等前置：`task_suspend`，填 task_id 和原因，前置写在 `prerequisite`（会新建前置任务）或在',
         '   `wait_for` 填已有任务号，前置完成后自动接着做。只是先放着的只写原因，之后用 `task_control` 的 `resume` 继续。',
-        '8. 「【进度提醒】」开头的消息来自路由器：一两句话转告用户进度，不派任务，也不调用工具。',
+        '8. 「【进度提醒】」开头的消息来自路由器，不派新任务。普通进度一两句话转告用户，不调用工具。',
+        '   带「需要你决定 / 需要回答 / 卡住了 / 没法开始 / 没法继续 / 没有动静」的条目是在等用户：不要只转述，要直接问用户。',
+        '   说清是哪个任务、卡在哪，给两三个可选做法（例如补充信息后继续、换个做法或改派、取消），一个任务只问一次；',
+        '   原因没写清时可以先用 `task_board`（或云端任务的 `task_get`）看一眼再问。用户回答后：本地任务用 `task_control`',
+        '   `resume`（`value` 写用户的决定）；云端任务按回答 `task_dispatch` 重派（`replaces` 填原任务号）、`task_retry` 或 `task_cancel`。',
     ].join('\n');
 }
 /** Directory the anchor Session lives in: the partitions' shared parent, else the first root. */
@@ -865,6 +871,45 @@ export async function apply(ctx, config) {
         }
         return snapshotQueued;
     };
+    // A worker that stopped moving (a hung command, a loop it cannot leave) used to
+    // stay "running" in silence. Its log tells: no event for STALL_MS means one
+    // notice, which the 作战室 asks the human about. One per silence: the row has to
+    // move again before it can be reported a second time.
+    const STALL_MS = Math.max(0, config.stallNoticeMinutes ?? 20) * 60_000;
+    const stallSaid = new Map();
+    const noticeStalls = (snapshot) => {
+        if (STALL_MS === 0)
+            return;
+        const now = Date.now();
+        const running = new Set();
+        for (const view of snapshot.tasks) {
+            if (view.state !== 'running' || view.level !== 'worker')
+                continue;
+            running.add(view.id);
+            const last = view.activity?.lastActivityAt;
+            const at = last === undefined ? Number.NaN : Date.parse(last);
+            if (!Number.isFinite(at) || now - at < STALL_MS || stallSaid.get(view.id) === last)
+                continue;
+            stallSaid.set(view.id, last);
+            const minutes = Math.max(1, Math.floor((now - at) / 60_000));
+            const where = view.activity?.lastTool === undefined ? '' : `（最后一步：${view.activity.lastTool}）`;
+            const row = board.get(view.id);
+            notice(`任务 ${view.id}（${view.subject}）没有动静：已经 ${String(minutes)} 分钟没有新进展${where}。`, row);
+        }
+        for (const id of [...stallSaid.keys()])
+            if (!running.has(id))
+                stallSaid.delete(id);
+    };
+    // The snapshot is built on demand (panel, sync); while workers run, build one now and then
+    // so a stall is seen even when nobody looks.
+    if (STALL_MS > 0) {
+        const stallTimer = setInterval(() => {
+            if (board.list().some(row => row.state === 'running' && row.level === 'worker'))
+                void publishSnapshot().catch(() => { });
+        }, Math.min(120_000, Math.max(30_000, Math.floor(STALL_MS / 4))));
+        stallTimer.unref?.();
+        ctx.effect(() => () => { clearInterval(stallTimer); }, 'host-router: stall timer');
+    }
     /** Set when a snapshot pass settled a row from its log; the queue is driven after the pass. */
     let settledFromLog = false;
     const buildAndWriteSnapshot = async () => {
@@ -894,6 +939,12 @@ export async function apply(ctx, config) {
                 });
             },
         });
+        try {
+            noticeStalls(snapshot);
+        }
+        catch (error) {
+            ctx.logger.warn(`host-router: stall check skipped: ${String(error)}`);
+        }
         if (settledFromLog) {
             settledFromLog = false;
             // Off the build: driving the queue publishes again, which waits on this one.
@@ -1280,14 +1331,21 @@ export async function apply(ctx, config) {
             return;
         const agent = liveAgent(anchorSessionId) ?? await ensureAnchor().catch(() => undefined);
         if (agent === undefined || typeof agent.followup !== 'function') {
+            // No 作战室 right now: progress can go, but a question waits for the next try.
+            const asks = pendingNotices.filter(isAskLine);
             pendingNotices.length = 0;
+            if (asks.length > 0) {
+                pendingNotices.push(...asks);
+                scheduleNotices(30_000);
+            }
             return;
         }
         const inbox = agent.inbox;
         const waiting = inbox === undefined ? [] : [...(inbox.nextTurn ?? []), ...(inbox.nextStep ?? [])]
             .filter((message) => message !== null && typeof message === 'object' && noticeLinesOf(message) !== undefined);
         const canReplace = waiting.length > 0 && typeof inbox?.replace === 'function';
-        if (!canReplace) {
+        // A question for the human does not wait out the gap: it is why the notice exists.
+        if (!canReplace && !pendingNotices.some(isAskLine)) {
             const wait = lastNoticeAt + NOTICE_GAP_MS - Date.now();
             if (wait > 0) {
                 scheduleNotices(wait);
@@ -2236,6 +2294,10 @@ export async function apply(ctx, config) {
                 await publishSnapshot().catch(() => { });
                 if (wasInFlight)
                     await pump(partition.name, exec.agent ?? lastCaller).catch(() => { });
+                // A manager or worker that stops for a decision only reaches the human
+                // through the 作战室: say so there, or the question sits unseen on the board.
+                if (args.by !== 'human')
+                    notice(`任务 ${updated.id}（${updated.subject}）需要你决定：${(updated.resumeNote ?? '').slice(0, 300) || '（没写原因）'}。已暂停，回答后用 task_control resume 把决定带回去。`, updated);
                 return {
                     text: `${updated.id} blocked: ${updated.resumeNote ?? ''}`
                         + (wasInFlight && sessionId !== undefined ? ` (worker ${sessionId} interrupted; session kept for resume)` : ''),

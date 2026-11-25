@@ -42,13 +42,20 @@ var AGENT_STATUSES = ["online", "pending", "offline", "left", "revoked"];
 var LANES = ["queued", "claimed", "running", "waiting", "ended"];
 var SELF_PREFIX = "dsh-self";
 function laneOf(task) {
-  const finished = task.status === "completed" || task.status === "failed" || task.status === "cancelled" || task.status === "dead";
+  const finished = isFinished(task);
   const asks = task.stage === "needs_input" || task.result?.needs_input !== void 0 && task.result.needs_input !== "";
-  if (asks && (!finished || task.result?.status === "partial")) return "waiting";
+  const handled = task.acknowledged === true || task.in_history === true;
+  if (asks && !handled && (!finished || task.result?.status === "partial" || task.status === "failed")) return "waiting";
   if (finished) return "ended";
   if (task.status === "pending") return "queued";
   if (task.status === "accepted") return "claimed";
   return "running";
+}
+function isFinished(task) {
+  return task.status === "completed" || task.status === "failed" || task.status === "cancelled" || task.status === "dead";
+}
+function clearActionOf(task) {
+  return isFinished(task) ? "ack" : "cancel";
 }
 function lanesOf(tasks) {
   const out = { queued: [], claimed: [], running: [], waiting: [], ended: [] };
@@ -316,6 +323,14 @@ function fetchRequests(status) {
 }
 function fetchSession(taskId, after = 0, limit = 200) {
   return getJson("session", { task_id: taskId, after, limit });
+}
+async function cancelTask(taskId) {
+  const body = await send(`${ADMIN_BASE}/cancel`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task_id: taskId })
+  });
+  return body.task;
 }
 async function ackTask(taskId) {
   const body = await send(`${ADMIN_BASE}/ack`, {
@@ -686,7 +701,7 @@ function originText(task, t) {
   if (kind === "agent") return t("origin.agent");
   return void 0;
 }
-function TaskItem({ task, on, detail, now, t, onToggle }) {
+function TaskItem({ task, on, detail, now, t, onToggle, onChanged }) {
   const progress = percent(task.progress);
   const stage = stageOf(task);
   const holder = task.origin?.kind === "local" ? task.origin.executor ?? task.assigned_to ?? task.agent : task.assigned_to !== void 0 && task.assigned_to !== task.agent ? `${task.agent} \u2192 ${task.assigned_to}` : task.agent;
@@ -725,13 +740,14 @@ ${task.task_id}`, children: task.title }),
         ]
       }
     ),
+    onChanged !== void 0 && laneOf(task) === "waiting" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-item-actions", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ClearWaiting, { task, t, onDone: onChanged }) }) : null,
     on ? detail : null
   ] });
 }
-function EmbeddedTasks({ tasks, loaded, history, selected, detail, endedOpen, onEnded, now, t, onToggle }) {
+function EmbeddedTasks({ tasks, loaded, history, selected, detail, endedOpen, onEnded, now, t, onToggle, onChanged }) {
   const lanes = (0, import_react.useMemo)(() => lanesOf(tasks), [tasks]);
   const orphan = selected !== void 0 && !tasks.some((task) => task.task_id === selected);
-  const item = (task) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(TaskItem, { task, on: selected === task.task_id, detail, now, t, onToggle }, task.task_id);
+  const item = (task) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(TaskItem, { task, on: selected === task.task_id, detail, now, t, onToggle, onChanged }, task.task_id);
   if (history) {
     return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
       orphan ? detail : null,
@@ -963,6 +979,50 @@ function AckButton({ task, t, onDone }) {
     error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-error-text", children: t("detail.ack.failed", { error: messageOf(error) }) }) : null
   ] });
 }
+function ClearWaiting({ task, t, onDone }) {
+  const [busy, setBusy] = (0, import_react.useState)(false);
+  const [asking, setAsking] = (0, import_react.useState)(false);
+  const [error, setError] = (0, import_react.useState)(void 0);
+  const action = clearActionOf(task);
+  const run = () => {
+    setBusy(true);
+    const call = action === "ack" ? ackTask(task.task_id) : cancelTask(task.task_id);
+    call.then(() => {
+      setBusy(false);
+      setAsking(false);
+      setError(void 0);
+      onDone();
+    }, (failure) => {
+      setBusy(false);
+      setAsking(false);
+      setError(failure);
+    });
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+    asking ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-muted", children: t("waiting.cancel.ask") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-btn", "data-size": "sm", "data-tone": "danger", disabled: busy, onClick: run, children: busy ? t("waiting.busy") : t("waiting.cancel.confirm") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-btn", "data-size": "sm", disabled: busy, onClick: () => {
+        setAsking(false);
+      }, children: t("waiting.cancel.keep") })
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+      "button",
+      {
+        type: "button",
+        className: "dah-btn",
+        "data-size": "sm",
+        disabled: busy,
+        title: t(action === "ack" ? "waiting.ack.hint" : "waiting.cancel.hint"),
+        onClick: () => {
+          if (action === "ack") run();
+          else setAsking(true);
+        },
+        children: busy ? t("waiting.busy") : t(action === "ack" ? "waiting.ack" : "waiting.cancel")
+      }
+    ),
+    error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-error-text", children: t("waiting.failed", { error: messageOf(error) }) }) : null
+  ] });
+}
 var FALLBACK_KEY = { "nobody-online": "fallback.nobody-online", "waited-out": "fallback.waited-out", other: "fallback.other" };
 function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
   const task = detail.data?.task;
@@ -978,7 +1038,9 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
         task !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-sub-line dah-id", children: task.task_id }) : null
       ] }),
       task !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-pill": "true", "data-tone": task.status, children: statusLabel(task.status, t) }) : null,
-      failed && task !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AckButton, { task, t, onDone: () => {
+      task !== void 0 && laneOf(task) === "waiting" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ClearWaiting, { task, t, onDone: () => {
+        onChanged?.();
+      } }) : failed && task !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AckButton, { task, t, onDone: () => {
         onChanged?.();
       } }) : null,
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-btn", "data-size": "sm", "data-icon": "true", onClick: onClose, "aria-label": t("detail.close"), children: "\xD7" })
@@ -1405,7 +1467,10 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
                   },
                   now,
                   t,
-                  onToggle: toggleTask
+                  onToggle: toggleTask,
+                  onChanged: () => {
+                    load(true);
+                  }
                 }
               )
             ]
@@ -1890,6 +1955,15 @@ var zh = {
   "detail.ack.busy": "\u6536\u8D77\u4E2D\u2026",
   "detail.ack.failed": "\u6536\u8D77\u5931\u8D25\uFF1A{error}",
   "detail.acked": "\u5DF2\u6536\u8D77",
+  "waiting.ack": "\u6536\u8D77",
+  "waiting.ack.hint": "\u5DF2\u7ECF\u5904\u7406\u8FC7\u4E86\uFF1A\u4ECE\u300C\u7B49\u4F60\u56DE\u590D\u300D\u79FB\u5230\u5386\u53F2",
+  "waiting.cancel": "\u53D6\u6D88\u4EFB\u52A1",
+  "waiting.cancel.hint": "\u4EFB\u52A1\u8FD8\u5F00\u7740\uFF1A\u53D6\u6D88\u540E\u5B83\u7684 worker \u505C\u4E0B\uFF0C\u4EFB\u52A1\u79FB\u5230\u300C\u5DF2\u7ED3\u675F\u300D",
+  "waiting.cancel.ask": "\u53D6\u6D88\u8FD9\u4E2A\u4EFB\u52A1\uFF1F",
+  "waiting.cancel.confirm": "\u786E\u8BA4\u53D6\u6D88",
+  "waiting.cancel.keep": "\u5148\u7559\u7740",
+  "waiting.busy": "\u5904\u7406\u4E2D\u2026",
+  "waiting.failed": "\u6CA1\u6210\u529F\uFF1A{error}",
   "detail.session": "\u4F1A\u8BDD",
   "detail.session.load": "\u67E5\u770B\u4F1A\u8BDD\uFF08{n} \u6761\uFF09",
   "detail.session.more": "\u518D\u8BFB\u540E\u9762\u7684",
@@ -2098,6 +2172,15 @@ var en = {
   "detail.ack.busy": "Putting away\u2026",
   "detail.ack.failed": "Could not put it away: {error}",
   "detail.acked": "Put away",
+  "waiting.ack": "Put away",
+  "waiting.ack.hint": "dealt with: move it from Waiting on you to history",
+  "waiting.cancel": "Cancel task",
+  "waiting.cancel.hint": "still open: cancelling stops its worker and moves it to Ended",
+  "waiting.cancel.ask": "Cancel this task?",
+  "waiting.cancel.confirm": "Yes, cancel",
+  "waiting.cancel.keep": "Keep it",
+  "waiting.busy": "Working\u2026",
+  "waiting.failed": "Did not work: {error}",
   "detail.session": "Session",
   "detail.session.load": "Show session ({n} entries)",
   "detail.session.more": "Read more",
@@ -2177,6 +2260,8 @@ var AGENT_HUB_CSS = `
 .dah-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .dah-btn[data-size="sm"] { height: 30px; padding: 0 14px; font-size: 12.5px; }
 .dah-btn[data-icon="true"] { width: 30px; padding: 0; font-size: 16px; color: var(--dah-text-2); }
+.dah-btn[data-tone="danger"] { color: var(--dah-bad); background: color-mix(in srgb, var(--dah-bad) 10%, transparent); }
+.dah-btn[data-tone="danger"]:hover:not(:disabled) { background: color-mix(in srgb, var(--dah-bad) 16%, transparent); }
 .dah-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .dah-select {
   height: 30px; max-width: 220px; padding: 0 10px 0 14px; border: 0; border-radius: 999px; background: var(--dah-fill);
@@ -2378,6 +2463,7 @@ button.dah-chip:focus-visible { outline: 2px solid var(--dah-accent); outline-of
 .dah-item-note { color: var(--dah-text-2); }
 .dah-item-note[data-tone="failed"] { color: var(--dah-bad); }
 .dah-item-row .dah-chips { margin-top: 4px; }
+.dah-item-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 8px 8px; }
 .dah-item-row .dah-bar { width: 100%; margin: 4px 0 2px; }
 .dah-page[data-embedded="true"] .dah-badge { flex: none; font-size: 12.5px; line-height: 20px; }
 

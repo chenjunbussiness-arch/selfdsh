@@ -15,8 +15,10 @@
  *   GET  /api/agent-hub/admin/session?task_id=&after=&limit= <- GET /v1/ctl/session/read
  *   GET  /api/agent-hub/admin/requests?status=              <- GET /v1/ctl/requests
  *   POST /api/agent-hub/admin/ack  {task_id}  (JSON only)   <- POST /v1/ctl/ack
+ *   POST /api/agent-hub/admin/cancel {task_id} (JSON only)  <- POST /v1/ctl/cancel
  *
- * The ack is the panel's only write: it puts a failed task into 历史 at once.
+ * The panel's two writes: ack puts a finished task into 历史 at once; cancel stops
+ * an open one (only the DSH that created it may).
  *
  * Each route fetches from the hub (hub-client.js) and re-projects the answer
  * through the same explicit whitelists as v1: no token, token hash or poll
@@ -25,8 +27,8 @@
  *
  * Errors are `{ error: { code, message } }`:
  *   400 bad-query                    invalid query (checked before calling the hub)
- *   405 method-not-allowed           wrong method (GET, or POST for ack)
- *   415 unsupported-media-type       ack without a JSON body
+ *   405 method-not-allowed           wrong method (GET, or POST for ack / cancel)
+ *   415 unsupported-media-type       ack / cancel without a JSON body
  *   503 hub-unreachable              hub down, refused, DNS, TLS or timeout
  *   503 hub-not-configured | hub-token-missing | hub-token-mismatch | hub-ca-unreadable
  *   502 hub-unauthorized             the hub refused the controller token (NOT 401:
@@ -344,6 +346,22 @@ export function createRoutes({ client, logger }) {
       const id = typeof body?.task_id === 'string' ? body.task_id.trim() : ''
       if (!TASK_ID_RE.test(id)) throw new HubError(400, 'bad-request', 'task_id is required')
       sendJson(res, 200, { task: adminTaskRow(await client.acknowledge(id)) })
+    }),
+  })
+  // The other write: stop a task that is still open (one waiting on an answer that
+  // will not come). The hub lets only the creator cancel; other refusals pass through.
+  adminRoutes.push({
+    kind: 'exact',
+    path: `${ADMIN_BASE}/cancel`,
+    handler: guard(logger, 'admin-cancel', redact, async (req, res) => {
+      if (req.method !== 'POST') throw new HubError(405, 'method-not-allowed', 'use POST')
+      if (!String(req.headers?.['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+        throw new HubError(415, 'unsupported-media-type', 'send application/json')
+      }
+      const body = await readJsonBody(req)
+      const id = typeof body?.task_id === 'string' ? body.task_id.trim() : ''
+      if (!TASK_ID_RE.test(id)) throw new HubError(400, 'bad-request', 'task_id is required')
+      sendJson(res, 200, { task: adminTaskRow(await client.cancel(id, '在调度台上取消')) })
     }),
   })
   return { adminRoutes }
