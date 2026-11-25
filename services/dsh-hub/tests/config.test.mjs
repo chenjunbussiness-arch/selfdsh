@@ -18,7 +18,8 @@ test('defaults: port 7891, 127.0.0.1 without TLS, no allow list, v1 timings', ()
   assert.deepEqual(config, {
     port: DEFAULT_PORT, host: '127.0.0.1', tls: undefined, allow: [], trustProxy: false, autoApprove: false,
     maxRetries: 2, offlineAfterMs: 90_000, sweepIntervalMs: 15_000, maxResultBytes: 20 * 1024 * 1024,
-    fallback: { enabled: true, noFallbackCapabilities: ['quick'] }, mcp: { enabled: true },
+    fallback: { enabled: true, noFallbackCapabilities: ['quick'] }, sticky: { holdSeconds: 120, ttlSeconds: 86400 }, mcp: { enabled: true },
+    expiry: { doneHours: 12, failedHours: 48, dormantHours: 72, archiveHours: 168 },
   })
   assert.equal(DEFAULT_PORT, 7891)
   assert.notEqual(DEFAULT_PORT, 7890, '7890 is the Clash/mihomo proxy port on MYDESK')
@@ -56,6 +57,9 @@ test('validation of allow, trustProxy, numbers; unknown keys only warn', () => {
   for (const allow of [['10.0.0.0/33'], ['2001:db8::/64'], 'any', [1]]) assert.throws(() => resolveConfig({ allow }), ConfigError, JSON.stringify(allow))
   assert.throws(() => resolveConfig({ trustProxy: 'yes' }), ConfigError)
   assert.equal(resolveConfig({ trustProxy: true }).config.trustProxy, true)
+  assert.deepEqual(resolveConfig({ sticky: { holdSeconds: 0 } }).config.sticky, { holdSeconds: 0, ttlSeconds: 86400 })
+  assert.throws(() => resolveConfig({ sticky: { holdSeconds: -1 } }), ConfigError)
+  assert.throws(() => resolveConfig({ sticky: [] }), ConfigError)
   for (const [key, bad] of [['maxRetries', -1], ['maxRetries', 21], ['offlineAfterMs', 10], ['sweepIntervalMs', 0], ['maxResultBytes', 100], ['maxResultBytes', '20MB']]) {
     assert.throws(() => resolveConfig({ [key]: bad }), ConfigError, `${key}=${bad}`)
   }

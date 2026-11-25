@@ -111,6 +111,8 @@ TASK_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,96}")
 FILE_NAME_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff _.()-]{0,127}")
 ABORT_MARK = "ABORTED.json"          # written by the client when the hub aborts a task
 START_MARK = ".executor-start.json"  # written by us before executing (double-run guard)
+PROGRESS_FILE = "progress.jsonl"     # stages for the hub (agent_client.py sends them)
+SESSION_FILE = "session.jsonl"       # the task's session log for the hub
 SUMMARY_MAX = 3500                   # the hub truncates at 4000
 DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 300
@@ -536,9 +538,13 @@ class Executor:
              "started_local": now_local()}, ensure_ascii=False, indent=2))
         self.log(f"claimed {task_id}: type={task.get('type')} ws={task.get('workspace')} "
                  f"title={json.dumps(task.get('title'), ensure_ascii=False)}")
+        self.trail(task_id, progress={"stage": "started", "message": "executor started"},
+                   session=[{"role": "user", "text": str(task.get("instruction") or task.get("title") or "")}])
         try:
             spec, note = self.plan(task)
             self.log(f"plan {task_id}: {note} -> {json.dumps(spec, ensure_ascii=False)[:300]}")
+            self.trail(task_id, progress={"stage": "step", "message": f"running {spec.get('action')}"},
+                       session=[{"role": "note", "text": f"plan ({note}): {json.dumps(spec, ensure_ascii=False)[:2000]}"}])
             outcome = self.execute(task, spec)
             self.finish(task_id, outcome, started)
         except Refused as exc:
@@ -779,6 +785,23 @@ class Executor:
         result["meta"] = {"action": action, "cwd": cwd, "exit_code": code, "duration_s": elapsed}
         return result, files
 
+    # --- progress.jsonl / session.jsonl (agent_client.py sends them to the hub) -----
+    def trail(self, task_id, progress=None, session=()):
+        """Append a progress line and session entries to working/<id>/. Best effort."""
+        work = os.path.join(self.boxes("working"), task_id)
+        if not os.path.isdir(work):
+            return
+        try:
+            if progress:
+                with open(os.path.join(work, PROGRESS_FILE), "a", encoding="utf-8", newline="\n") as f:
+                    f.write(json.dumps(dict(progress, at=now_iso()), ensure_ascii=False) + "\n")
+            if session:
+                with open(os.path.join(work, SESSION_FILE), "a", encoding="utf-8", newline="\n") as f:
+                    for e in session:
+                        f.write(json.dumps(dict(e, text=scrub(e.get("text", "")), at=now_iso()), ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self.log(f"{task_id}: could not write progress / session ({exc})")
+
     # --- results ----------------------------------------------------------
     def result_dir(self, task_id, ok):
         return os.path.join(self.boxes("outbox" if ok else "failed"), task_id)
@@ -796,6 +819,10 @@ class Executor:
                 self.log(f"{task_id}: output file name {name!r} is not accepted by the hub; skipped")
                 continue
             write_atomic(os.path.join(dest, name), text)
+        work = os.path.join(self.boxes("working"), task_id)
+        for name in (PROGRESS_FILE, SESSION_FILE):  # the client sends what is left of them before the result
+            if os.path.isfile(os.path.join(work, name)):
+                shutil.copyfile(os.path.join(work, name), os.path.join(dest, name))
         if "summary.md" not in (files or {}):
             write_atomic(os.path.join(dest, "summary.md"), result.get("summary", "") + "\n")
         else:
@@ -812,6 +839,13 @@ class Executor:
 
     def finish(self, task_id, outcome, started):
         result, files = outcome
+        meta = result.get("meta") or {}
+        self.trail(task_id, progress={"stage": "uploading", "message": f"{result.get('status')}"},
+                   session=[{"role": "tool", "name": str(meta.get("action") or "executor"),
+                             "text": (files or {}).get("summary.md") or result.get("summary", ""),
+                             **({"error": True} if result.get("status") != "completed" else {})},
+                            {"role": "assistant", "text": f"{result.get('status')}: "
+                             + (result.get("error") or {}).get("message", "done") if result.get("error") else f"{result.get('status')}"}])
         dest = self.write_result(task_id, result, files, started)
         self.drop_working(task_id)
         self.log(f"done {task_id}: status={result.get('status')} in {time.time() - started:.2f}s -> {dest}")
@@ -819,6 +853,8 @@ class Executor:
     def finish_failed(self, task_id, code, message, started):
         result = {"status": "failed", "summary": f"failed: {code}: {message}",
                   "error": {"code": code, "message": truncate(message, 1800), "retryable": False}}
+        self.trail(task_id, progress={"stage": "uploading", "message": f"failed: {code}"},
+                   session=[{"role": "assistant", "text": result["summary"], "error": True}])
         dest = self.write_result(task_id, result, {"summary.md": result["summary"] + "\n"}, started)
         self.drop_working(task_id)
         self.log(f"done {task_id}: status=failed code={code} in {time.time() - started:.2f}s -> {dest}")
@@ -943,22 +979,29 @@ class Logger:
 
 
 def resolve_root(args, worker_dir):
+    """Exchange folder, log file and lock file of this executor.
+
+    --root names the folder outright (log / lock then default to the worker folder). Otherwise
+    the agent is picked exactly as `agent_client.py run` picks it (--agent, DSH_AGENT, or the only
+    agents/<id>.json) and its own files are used: exchange/<agent>/, logs/<agent>.executor.log and
+    a lock inside the exchange folder -- so the executor always reads the inbox the client writes."""
     if args.root:
-        return os.path.abspath(os.path.expanduser(args.root))
-    env_file = os.path.join(worker_dir, ".env")
-    value = None
-    if os.path.isfile(env_file):
-        with open(env_file, encoding="utf-8-sig") as f:
-            value = parse_env_text(f.read()).get("DSH_EXCHANGE")
-    value = (os.environ.get("DSH_EXCHANGE") or "").strip() or (value or "").strip() or "exchange"
-    return os.path.abspath(os.path.expanduser(os.path.join(worker_dir, value)))
+        return {"exchange": os.path.abspath(os.path.expanduser(args.root)), "agent": args.agent,
+                "executor_log": os.path.join(worker_dir, "executor.log"),
+                "executor_lock": os.path.join(worker_dir, "executor.lock")}
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import agent_client  # same folder; reads worker/.env and agents/<id>.json the same way
+    return agent_client.resolve_files(worker_dir, args.agent)
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=f"dsh-hub worker executor ({EXECUTOR_VERSION}, {PROTOCOL})")
     p.add_argument("--worker-dir", default=None, help="worker folder (default <DSH home>/worker)")
-    p.add_argument("--root", default=None, help="exchange folder (default: DSH_EXCHANGE from worker/.env)")
-    p.add_argument("--log", default=None, help="log file (default <worker dir>/executor.log)")
+    p.add_argument("--agent", default=None, help="which agents/<id>.json (default: DSH_AGENT, or the only one)")
+    p.add_argument("--root", default=None, help="exchange folder (default: the agent's own, as agent_client.py paths prints)")
+    p.add_argument("--log", default=None, help="log file (default <worker>/logs/<agent>.executor.log)")
     p.add_argument("--interval", type=float, default=1.5, help="seconds between scans in the resident loop")
     p.add_argument("--once", action="store_true", help="process what is pending, then exit")
     p.add_argument("--task", default=None, help="process one task id, then exit")
@@ -972,11 +1015,16 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     worker_dir = os.path.abspath(os.path.expanduser(a.worker_dir)) if a.worker_dir else default_worker_dir()
-    root = resolve_root(a, worker_dir)
-    log = Logger(a.log or os.path.join(worker_dir, "executor.log"))
+    try:
+        files = resolve_root(a, worker_dir)
+    except Exception as exc:  # noqa: BLE001 -- ConfigError from agent_client: say why and stop
+        Logger(a.log or os.path.join(worker_dir, "executor.log"))(f"{EXECUTOR_VERSION}: cannot read the worker settings: {exc}")
+        return 2
+    root = files["exchange"]
+    log = Logger(a.log or files["executor_log"])
     lock = None
     if not a.no_lock:
-        lock = InstanceLock(os.path.join(worker_dir, "executor.lock"))
+        lock = InstanceLock(files["executor_lock"])
         if not lock.acquire():
             log(f"{EXECUTOR_VERSION}: another executor already holds {lock.path}; this one exits")
             return 0

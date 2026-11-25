@@ -249,7 +249,7 @@ function applyInner(ctx: ClientContext): void {
   /**
    * Props shared by every surface that renders the board.
    *
-   * Both the Sidebar tab and the main page mount {@link RouterPanel}, so they must
+   * Both the Sidebar tab and the main page mount the same board, so they must
    * receive the same controller and the same optional services; building the face
    * once is what keeps them from drifting.
    */

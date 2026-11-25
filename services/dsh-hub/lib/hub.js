@@ -56,8 +56,9 @@
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 
 import { DEFAULT_ROLE, ROLES, agentRole, roleAccepts, roleOf, roleRefusal, roleTakesWork, roleWidening } from './roles.js'
 
@@ -82,8 +83,17 @@ export const FALLBACK_AGENT = 'dsh-self'
  * controller token and no human were involved (see requestEnrollment).
  */
 export const AUTO_APPROVED_BY = 'auto-approve'
-/** Default wait before DSH takes a task over: 10 min; a named scheduled puller gets two of its periods. */
+/**
+ * Wait before DSH takes a task over while a worker that could do it is online but
+ * busy: 10 min; a named scheduled puller gets two of its periods. With no such
+ * worker online DSH may take it at once.
+ */
 export const FALLBACK_MIN_WAIT_SECONDS = 600
+/** Sticky routing: how long other workers leave a task to its preferred worker, and how long a key is remembered. */
+export const STICKY_HOLD_SECONDS = 120
+export const STICKY_TTL_SECONDS = 86_400
+const MAX_STICKY_KEYS = 2000
+export const STICKY_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,127}$/
 /** Capabilities DSH never takes over by default (only that agent may touch the data). */
 export const DEFAULT_NO_FALLBACK = ['quick']
 export const MAX_WAIT_SECONDS = 55
@@ -104,6 +114,50 @@ export const EFFORT_MODES = ['fast', 'balanced', 'smart']
 export const EFFORT_THINKING = ['off', 'low', 'medium', 'high']
 /** Named agents / personas a worker platform offers (e.g. an AWS Quick agent, a Claude Code sub-agent). */
 export const PERSONA_RE = /^[a-z][a-z0-9-]{0,47}$/
+/** A DSH profile name (`<DSH home>/profiles/<name>`): the local DSH a worker belongs to. */
+export const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/
+/** Who runs a task registered by a controller that runs it itself (`dsh-self/web`, `dsh-self/web/frontend`). */
+export const EXECUTOR_RE = /^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,95}$/
+/** Fixed progress stages a worker (or DSH) reports with an event. */
+export const STAGES = ['received', 'started', 'step', 'blocked', 'needs_input', 'uploading']
+/** Roles of one entry of a task's full session log. */
+export const SESSION_ROLES = ['user', 'assistant', 'tool', 'system', 'note']
+export const MAX_SESSION_ENTRIES = 200
+const MAX_SESSION_TEXT = 20_000
+export const MAX_SESSION_BYTES = 20 * 1024 * 1024
+/** Events kept for the controllers' event stream (newest kept). */
+export const FEED_MAX = 5000
+const MAX_FEED_WAITERS = 64
+/**
+ * When finished data leaves the default views (hours): done / cancelled tasks
+ * go to history after 12 h, failed ones after 2 days (or at once once a
+ * controller acknowledged them), agents silent for 3 days count as dormant,
+ * and finished tasks are archived out of state.json after 7 days.
+ */
+export const DEFAULT_EXPIRY = Object.freeze({ doneHours: 12, failedHours: 48, dormantHours: 72, archiveHours: 168 })
+
+// --- redaction: nothing secret or internal is stored from uploaded text --------
+
+const SECRET_RULES = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted private key]'],
+  [/\bdsh[ac]_[A-Za-z0-9-]+_[A-Za-z0-9_-]{16,}/g, '[redacted token]'],
+  [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g, '[redacted token]'],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[redacted token]'],
+  [/\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}/g, '[redacted key]'],
+  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, '[redacted token]'],
+  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[redacted key]'],
+  [/\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+\/=-]{16,}/gi, '$1 [redacted]'],
+  [/\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)(["']?\s*[=:]\s*)("[^"\n]{4,}"|'[^'\n]{4,}'|[^\s,;"'}]{8,})/gi, '$1$2[redacted]'],
+  // RFC 1918, CGNAT and link-local IPv4 addresses never leave the machine they belong to.
+  [/\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})\b/g, '[internal address]'],
+]
+
+/** Strip tokens, keys, passwords and internal addresses from text a worker or DSH uploaded. */
+export function redact(text) {
+  let out = String(text ?? '')
+  for (const [re, to] of SECRET_RULES) out = out.replace(re, to)
+  return out
+}
 const MAX_PERSONAS = 32
 
 /** A caller-visible failure with an HTTP status and a stable code. */
@@ -197,6 +251,38 @@ const isPlainObject = v => v !== null && typeof v === 'object' && !Array.isArray
  * `pull_every_seconds`: how often a scheduled worker (AWS Quick, cron `bridge --once`)
  * comes back to pull. undefined = not declared, null = clear (heartbeat only).
  */
+/** A DSH profile name or undefined; anything else is a 400 with `code`. */
+export function validProfile(value, code = 'bad-task') {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || !PROFILE_RE.test(value)) throw new HubError(400, code, 'dsh_profile must be a DSH profile name (letters, digits, _ . -)')
+  return value
+}
+
+/** One stage name, or undefined. */
+export function validStage(value) {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || !STAGES.includes(value)) throw new HubError(400, 'bad-stage', `stage must be one of ${STAGES.join(', ')}`)
+  return value
+}
+
+/** Normalize one upload of session entries (redacted, cut, at most MAX_SESSION_ENTRIES). */
+export function sessionEntries(raw, clock = Date.now) {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_SESSION_ENTRIES) throw new HubError(400, 'bad-session', `entries must be a list of 1..${MAX_SESSION_ENTRIES} entries`)
+  return raw.map((e) => {
+    if (e === null || typeof e !== 'object' || Array.isArray(e)) throw new HubError(400, 'bad-session', 'each entry must be an object')
+    const role = SESSION_ROLES.includes(e.role) ? e.role : undefined
+    if (role === undefined) throw new HubError(400, 'bad-session', `role must be one of ${SESSION_ROLES.join(', ')}`)
+    if (typeof e.text !== 'string') throw new HubError(400, 'bad-session', 'text must be a string')
+    const text = redact(e.text)
+    const at = typeof e.at === 'string' && Number.isFinite(Date.parse(e.at)) ? new Date(Date.parse(e.at)).toISOString()
+      : typeof e.at === 'number' && Number.isFinite(e.at) ? new Date(e.at).toISOString() : nowIso(clock())
+    const out = { at, role, text: text.length > MAX_SESSION_TEXT ? `${text.slice(0, MAX_SESSION_TEXT)}\n[... ${text.length - MAX_SESSION_TEXT} characters cut]` : text }
+    if (typeof e.name === 'string' && e.name.trim() !== '') out.name = e.name.trim().slice(0, 64)
+    if (e.error === true) out.error = true
+    return out
+  })
+}
+
 export function validatePullEvery(value, { allowNull = false } = {}) {
   if (value === undefined) return undefined
   if (value === null) {
@@ -328,6 +414,7 @@ export class AgentHub {
     this.statePath = join(this.dataDir, 'state.json')
     this.controllersPath = join(this.dataDir, 'controllers.json')
     this.artifactDir = join(this.dataDir, 'artifacts')
+    this.archiveDir = join(this.dataDir, 'archive')
     this.offlineAfterMs = options.offlineAfterMs ?? DEFAULT_OFFLINE_AFTER_MS
     this.maxRetries = options.maxRetries ?? 2
     this.maxPendingRequests = options.maxPendingRequests ?? 20
@@ -341,6 +428,21 @@ export class AgentHub {
       enabled: fb.enabled !== false,
       noFallback: Array.isArray(fb.noFallbackCapabilities) ? fb.noFallbackCapabilities.filter(c => typeof c === 'string') : DEFAULT_NO_FALLBACK,
     }
+    const st = options.sticky ?? {}
+    this.sticky = {
+      holdSeconds: Number.isInteger(st.holdSeconds) && st.holdSeconds >= 0 ? st.holdSeconds : STICKY_HOLD_SECONDS,
+      ttlSeconds: Number.isInteger(st.ttlSeconds) && st.ttlSeconds > 0 ? st.ttlSeconds : STICKY_TTL_SECONDS,
+    }
+    const ex = options.expiry ?? {}
+    const hours = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d)
+    this.expiry = {
+      doneHours: hours(ex.doneHours, DEFAULT_EXPIRY.doneHours),
+      failedHours: hours(ex.failedHours, DEFAULT_EXPIRY.failedHours),
+      dormantHours: hours(ex.dormantHours, DEFAULT_EXPIRY.dormantHours),
+      archiveHours: hours(ex.archiveHours, DEFAULT_EXPIRY.archiveHours),
+    }
+    this.feedWaiters = 0
+    this.feedDirty = false
     this.logger = options.logger
     this.clock = options.clock ?? Date.now
     this.state = undefined
@@ -363,7 +465,7 @@ export class AgentHub {
       state = JSON.parse(await readFile(this.statePath, 'utf8'))
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
-      state = { protocol: PROTOCOL, agents: {}, tasks: {}, requests: {}, seq: 0 }
+      state = { protocol: PROTOCOL, agents: {}, tasks: {}, requests: {}, sticky: {}, seq: 0, feed: [], feedSeq: 0 }
     }
     this.state = this.upgrade(state)
     return this.state
@@ -373,8 +475,10 @@ export class AgentHub {
   upgrade(state) {
     if (state === null || typeof state !== 'object' || Array.isArray(state)) throw new HubError(500, 'bad-state', 'state.json is not an object')
     state.protocol = PROTOCOL
-    for (const key of ['agents', 'tasks', 'requests']) if (state[key] === null || typeof state[key] !== 'object') state[key] = {}
+    for (const key of ['agents', 'tasks', 'requests', 'sticky']) if (state[key] === null || typeof state[key] !== 'object' || Array.isArray(state[key])) state[key] = {}
     state.seq = Number.isInteger(state.seq) ? state.seq : 0
+    if (!Array.isArray(state.feed)) state.feed = []
+    state.feedSeq = Number.isInteger(state.feedSeq) ? state.feedSeq : (state.feed.at(-1)?.seq ?? 0)
     for (const agent of Object.values(state.agents)) {
       if (!Array.isArray(agent.workspaces)) agent.workspaces = []
       if (!Array.isArray(agent.reportedWorkspaces)) agent.reportedWorkspaces = []
@@ -396,15 +500,18 @@ export class AgentHub {
     const run = this.queue.then(async () => {
       const state = await this.load()
       this.wakes.clear()
+      this.feedDirty = false
       try {
         const value = await fn(state)
         await this.save()
         const ids = [...this.wakes]
         this.wakes.clear()
         for (const id of ids) this.events.emit(`wake:${id}`)
+        if (this.feedDirty) { this.feedDirty = false; this.events.emit('feed') }
         return value
       } catch (error) {
         this.wakes.clear()
+        if (this.feedDirty) { this.feedDirty = false; this.events.emit('feed') }
         throw error
       }
     })
@@ -531,8 +638,9 @@ export class AgentHub {
     const role = roleOf(input.role)
     if (role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')} (default ${DEFAULT_ROLE})`)
     const pullEverySeconds = validatePullEvery(input.pull_every_seconds)
+    const dshProfile = validProfile(input.dsh_profile, 'bad-profile')
     return {
-      id, mode, maxConcurrency, capabilities: caps.names, capabilityLimits: caps.limits, node, workspaces, role, pullEverySeconds,
+      id, mode, maxConcurrency, capabilities: caps.names, capabilityLimits: caps.limits, node, workspaces, role, pullEverySeconds, dshProfile,
       platform: String(input.platform ?? 'custom').slice(0, 64),
       description: String(input.description ?? '').slice(0, 500),
       runtime: validateRuntime(input.runtime),
@@ -547,7 +655,7 @@ export class AgentHub {
       id: v.id, platform: v.platform, mode: v.mode, node: v.node, capabilities: v.capabilities,
       capabilityLimits: v.capabilityLimits ?? {}, workspaces: v.workspaces, reportedWorkspaces: reported.filter(w => v.workspaces.includes(w)),
       maxConcurrency: v.maxConcurrency, description: v.description, runtime: v.runtime, tokenHash,
-      role: v.role ?? DEFAULT_ROLE, pullEverySeconds: v.pullEverySeconds,
+      role: v.role ?? DEFAULT_ROLE, pullEverySeconds: v.pullEverySeconds, dshProfile: v.dshProfile,
       createdAt: previous?.createdAt ?? nowIso(this.clock()),
       rekeyedAt: previous === undefined ? undefined : nowIso(this.clock()),
       lastSeen: undefined, reportedStatus: undefined, revoked: false,
@@ -599,7 +707,7 @@ export class AgentHub {
         requested_at: nowIso(this.clock()), from,
         decided_at: undefined, decided_by: undefined, reason: undefined, tokenIssued: false, auto_approved: false,
       }
-      this.log(`dsh-hub: enrollment request ${requestId} for ${v.id} (${v.platform}, node ${v.node ?? '-'}) from ${from || '-'} awaiting approval`)
+      this.log(`dsh-hub: enrollment request ${requestId} for ${v.id} (${v.platform}, node ${v.node ?? '-'}, profile ${v.dshProfile ?? '-'}) from ${from || '-'} awaiting approval`)
       if (this.autoApprove !== true) return { request_id: requestId, poll_secret: pollSecret, status: 'pending' }
       const request = state.requests[requestId]
       this.grantRequest(state, request, v, AUTO_APPROVED_BY)
@@ -639,7 +747,7 @@ export class AgentHub {
       .sort((a, b) => b.requested_at.localeCompare(a.requested_at))
       .map(r => ({
         request_id: r.request_id, status: r.status, agent_id: r.agent.id, platform: r.agent.platform, mode: r.agent.mode,
-        node: r.agent.node, workspaces: r.agent.workspaces ?? [], capabilities: r.agent.capabilities, capability_limits: r.agent.capabilityLimits ?? {}, max_concurrency: r.agent.maxConcurrency,
+        node: r.agent.node, dsh_profile: r.agent.dshProfile, workspaces: r.agent.workspaces ?? [], capabilities: r.agent.capabilities, capability_limits: r.agent.capabilityLimits ?? {}, max_concurrency: r.agent.maxConcurrency,
         description: r.agent.description, runtime: r.agent.runtime, role: agentRole(r.agent), pull_every_seconds: r.agent.pullEverySeconds, auto_approved: r.auto_approved === true, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
       })))
   }
@@ -672,7 +780,7 @@ export class AgentHub {
       const askedRole = agentRole(asked)
       const v = this.validateAgent({
         agent_id: asked.id, platform: asked.platform, mode: asked.mode, description: asked.description, node: asked.node,
-        runtime: asked.runtime,
+        runtime: asked.runtime, dsh_profile: asked.dshProfile,
         capabilities: o.capabilities ?? capabilityEntries(asked),
         workspaces: o.workspaces ?? asked.workspaces,
         max_concurrency: o.max_concurrency ?? asked.maxConcurrency,
@@ -761,13 +869,22 @@ export class AgentHub {
     const running = Object.values(state.tasks).filter(t => t.assignedTo === agent.id && isActive(t)).map(t => t.task_id)
     const status = this.agentStatus(agent)
     return {
-      agent_id: agent.id, platform: agent.platform, mode: agent.mode, node: agent.node, capabilities: agent.capabilities,
+      agent_id: agent.id, platform: agent.platform, mode: agent.mode, node: agent.node, dsh_profile: agent.dshProfile, capabilities: agent.capabilities,
       capability_limits: agent.capabilityLimits ?? {}, workspaces: agent.workspaces, reported_workspaces: agent.reportedWorkspaces,
       max_concurrency: agent.maxConcurrency, description: agent.description, runtime: agent.runtime, revoked: agent.revoked,
       status, online: status === 'online', last_seen: agent.lastSeen, left_at: agent.leftAt, version: agent.clientVersion,
       reported_status: agent.reportedStatus, running_tasks: running, created_at: agent.createdAt,
       role: agentRole(agent), pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
+      dormant: this.dormant(agent, status),
     }
+  }
+
+  /** Revoked, or silent (offline / left / never came) for longer than expiry.dormantHours: out of the default view. */
+  dormant(agent, status = this.agentStatus(agent)) {
+    if (status === 'revoked') return true
+    if (status === 'online') return false
+    const since = Date.parse(agent.lastSeen ?? agent.leftAt ?? agent.createdAt ?? '')
+    return Number.isFinite(since) && this.clock() - since > this.expiry.dormantHours * 3600_000
   }
 
   /** GET /v1/me: the hub's view of the calling worker. */
@@ -825,6 +942,7 @@ export class AgentHub {
     if (!roleAccepts(agentRole(agent), task)) return false // dispatcher / observer never, tester only tests
     if (task.workspace !== undefined && !(agent.workspaces.includes(task.workspace) && agent.reportedWorkspaces.includes(task.workspace))) return false
     if (task.node !== undefined && task.node !== agent.node) return false
+    if (task.dsh_profile !== undefined && task.dsh_profile !== agent.dshProfile) return false
     if (effortProblem(agent.runtime, task.effort) !== null) return false
     return true
   }
@@ -833,6 +951,83 @@ export class AgentHub {
   wakeFor(state, task) {
     if (task.status !== 'pending') return
     for (const agent of Object.values(state.agents)) if (!agent.revoked && this.routable(task, agent)) this.wakes.add(agent.id)
+  }
+
+  /** Is any worker that could take this task online now (busy or not)? */
+  anyOnlineFor(state, task) {
+    return Object.values(state.agents).some(a => !a.revoked && this.online(a) && this.routable(task, a))
+  }
+
+  // --- sticky routing ------------------------------------------------------------
+  //
+  // A pool task goes back to the worker that last handled the same work: the same
+  // sticky_key, else the worker that finished its parent / upstream task, else the
+  // last worker on its workspace. That worker keeps its checkout, browser session
+  // and context warm. It is a preference, not a pin: other workers leave the task
+  // alone for sticky.holdSeconds only while the preferred one is online, can take
+  // it and has room; after that (or at once if it cannot) anyone may lease it.
+
+  /** The keys a task is remembered under (explicit key, else its workspace). */
+  stickyKeys(task) {
+    if (task.sticky === false) return []
+    if (task.sticky_key !== undefined) return [`key:${task.sticky_key}`]
+    return task.workspace !== undefined ? [this.wsKey(task)] : []
+  }
+
+  /** Sticky key of a workspace, per DSH profile when the task names one (the same name on two machines is two checkouts). */
+  wsKey(task) {
+    return task.dsh_profile === undefined ? `ws:${task.workspace}` : `ws:${task.dsh_profile}/${task.workspace}`
+  }
+
+  /** A worker that may be preferred for this task, or undefined. */
+  stickyCandidate(state, task, id) {
+    if (typeof id !== 'string' || id === FALLBACK_AGENT) return undefined
+    const agent = own(state.agents, id)
+    return agent !== undefined && !agent.revoked && this.routable(task, agent) ? agent.id : undefined
+  }
+
+  /** Pick the preferred worker of a new pool task. */
+  preferredFor(state, task) {
+    if (task.sticky === false || !task.agent.startsWith('pool:')) return undefined
+    const now = this.clock()
+    const fresh = e => e !== undefined && now - Date.parse(e.at) <= this.sticky.ttlSeconds * 1000
+    if (task.sticky_key !== undefined) {
+      const e = own(state.sticky, `key:${task.sticky_key}`)
+      const hit = fresh(e) ? this.stickyCandidate(state, task, e.agent) : undefined
+      if (hit !== undefined) return hit
+    }
+    for (const id of [task.parent_task_id, ...task.depends_on]) {
+      const hit = this.stickyCandidate(state, task, own(state.tasks, id)?.result?.agent)
+      if (hit !== undefined) return hit
+    }
+    if (task.sticky_key === undefined && task.workspace !== undefined) {
+      const e = own(state.sticky, this.wsKey(task))
+      if (fresh(e)) return this.stickyCandidate(state, task, e.agent)
+    }
+    return undefined
+  }
+
+  /** Remember who handled a task (a finished result; DSH itself is not remembered). */
+  rememberSticky(state, task, agentId) {
+    if (agentId === FALLBACK_AGENT) return
+    const at = nowIso(this.clock())
+    for (const key of this.stickyKeys(task)) state.sticky[key] = { agent: agentId, at }
+    const keys = Object.keys(state.sticky)
+    if (keys.length > MAX_STICKY_KEYS) {
+      keys.sort((a, b) => state.sticky[a].at.localeCompare(state.sticky[b].at))
+      for (const key of keys.slice(0, keys.length - MAX_STICKY_KEYS)) delete state.sticky[key]
+    }
+  }
+
+  /** Does the preferred worker still hold this task back from `agentId`? */
+  stickyHolds(state, task, agentId) {
+    const preferred = task.preferred
+    if (preferred === undefined || preferred === agentId || this.sticky.holdSeconds === 0) return false
+    if (this.clock() - Date.parse(task.pendingSince ?? task.created_at) >= this.sticky.holdSeconds * 1000) return false
+    const agent = own(state.agents, preferred)
+    if (agent === undefined || agent.revoked || !this.online(agent) || !this.routable(task, agent)) return false
+    const held = Object.values(state.tasks).filter(t => t.assignedTo === preferred && isActive(t)).length
+    return held < agent.maxConcurrency
   }
 
   // --- tasks (controllers only) -----------------------------------------------
@@ -845,7 +1040,7 @@ export class AgentHub {
     }
     const type = t.type ?? 'custom'
     if (!TASK_TYPES.includes(type)) throw new HubError(400, 'bad-task', `type must be one of ${TASK_TYPES.join(', ')}`)
-    const target = t.agent
+    const target = t.run_here === true ? (t.agent ?? FALLBACK_AGENT) : t.agent
     if (typeof target !== 'string' || !(AGENT_ID_RE.test(target) || POOL_RE.test(target))) {
       throw new HubError(400, 'bad-task', 'agent must be an agent id or pool:<capability>')
     }
@@ -876,8 +1071,17 @@ export class AgentHub {
     if (fallback !== 'dsh' && fallback !== 'none') throw new HubError(400, 'bad-task', 'fallback must be dsh or none')
     const fallbackAfter = t.fallback_after_seconds ?? undefined
     if (fallbackAfter !== undefined && (!Number.isInteger(fallbackAfter) || fallbackAfter < 60 || fallbackAfter > 7 * 86400)) throw new HubError(400, 'bad-task', 'fallback_after_seconds must be 60..604800')
+    const stickyKey = t.sticky_key ?? undefined
+    if (stickyKey !== undefined && (typeof stickyKey !== 'string' || !STICKY_KEY_RE.test(stickyKey))) throw new HubError(400, 'bad-task', 'sticky_key must be 1-128 letters, digits or _ . : / -')
+    if (t.sticky !== undefined && typeof t.sticky !== 'boolean') throw new HubError(400, 'bad-task', 'sticky must be true or false')
     let capability = t.capability ?? undefined
     if (capability !== undefined && (typeof capability !== 'string' || !CAP_RE.test(capability))) throw new HubError(400, 'bad-task', 'capability must be a capability name')
+    const dshProfile = validProfile(t.dsh_profile)
+    if (t.run_here !== undefined && typeof t.run_here !== 'boolean') throw new HubError(400, 'bad-task', 'run_here must be true or false')
+    const runHere = t.run_here === true
+    const executor = t.executor ?? undefined
+    if (executor !== undefined && (typeof executor !== 'string' || !EXECUTOR_RE.test(executor))) throw new HubError(400, 'bad-task', 'executor must be a short label such as dsh-self/web')
+    if (runHere) return this.registerLocal(controllerId, t, { type, priority, leaseSeconds, workspace, node, ref, capability, dshProfile, executor, effort, asAgent })
     if (POOL_RE.test(target)) {
       if (capability !== undefined && capability !== target.slice(5)) throw new HubError(400, 'bad-task', `capability ${capability} does not match ${target}`)
       capability = target.slice(5)
@@ -901,6 +1105,7 @@ export class AgentHub {
         // Fail fast instead of leaving a task no one can ever lease.
         if (workspace !== undefined && !agent.workspaces.includes(workspace)) throw new HubError(409, 'unroutable', `${target} was not granted workspace ${workspace}`)
         if (node !== undefined && agent.node !== node) throw new HubError(409, 'unroutable', `${target} is not on node ${node}`)
+        if (dshProfile !== undefined && agent.dshProfile !== dshProfile) throw new HubError(409, 'unroutable', `${target} does not belong to DSH profile ${dshProfile}`)
         const why = effortProblem(agent.runtime, effort)
         if (why !== null) throw new HubError(409, 'unsupported-effort', `${target} ${why}`)
         if (effort !== undefined && agent.runtime === undefined) warnings.push('effort-not-declared')
@@ -919,9 +1124,10 @@ export class AgentHub {
         const ready = members.some(a => this.agentStatus(a) === 'online' && roleAccepts(agentRole(a), probe)
           && (workspace === undefined || (a.workspaces.includes(workspace) && a.reportedWorkspaces.includes(workspace)))
           && (node === undefined || a.node === node)
+          && (dshProfile === undefined || a.dshProfile === dshProfile)
           && effortProblem(a.runtime, effort) === null)
         if (!ready) {
-          if (requireOnline) throw new HubError(409, 'no-online-worker', `no online worker can take ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''} right now`)
+          if (requireOnline) throw new HubError(409, 'no-online-worker', `no online worker can take ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''}${dshProfile ? ` (profile ${dshProfile})` : ''} right now`)
           warnings.push('no-online-worker')
         }
       }
@@ -942,21 +1148,71 @@ export class AgentHub {
       }
       const task = {
         protocol: PROTOCOL, task_id: id, agent: target, type, title: t.title.trim(), instruction: t.instruction,
-        workspace, node, ref, effort, capability,
+        workspace, node, ref, effort, capability, dsh_profile: dshProfile,
+        origin: { kind: asAgent === undefined ? 'controller' : 'agent', by: creator },
         inputs: inputNames, output: t.output ?? {}, priority, deadline: t.deadline, lease_seconds: leaseSeconds,
         parent_task_id: t.parent_task_id, depends_on: deps, context: t.context ?? {},
         created_by: creator, created_at: nowIso(this.clock()), pendingSince: nowIso(this.clock()),
         fallback, fallback_after_seconds: fallbackAfter,
+        sticky_key: stickyKey, sticky: t.sticky === false ? false : undefined,
         status: 'pending', attempts: 0, assignedTo: undefined, leaseUntil: undefined,
-        progress: undefined, message: undefined, result: undefined, history: [],
+        progress: undefined, message: undefined, stage: undefined, result: undefined, history: [],
       }
-      this.event(task, 'created', `${creator} -> ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''}`)
       state.tasks[id] = task
+      this.event(task, 'created', `${creator} -> ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''}${dshProfile ? ` (profile ${dshProfile})` : ''}`)
+      task.preferred = this.preferredFor(state, task)
+      if (task.preferred !== undefined) this.event(task, 'sticky', `prefers ${task.preferred}`)
       this.wakeFor(state, task)
       this.log(`dsh-hub: ${creator} dispatched ${id} to ${target}${warnings.length ? ` (${warnings.join(', ')})` : ''}`)
       const out = this.publicTask(task)
       if (warnings.length > 0) out.warnings = warnings
+      const due = this.fallbackDueAt(state, task)
+      if (due !== undefined) out.fallback_in_seconds = Math.max(0, Math.ceil((due - this.clock()) / 1000))
       return out
+    })
+  }
+
+  /**
+   * A controller (a DSH) registers a task it runs ITSELF, so the hub's ledger
+   * holds every task, wherever it was started: the task is created already
+   * held by dsh-self for this controller (`origin.kind` local), is never
+   * offered to a worker, and is reported with the fallback endpoints
+   * (/v1/ctl/fallback/event, /result, /v1/ctl/session). One attempt, like the
+   * fallback: an expired lease fails it. Dispatcher agents cannot do this.
+   */
+  registerLocal(controllerId, t, v) {
+    if (v.asAgent !== undefined) throw new HubError(403, 'not-controller', 'only a DSH (controller) registers tasks it runs itself')
+    if (t.task_id !== undefined && (typeof t.task_id !== 'string' || !TASK_ID_RE.test(t.task_id))) throw new HubError(400, 'bad-task', 'invalid task_id')
+    if ((t.inputs ?? []).length > 0) throw new HubError(400, 'bad-task', 'a task run here takes no inputs through the hub')
+    return this.mutate(async (state) => {
+      await this.liveController(controllerId)
+      const day = nowIso(this.clock()).slice(0, 10).replace(/-/g, '')
+      const id = t.task_id ?? `task_${day}_${String(state.seq + 1).padStart(4, '0')}`
+      const existing = own(state.tasks, id)
+      if (existing !== undefined) {
+        // Registering twice (a restart, a retried request) is harmless for the same DSH.
+        if (existing.origin?.kind === 'local' && existing.fallbackBy === controllerId) return { ...this.publicTask(existing), already: true }
+        throw new HubError(409, 'task-exists', `task already exists: ${id}`)
+      }
+      if (t.task_id === undefined) state.seq += 1
+      const parent = typeof t.parent_task_id === 'string' && own(state.tasks, t.parent_task_id) !== undefined ? t.parent_task_id : undefined
+      const now = this.clock()
+      const task = {
+        protocol: PROTOCOL, task_id: id, agent: FALLBACK_AGENT, type: v.type, title: t.title.trim(), instruction: t.instruction,
+        workspace: v.workspace, node: v.node, ref: v.ref, effort: v.effort, capability: v.capability, dsh_profile: v.dshProfile,
+        origin: { kind: 'local', by: controllerId, executor: v.executor },
+        inputs: [], output: t.output ?? {}, priority: v.priority, deadline: t.deadline, lease_seconds: v.leaseSeconds,
+        parent_task_id: parent, depends_on: [], context: t.context ?? {},
+        created_by: controllerId, created_at: nowIso(now), pendingSince: undefined,
+        fallback: 'none', fallback_after_seconds: undefined, sticky: false,
+        status: 'running', attempts: 1, assignedTo: FALLBACK_AGENT, fallbackBy: controllerId,
+        leaseUntil: nowIso(now + v.leaseSeconds * 1000), leasedAt: nowIso(now),
+        progress: undefined, message: undefined, stage: 'received', result: undefined, history: [],
+      }
+      state.tasks[id] = task
+      this.event(task, 'registered', `${controllerId} runs it itself${v.executor ? ` (${v.executor})` : ''}`, { stage: 'received' })
+      this.log(`dsh-hub: ${controllerId} registered local task ${id}${v.executor ? ` (${v.executor})` : ''}`)
+      return this.publicTask(task)
     })
   }
 
@@ -1034,11 +1290,15 @@ export class AgentHub {
   }
 
   listTasks(filter = {}) {
+    const history = filter.history ?? 'hide'
     return this.read(state => Object.values(state.tasks)
+      .filter(t => history === 'include' || (history === 'only') === this.inHistory(t))
       .filter(t => (filter.status === undefined || t.status === filter.status)
         && (filter.agent === undefined || t.agent === filter.agent || t.assignedTo === filter.agent)
         && (filter.workspace === undefined || t.workspace === filter.workspace)
-        && (filter.created_by === undefined || t.created_by === filter.created_by))
+        && (filter.created_by === undefined || t.created_by === filter.created_by)
+        && (filter.dsh_profile === undefined || t.dsh_profile === filter.dsh_profile)
+        && (filter.origin === undefined || (t.origin?.kind ?? 'controller') === filter.origin))
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
       .slice(0, filter.limit ?? 50)
       .map(t => this.publicTask(t)))
@@ -1059,15 +1319,112 @@ export class AgentHub {
       status: task.status, priority: task.priority, attempts: task.attempts, progress: task.progress, message: task.message,
       created_at: task.created_at, lease_until: task.leaseUntil, depends_on: task.depends_on,
       fallback: task.fallback ?? 'dsh', fallback_after_seconds: task.fallback_after_seconds, fallback_by: task.fallbackBy,
+      sticky_key: task.sticky_key, sticky: task.sticky, preferred_agent: task.preferred,
+      dsh_profile: task.dsh_profile, origin: task.origin ?? { kind: 'controller', by: task.created_by }, stage: task.stage,
+      updated_at: task.history.at(-1)?.at ?? task.created_at, finished_at: task.result?.finished_at,
+      acknowledged: task.acknowledged === true ? true : undefined, in_history: this.inHistory(task),
+      session_entries: task.sessionEntries ?? 0, session_updated_at: task.sessionUpdatedAt,
+      quiet: task.origin?.kind === 'local' && isActive(task) && task.leaseUntil !== undefined && Date.parse(task.leaseUntil) < this.clock() ? true : undefined,
       result: task.result === undefined ? undefined : { status: task.result.status, summary: task.result.summary, outputs: task.result.outputs, error: task.result.error, needs_input: task.result.needs_input },
     }
     if (full) { out.instruction = task.instruction; out.inputs = task.inputs; out.output = task.output; out.history = task.history; out.context = task.context }
     return out
   }
 
-  event(task, kind, message) {
-    task.history.push({ at: nowIso(this.clock()), event: kind, message })
+  /**
+   * Record one thing that happened to a task: in its own history and in the
+   * controllers' event stream (`feed`, read with /v1/ctl/events). Text is
+   * redacted before it is stored anywhere.
+   */
+  event(task, kind, message, { stage } = {}) {
+    const at = nowIso(this.clock())
+    const text = message === undefined || message === null ? undefined : redact(message)
+    const entry = { at, event: kind, message: text }
+    if (stage !== undefined) entry.stage = stage
+    task.history.push(entry)
     if (task.history.length > 200) task.history.splice(0, task.history.length - 200)
+    const state = this.state
+    if (state === undefined) return
+    state.feedSeq += 1
+    state.feed.push({
+      seq: state.feedSeq, at, task_id: task.task_id, kind, stage, message: text,
+      title: task.title, status: task.status, progress: task.progress,
+      agent: task.assignedTo ?? task.agent, created_by: task.created_by, origin: task.origin?.kind ?? 'controller',
+      dsh_profile: task.dsh_profile,
+    })
+    if (state.feed.length > FEED_MAX) state.feed.splice(0, state.feed.length - FEED_MAX)
+    this.feedDirty = true
+  }
+
+  /** When a finished task ended (ms), from its result or its last event. */
+  endedAt(task) {
+    const at = Date.parse(task.result?.finished_at ?? task.history.at(-1)?.at ?? task.created_at)
+    return Number.isFinite(at) ? at : this.clock()
+  }
+
+  /**
+   * A finished task out of the default views: done / cancelled after
+   * expiry.doneHours, failed / dead after expiry.failedHours or at once
+   * when a controller acknowledged it (ack).
+   */
+  inHistory(task) {
+    if (!TERMINAL.has(task.status)) return false
+    if (task.status !== 'completed' && task.status !== 'cancelled' && task.acknowledged === true) return true
+    const hours = task.status === 'completed' || task.status === 'cancelled' ? this.expiry.doneHours : this.expiry.failedHours
+    return this.clock() - this.endedAt(task) > hours * 3600_000
+  }
+
+  /** A controller has seen a failed task: it leaves the default views now. */
+  acknowledge(controllerId, id) {
+    return this.mutate(async (state) => {
+      await this.liveController(controllerId)
+      const task = this.mustTask(state, id)
+      if (!TERMINAL.has(task.status)) throw new HubError(409, 'task-active', `task is ${task.status}`)
+      task.acknowledged = true
+      return this.publicTask(task)
+    })
+  }
+
+  /**
+   * The controllers' event stream: events after `after` (a seq), oldest
+   * first. With `wait` > 0 and nothing new, waits up to `wait` seconds (cap
+   * maxWaitSeconds) for the next event. `reset` says events were dropped
+   * (the cursor is older than the oldest kept event, or the hub was reset):
+   * the reader should re-read the task list.
+   */
+  async feed({ after = 0, wait = 0, limit = 200, signal } = {}) {
+    const cursor = Number.isInteger(after) && after >= 0 ? after : 0
+    const max = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 1000) : 200
+    const pick = (state) => {
+      if (cursor > state.feedSeq) return { events: [], next: state.feedSeq, latest: state.feedSeq, reset: true }
+      const oldest = state.feed[0]?.seq ?? state.feedSeq + 1
+      const events = state.feed.filter(e => e.seq > cursor).slice(0, max)
+      return { events, next: events.at(-1)?.seq ?? cursor, latest: state.feedSeq, reset: cursor > 0 && cursor < oldest - 1 }
+    }
+    const first = await this.read(pick)
+    const seconds = typeof wait === 'number' && Number.isFinite(wait) && wait > 0 ? Math.min(wait, this.maxWaitSeconds) : 0
+    if (first.events.length > 0 || first.reset || seconds === 0 || this.closed) return first
+    if (this.feedWaiters >= MAX_FEED_WAITERS) throw new HubError(429, 'too-many-waiters', 'too many readers of the event stream')
+    this.feedWaiters += 1
+    try {
+      await new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer)
+          this.events.off('feed', done)
+          this.events.off('shutdown', done)
+          signal?.removeEventListener?.('abort', done)
+          resolve()
+        }
+        const timer = setTimeout(done, seconds * 1000)
+        this.events.on('feed', done)
+        this.events.on('shutdown', done)
+        signal?.addEventListener?.('abort', done)
+        if (signal?.aborted) done()
+      })
+    } finally {
+      this.feedWaiters -= 1
+    }
+    return this.read(pick)
   }
 
   requeue(state, task, why) {
@@ -1128,9 +1485,23 @@ export class AgentHub {
     const runtime = b.runtime === undefined ? undefined : validateRuntime(b.runtime) // descriptive, not a grant: may change
     // Its own schedule, not a grant: it only widens the silence allowed before it counts as offline.
     const pullEvery = b.pull_every_seconds === undefined ? undefined : validatePullEvery(b.pull_every_seconds, { allowNull: true })
+    const profile = validProfile(b.dsh_profile, 'bad-profile')
     return this.mutate((state) => {
       const agent = this.liveAgent(state, agentId)
       this.seen(agent)
+      // The profile is part of the grant: a worker enrolled without one (older client) may name it
+      // once; after that a different name is ignored, so it cannot pull another machine's work.
+      let profileMismatch
+      if (profile !== undefined && profile !== agent.dshProfile) {
+        if (agent.dshProfile === undefined) {
+          agent.dshProfile = profile
+          this.wakes.add(agentId)
+          this.log(`dsh-hub: ${agentId} belongs to DSH profile ${profile}`)
+        } else {
+          profileMismatch = profile
+          this.warn(`dsh-hub: ${agentId} reported DSH profile ${profile} but was enrolled as ${agent.dshProfile} (ignored)`)
+        }
+      }
       if (b.pull_every_seconds !== undefined && (pullEvery ?? undefined) !== agent.pullEverySeconds) {
         agent.pullEverySeconds = pullEvery ?? undefined
         this.log(`dsh-hub: ${agentId} pulls ${agent.pullEverySeconds === undefined ? 'continuously' : `every ${agent.pullEverySeconds} s`}`)
@@ -1177,6 +1548,7 @@ export class AgentHub {
         ok: true, agent_id: agentId, status: 'online', server_time: agent.lastSeen,
         workspaces: agent.reportedWorkspaces, ignored_workspaces: ignored, abort, requeued, reclaimed,
         pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
+        ...(agent.dshProfile === undefined ? {} : { dsh_profile: agent.dshProfile }), ...(profileMismatch === undefined ? {} : { profile_mismatch: profileMismatch }),
       }
     })
   }
@@ -1247,7 +1619,10 @@ export class AgentHub {
         .filter(t => t.status === 'pending')
         .filter(t => this.routable(t, agent))
         .filter(t => t.depends_on.every(d => own(state.tasks, d)?.status === 'completed'))
-        .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority] || a.created_at.localeCompare(b.created_at))) {
+        .filter(t => !this.stickyHolds(state, t, agentId))
+        .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority]
+          || Number(b.preferred === agentId) - Number(a.preferred === agentId)
+          || a.created_at.localeCompare(b.created_at))) {
         if (candidates.length >= room) break
         const lane = t.capability
         if (lane !== undefined && limits[lane] !== undefined && (inLane[lane] ?? 0) >= limits[lane]) continue
@@ -1335,15 +1710,28 @@ export class AgentHub {
 
   progress(agentId, body = {}) {
     const b = body ?? {}
+    const stage = validStage(b.stage)
     return this.mutate((state) => {
       const task = this.owned(state, agentId, b.task_id, { reclaim: true })
       task.status = 'running'
-      if (typeof b.progress === 'number' && b.progress >= 0 && b.progress <= 1) task.progress = b.progress
-      if (typeof b.message === 'string') task.message = b.message.slice(0, 1000)
-      task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000) // progress renews the lease
-      this.event(task, 'progress', task.message)
-      return { ok: true, lease_until: task.leaseUntil }
+      return this.applyProgress(task, b, stage)
     })
+  }
+
+  /**
+   * Progress renews the lease. `renew: true` with nothing else is only that
+   * (a "still working" keep-alive): no history entry, no event. Otherwise the
+   * stage / percentage / message are stored and one event goes out.
+   */
+  applyProgress(task, b, stage) {
+    task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000)
+    const said = stage !== undefined || typeof b.message === 'string' || typeof b.progress === 'number'
+    if (b.renew === true && !said) return { ok: true, lease_until: task.leaseUntil }
+    if (typeof b.progress === 'number' && b.progress >= 0 && b.progress <= 1) task.progress = b.progress
+    if (typeof b.message === 'string') task.message = redact(b.message.slice(0, 1000))
+    if (stage !== undefined) task.stage = stage
+    this.event(task, 'progress', task.message, { stage })
+    return { ok: true, lease_until: task.leaseUntil }
   }
 
   /** Final result. Files are inline (base64) and land under outputs/. */
@@ -1370,19 +1758,19 @@ export class AgentHub {
         outputs.push({ name, bytes: data.length, type: String(file.type ?? '').slice(0, 32), description: String(file.description ?? '').slice(0, 300) })
       }
       const error = b.error && typeof b.error === 'object'
-        ? { code: String(b.error.code ?? 'AGENT_ERROR').slice(0, 64), message: String(b.error.message ?? '').slice(0, 2000), retryable: b.error.retryable === true }
+        ? { code: String(b.error.code ?? 'AGENT_ERROR').slice(0, 64), message: redact(String(b.error.message ?? '').slice(0, 2000)), retryable: b.error.retryable === true }
         : undefined
       task.result = {
-        status, summary: String(b.summary ?? '').slice(0, 4000), outputs, error,
-        needs_input: b.needs_input === undefined || b.needs_input === null ? undefined : String(b.needs_input).slice(0, 2000),
+        status, summary: redact(String(b.summary ?? '').slice(0, 4000)), outputs, error,
+        needs_input: b.needs_input === undefined || b.needs_input === null ? undefined : redact(String(b.needs_input).slice(0, 2000)),
         finished_at: nowIso(this.clock()), agent: agentId,
       }
       task.leaseUntil = undefined
-      if (status === 'completed') { task.status = 'completed'; task.progress = 1 }
+      if (status === 'completed') { task.status = 'completed'; task.progress = 1; this.rememberSticky(state, task, agentId) }
       else if (status === 'partial') { task.status = 'failed'; task.result.error = task.result.error ?? { code: 'NEEDS_HUMAN', message: task.result.needs_input ?? '', retryable: false } }
       else if (error?.retryable && retry) { this.requeue(state, task, `retryable failure: ${error.code}`) }
       else task.status = 'failed'
-      if (task.status !== 'pending') this.event(task, task.status, task.result.summary.slice(0, 200))
+      if (task.status !== 'pending') this.event(task, task.status, (task.result.needs_input ?? (task.result.summary || task.result.error?.message || '')).slice(0, 200), { stage: task.result.needs_input === undefined ? undefined : 'needs_input' })
       this.wakes.add(agentId) // a slot was freed
       if (task.status === 'completed') {
         for (const other of Object.values(state.tasks)) if (other.status === 'pending' && other.depends_on.includes(task.task_id)) this.wakeFor(state, other)
@@ -1401,7 +1789,11 @@ export class AgentHub {
     return every === undefined ? FALLBACK_MIN_WAIT_SECONDS : Math.max(FALLBACK_MIN_WAIT_SECONDS, 2 * every)
   }
 
-  /** When a pending task becomes due for the fallback (ms), or undefined when it never will. */
+  /**
+   * When a pending task becomes due for the fallback (ms), or undefined when it never will.
+   * No worker that could take it online: due as soon as it is ready. One is online but
+   * nobody took it: due after fallbackWait (it is busy; give it time).
+   */
   fallbackDueAt(state, task) {
     if (!this.fallback.enabled || task.status !== 'pending' || (task.fallback ?? 'dsh') !== 'dsh') return undefined
     if (task.capability !== undefined && this.fallback.noFallback.includes(task.capability)) return undefined
@@ -1413,7 +1805,7 @@ export class AgentHub {
       const done = Date.parse(dep.result?.finished_at ?? '')
       if (Number.isFinite(done) && done > ready) ready = done
     }
-    return ready + this.fallbackWait(state, task) * 1000
+    return this.anyOnlineFor(state, task) ? ready + this.fallbackWait(state, task) * 1000 : ready
   }
 
   /** Tasks DSH may take over now (optionally only those whose workspace DSH has). */
@@ -1425,7 +1817,11 @@ export class AgentHub {
         .map(task => ({ task, due: this.fallbackDueAt(state, task) }))
         .filter(({ task, due }) => due !== undefined && due <= now && fallbackWorkspaceOk(task, workspaces))
         .sort((a, b) => PRIORITY[a.task.priority] - PRIORITY[b.task.priority] || a.task.created_at.localeCompare(b.task.created_at))
-        .map(({ task, due }) => ({ ...this.publicTask(task), waited_seconds: Math.round((now - due) / 1000) + this.fallbackWait(state, task) }))
+        .map(({ task }) => ({
+          ...this.publicTask(task),
+          waited_seconds: Math.max(0, Math.round((now - Date.parse(task.pendingSince ?? task.created_at)) / 1000)),
+          fallback_reason: this.anyOnlineFor(state, task) ? 'workers-busy' : 'no-online-worker',
+        }))
     })
   }
 
@@ -1460,7 +1856,8 @@ export class AgentHub {
       task.leaseUntil = nowIso(now + task.lease_seconds * 1000)
       task.leasedAt = nowIso(now)
       task.lastHolder = undefined
-      this.event(task, 'fallback', `nobody took it in time; DSH (${controllerId}) does it itself`)
+      const why = this.anyOnlineFor(state, task) ? 'nobody took it in time' : 'no worker for it is online'
+      this.event(task, 'fallback', `${why}; DSH (${controllerId}) does it itself`)
       this.log(`dsh-hub: ${controllerId} took ${task.task_id} over as ${FALLBACK_AGENT}`)
       const upstream = task.depends_on.flatMap(d => (own(state.tasks, d).result?.outputs ?? []).map(o => ({ from_task: d, name: o.name })))
       return {
@@ -1482,15 +1879,76 @@ export class AgentHub {
 
   fallbackProgress(controllerId, body = {}) {
     const b = body ?? {}
+    const stage = validStage(b.stage)
     return this.mutate(async (state) => {
       await this.liveController(controllerId)
       const task = this.heldByFallback(state, controllerId, b.task_id)
-      if (typeof b.progress === 'number' && b.progress >= 0 && b.progress <= 1) task.progress = b.progress
-      if (typeof b.message === 'string') task.message = b.message.slice(0, 1000)
-      task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000)
-      this.event(task, 'progress', task.message)
-      return { ok: true, lease_until: task.leaseUntil }
+      return this.applyProgress(task, b, stage)
     })
+  }
+
+  // --- full session logs ----------------------------------------------------------
+  //
+  // Every task may carry the whole conversation of whoever ran it (prompts,
+  // answers, tool calls and their output), uploaded in pieces while it runs
+  // and kept next to its artifacts as session.jsonl. Text is redacted on the
+  // way in; a log stops growing at MAX_SESSION_BYTES.
+
+  sessionPath(taskId) { return join(this.artifactDir, taskId, 'session.jsonl') }
+
+  async appendSession(task, entries, by) {
+    const path = this.sessionPath(task.task_id)
+    await mkdir(join(this.artifactDir, task.task_id), { recursive: true })
+    let size = 0
+    try { size = (await stat(path)).size } catch (error) { if (error?.code !== 'ENOENT') throw error }
+    if (size >= MAX_SESSION_BYTES) {
+      if (task.sessionFull !== true) { task.sessionFull = true; this.warn(`dsh-hub: session log of ${task.task_id} is full (${MAX_SESSION_BYTES} bytes); later entries dropped`) }
+      return { ok: true, stored: 0, full: true, session_entries: task.sessionEntries ?? 0 }
+    }
+    await appendFile(path, entries.map(e => JSON.stringify({ ...e, by })).join('\n') + '\n', { encoding: 'utf8', mode: 0o600 })
+    task.sessionEntries = (task.sessionEntries ?? 0) + entries.length
+    task.sessionUpdatedAt = nowIso(this.clock())
+    return { ok: true, stored: entries.length, session_entries: task.sessionEntries }
+  }
+
+  /** A worker uploads part of the session of a task it holds or just finished. */
+  agentSession(agentId, body = {}) {
+    const b = body ?? {}
+    const entries = sessionEntries(b.entries, this.clock)
+    return this.mutate(async (state) => {
+      this.seen(this.liveAgent(state, agentId))
+      const task = own(state.tasks, b.task_id)
+      const mine = task !== undefined && (task.assignedTo === agentId || task.result?.agent === agentId || task.lastHolder === agentId)
+      if (!mine) throw new HubError(404, 'task-not-found', 'no such task held or finished by this agent')
+      return this.appendSession(task, entries, agentId)
+    })
+  }
+
+  /** DSH uploads part of the session of a task it runs itself (registered here or taken over). */
+  controllerSession(controllerId, body = {}) {
+    const b = body ?? {}
+    const entries = sessionEntries(b.entries, this.clock)
+    return this.mutate(async (state) => {
+      await this.liveController(controllerId)
+      const task = this.mustTask(state, b.task_id)
+      if (task.fallbackBy !== controllerId) throw new HubError(403, 'not-holder', `${task.task_id} is not run by ${controllerId}`)
+      return this.appendSession(task, entries, task.origin?.executor ?? FALLBACK_AGENT)
+    })
+  }
+
+  /** Read a task's session log (any controller): entries from index `after` on. */
+  async readSession(taskId, { after = 0, limit = 500 } = {}) {
+    const task = await this.read(state => this.mustTask(state, taskId))
+    let raw = ''
+    try { raw = await readFile(this.sessionPath(task.task_id), 'utf8') } catch (error) { if (error?.code !== 'ENOENT') throw error }
+    const lines = raw.split('\n').filter(Boolean)
+    const from = Number.isInteger(after) && after >= 0 ? after : 0
+    const max = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 2000) : 500
+    const entries = []
+    for (const [index, line] of lines.slice(from, from + max).entries()) {
+      try { entries.push({ index: from + index, ...JSON.parse(line) }) } catch { /* a torn line */ }
+    }
+    return { task_id: task.task_id, total: lines.length, next: Math.min(lines.length, from + max), full: task.sessionFull === true, entries }
   }
 
   fallbackResult(controllerId, body = {}) {
@@ -1536,10 +1994,13 @@ export class AgentHub {
 
   /** Expire leases and requeue; returns how many tasks / requests changed. */
   sweep() {
-    return this.mutate((state) => {
+    return this.mutate(async (state) => {
       let changed = 0
       const now = this.clock()
       for (const task of Object.values(state.tasks)) {
+        // A task a DSH registered and runs itself is never failed for silence: that DSH may simply be
+        // offline for a while and sends its updates once it is back. It only shows as quiet (`quiet`).
+        if (task.origin?.kind === 'local') continue
         if (isActive(task) && task.assignedTo === FALLBACK_AGENT && task.leaseUntil && Date.parse(task.leaseUntil) < now) {
           task.status = 'failed'
           task.leaseUntil = undefined
@@ -1575,20 +2036,70 @@ export class AgentHub {
           changed++
         }
       }
+      changed += await this.archive(state, now)
       return changed
     })
+  }
+
+  /**
+   * Move tasks finished more than expiry.archiveHours ago out of state.json:
+   * their records are appended, gzip-compressed, to archive/<YYYY-MM>.jsonl.gz
+   * and their files (inputs, outputs, session log) move to archive/tasks/<id>.
+   * A task an unfinished task still depends on stays. Decided enrollment
+   * requests and stream events of the same age are dropped.
+   */
+  async archive(state, now = this.clock()) {
+    const cutoff = now - this.expiry.archiveHours * 3600_000
+    const needed = new Set(Object.values(state.tasks).filter(t => !TERMINAL.has(t.status)).flatMap(t => t.depends_on ?? []))
+    const old = Object.values(state.tasks).filter(t => TERMINAL.has(t.status) && this.endedAt(t) < cutoff && !needed.has(t.task_id))
+    let changed = 0
+    if (old.length > 0) {
+      await mkdir(join(this.archiveDir, 'tasks'), { recursive: true })
+      const byMonth = new Map()
+      for (const task of old) {
+        const month = nowIso(this.endedAt(task)).slice(0, 7)
+        byMonth.set(month, [...(byMonth.get(month) ?? []), task])
+      }
+      for (const [month, tasks] of byMonth) {
+        const lines = tasks.map(t => JSON.stringify({ ...t, archived_at: nowIso(now) })).join('\n') + '\n'
+        await appendFile(join(this.archiveDir, `${month}.jsonl.gz`), gzipSync(Buffer.from(lines, 'utf8')), { mode: 0o600 })
+      }
+      for (const task of old) {
+        try { await rename(join(this.artifactDir, task.task_id), join(this.archiveDir, 'tasks', task.task_id)) } catch (error) { if (error?.code !== 'ENOENT') this.warn(`dsh-hub: could not archive files of ${task.task_id}: ${error?.message ?? error}`) }
+        delete state.tasks[task.task_id]
+        changed++
+      }
+      this.log(`dsh-hub: archived ${old.length} finished task(s) older than ${this.expiry.archiveHours} h`)
+    }
+    for (const [id, request] of Object.entries(state.requests)) {
+      const at = Date.parse(request.decided_at ?? request.requested_at ?? '')
+      if (request.status !== 'pending' && Number.isFinite(at) && at < cutoff) { delete state.requests[id]; changed++ }
+    }
+    const before = state.feed.length
+    state.feed = state.feed.filter(e => Date.parse(e.at) >= cutoff)
+    if (state.feed.length !== before) changed++
+    return changed
   }
 
   overview() {
     return this.read((state) => {
       const counts = {}
-      for (const t of Object.values(state.tasks)) counts[t.status] = (counts[t.status] ?? 0) + 1
+      let history = 0
+      for (const t of Object.values(state.tasks)) {
+        if (this.inHistory(t)) { history++; continue }
+        counts[t.status] = (counts[t.status] ?? 0) + 1
+      }
       const pendingRequests = Object.values(state.requests).filter(r => r.status === 'pending').length
       const agents = Object.values(state.agents).map(a => this.publicAgent(a, state))
       const agentCounts = Object.fromEntries(AGENT_STATUSES.map(s => [s, agents.filter(a => a.status === s).length]))
       const now = this.clock()
       const fallbackDue = Object.values(state.tasks).filter(t => { const at = this.fallbackDueAt(state, t); return at !== undefined && at <= now }).length
-      return { protocol: PROTOCOL, agents, agent_counts: agentCounts, task_counts: counts, pending_requests: pendingRequests, fallback_due: fallbackDue }
+      const local = Object.values(state.tasks).filter(t => t.origin?.kind === 'local' && isActive(t)).length
+      return {
+        protocol: PROTOCOL, agents, agent_counts: agentCounts, task_counts: counts, history_count: history, local_running: local,
+        dormant_agents: agents.filter(a => a.dormant).length, pending_requests: pendingRequests, fallback_due: fallbackDue,
+        feed_seq: state.feedSeq, expiry: this.expiry,
+      }
     })
   }
 }

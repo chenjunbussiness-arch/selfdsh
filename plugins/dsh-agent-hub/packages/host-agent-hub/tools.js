@@ -69,7 +69,7 @@ async function dispatchRoleRefusal(client, task) {
 
 export const TOOL_NAMES = [
   'agent_provision', 'agent_revoke', 'agent_list', 'agent_requests', 'agent_approve', 'agent_reject',
-  'task_dispatch', 'task_list', 'task_get', 'task_cancel', 'task_retry',
+  'task_dispatch', 'task_list', 'task_session', 'task_ack', 'task_get', 'task_cancel', 'task_retry',
   'fallback_list', 'fallback_take', 'fallback_submit',
 ]
 
@@ -175,7 +175,7 @@ export function createTools({ client }) {
 
   define({
     name: 'task_dispatch',
-    description: 'Send a task to a worker id or pool:<capability>. Queued if nobody is online (warnings say so). Instruction must stand alone. depends_on chains tasks; upstream outputs become inputs.',
+    description: 'Send a task to a worker id or pool:<capability>. Instruction must stand alone. depends_on chains tasks; upstream outputs become inputs. fallback_in_seconds 0 = nobody can take it now: do it yourself (fallback_take).',
     parameters: {
       required: ['agent', 'title', 'instruction'],
       properties: {
@@ -186,6 +186,7 @@ export function createTools({ client }) {
         type: { type: 'string', enum: ['research', 'document', 'data', 'code', 'review', 'custom'] },
         workspace: { type: 'string', description: 'Workspace name, not a path. Required for code.' },
         node: { type: 'string', description: 'Pin to one machine.' },
+        dsh_profile: { type: 'string', description: 'Only workers of this local DSH profile (agent_list shows each one\'s).' },
         ref: { type: 'string', description: 'Git branch or commit.' },
         task_id: { type: 'string', description: 'Generated if omitted.' },
         inputs: { type: 'array', items: { type: 'object', properties: { name: str, text: str, base64: str }, required: ['name'] } },
@@ -207,6 +208,8 @@ export function createTools({ client }) {
           },
         },
         require_online: { type: 'boolean', description: 'Refuse instead of queueing when nobody is online.' },
+        sticky_key: { type: 'string', description: 'Same key (session, browser login, test suite) goes back to the worker that handled it last.' },
+        sticky: { type: 'boolean', description: 'false: no preference for the last worker.' },
       },
     },
     async execute(raw) {
@@ -236,10 +239,32 @@ export function createTools({ client }) {
 
   define({
     name: 'task_list',
-    description: 'Tasks, newest first; filter by status, agent or workspace.',
-    parameters: { properties: { status: str, agent: str, workspace: str, limit: { type: 'integer', minimum: 1, maximum: 200 } } },
+    description: 'Tasks on the hub from every DSH and worker, newest first. Finished ones past their expiry are hidden unless history is include / only. origin local = a DSH ran it itself.',
+    parameters: {
+      properties: {
+        status: str, agent: str, workspace: str, limit: { type: 'integer', minimum: 1, maximum: 200 },
+        history: { type: 'string', enum: ['hide', 'include', 'only'] },
+        origin: { type: 'string', enum: ['controller', 'agent', 'local'] },
+        dsh_profile: str,
+      },
+    },
     isConcurrencySafe: () => true,
-    execute: async raw => ({ tasks: await client.listTasks({ status: raw.status, agent: raw.agent, workspace: raw.workspace, limit: raw.limit }) }),
+    execute: async raw => ({ tasks: await client.listTasks({ status: raw.status, agent: raw.agent, workspace: raw.workspace, limit: raw.limit, history: raw.history, origin: raw.origin, dsh_profile: raw.dsh_profile }) }),
+  })
+
+  define({
+    name: 'task_session',
+    description: 'The session log of a task (what its worker or DSH said and ran), oldest first. after = skip that many entries.',
+    parameters: { required: ['task_id'], properties: { task_id: str, after: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 500 } } },
+    isConcurrencySafe: () => true,
+    execute: raw => client.readSession(raw.task_id, { after: raw.after, limit: raw.limit ?? 100 }),
+  })
+
+  define({
+    name: 'task_ack',
+    description: 'Seen this failed task: hide it from the default task list now.',
+    parameters: { required: ['task_id'], properties: { task_id: str } },
+    execute: raw => client.acknowledge(raw.task_id),
   })
 
   define({
@@ -273,7 +298,7 @@ export function createTools({ client }) {
 
   define({
     name: 'fallback_list',
-    description: 'Tasks nobody took in time, for DSH to do itself. workspaces: skip code tasks you lack.',
+    description: 'Tasks for DSH to do itself: no worker for them is online, or all were busy too long. workspaces: skip code tasks you lack.',
     parameters: { properties: { workspaces: strList } },
     isConcurrencySafe: () => true,
     execute: async raw => ({ tasks: await client.fallbackList(raw.workspaces) }),

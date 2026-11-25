@@ -16,5 +16,6 @@
   "maxRetries": 2,
   "offlineAfterMs": 90000,
   "sweepIntervalMs": 15000,
-  "maxResultBytes": 20971520
+  "maxResultBytes": 20971520,
+  "sticky": { "holdSeconds": 120, "ttlSeconds": 86400 }
 }

@@ -409,6 +409,12 @@ export interface PluginContext {
    * cordis build offers one.
    */
   set?(name: string, value: unknown): void
+  /**
+   * Cordis's service registration. `set` only overwrites a service that was
+   * already provided (it throws "cannot set property ... without provide"), so
+   * a new service has to be provided first. Feature-detected like `set`.
+   */
+  provide?(name: string, value?: unknown): unknown
 }
 
 /**

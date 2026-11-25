@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ADMIN_BASE, BRIDGE_BASE, REQUEST_STATUSES, TASK_STATUSES, adminFailure, createRoutes, requireLogin } from '../bridge.js'
+import { ADMIN_BASE, BRIDGE_BASE, REQUEST_STATUSES, TASK_STATUSES, adminFailure, adminTaskRow, createRoutes, requireLogin } from '../bridge.js'
 import { HubError } from '../hub-client.js'
 import { CONTROLLER, TOKEN, assertNoToken, callRoute, fakeLogger, findRoute, jsonHeaders, makeClient } from './helpers.mjs'
 
 const A = name => `${ADMIN_BASE}/${name}`
-const PATHS = ['overview', 'agents', 'tasks', 'task', 'requests'].map(A)
+const PATHS = ['overview', 'agents', 'tasks', 'task', 'requests', 'session'].map(A)
+const ALL_PATHS = [...PATHS, A('ack')]
 const errorOf = res => res.json().error
 
 // --- hub fixtures, with fields that must NOT pass the whitelist ---------------------
@@ -17,7 +18,7 @@ const HUB_AGENT = {
   status: 'online', version: 'agent_client/2.1.0', left_at: undefined,
   tokenHash: 'ab'.repeat(32), token: 'dsha_quick-mydesk_SECRET', granted_workspaces: ['deepseek-harness'],
 }
-const AGENT_KEYS = ['agent_id', 'platform', 'mode', 'capabilities', 'max_concurrency', 'description', 'role', 'revoked', 'online', 'last_seen', 'reported_status', 'running_tasks', 'created_at', 'status', 'version']
+const AGENT_KEYS = ['agent_id', 'platform', 'mode', 'capabilities', 'max_concurrency', 'description', 'role', 'revoked', 'online', 'last_seen', 'reported_status', 'running_tasks', 'created_at', 'status', 'version', 'node', 'dormant']
 
 const HUB_TASK = {
   task_id: 't1', agent: 'pool:code', assigned_to: 'quick-mydesk', type: 'code', title: 'Fix it', status: 'completed', priority: 'high',
@@ -31,7 +32,7 @@ const HUB_TASK = {
     error: { code: 'NONE', message: 'n/a', retryable: false, stack: 'at hub.js:1' },
   },
 }
-const ROW_KEYS = ['task_id', 'agent', 'assigned_to', 'type', 'title', 'status', 'priority', 'attempts', 'progress', 'message', 'created_at', 'lease_until', 'depends_on', 'result']
+const ROW_KEYS = ['task_id', 'agent', 'assigned_to', 'type', 'title', 'status', 'priority', 'attempts', 'progress', 'message', 'created_at', 'lease_until', 'depends_on', 'result', 'acknowledged', 'in_history', 'quiet', 'session_entries']
 const DETAIL_KEYS = [...ROW_KEYS, 'instruction', 'inputs', 'output', 'context_keys', 'history', 'output_files']
 
 const HUB_REQUEST = {
@@ -67,9 +68,9 @@ function setup(handler = ROUTES, options = {}) {
 
 const keys = obj => Object.keys(obj).sort()
 
-test('route table: only the five read-only admin routes; no worker /v1 routes any more', () => {
+test('route table: six read-only admin routes plus ack; no worker /v1 routes any more', () => {
   const { adminRoutes } = setup()
-  assert.deepEqual(adminRoutes.map(r => r.path).sort(), [...PATHS].sort())
+  assert.deepEqual(adminRoutes.map(r => r.path).sort(), [...ALL_PATHS].sort())
   for (const r of adminRoutes) {
     assert.equal(r.kind, 'exact', r.path)
     assert.equal(typeof r.handler, 'function')
@@ -90,7 +91,7 @@ test('overview: forwarded to GET /v1/ctl/overview and re-projected (contract.ts 
   assert.equal(res.headers['x-content-type-options'], 'nosniff')
   assert.equal(res.headers['content-length'], res.body.length)
   const body = res.json()
-  assert.deepEqual(keys(body), ['agents', 'pending_requests', 'protocol', 'task_counts'])
+  assert.deepEqual(keys(body), ['agents', 'dormant_agents', 'fallback_due', 'pending_requests', 'protocol', 'task_counts'])
   assert.equal(body.protocol, 'dsh-agent/2.0')
   assert.deepEqual(body.task_counts, { pending: 2, completed: 5 }, 'unknown statuses and bad numbers dropped')
   assert.equal(body.pending_requests, 1)
@@ -114,7 +115,7 @@ test('agents: { generated_at, online, agents } with the v1 whitelist, tokens mas
     agent_id: 'quick-mydesk', platform: 'aws-quick', mode: 'poll', capabilities: ['research', 'code'], max_concurrency: 2,
     description: 'Quick on MYDESK dsha_***', revoked: false, online: true, last_seen: '2026-11-22T12:00:00.000Z',
     reported_status: 'busy', running_tasks: ['t1'], created_at: '2026-11-01T00:00:00.000Z', status: 'online', version: 'agent_client/2.1.0',
-    role: 'worker',
+    role: 'worker', node: 'mydesk', dormant: false,
   })
   const text = JSON.stringify(body)
   for (const secret of ['tokenHash', 'SECRET', 'abab', 'granted_workspaces']) assert.ok(!text.includes(secret), secret)
@@ -125,7 +126,7 @@ test('tasks: filter validated locally, forwarded as query, rows whitelisted', as
   const res = await get(A('tasks'), '?status=completed&agent=pool:code&limit=20')
   assert.equal(res.statusCode, 200)
   const body = res.json()
-  assert.deepEqual(body.filter, { status: 'completed', agent: 'pool:code', limit: 20 })
+  assert.deepEqual(body.filter, { status: 'completed', agent: 'pool:code', limit: 20, history: 'hide' })
   assert.deepEqual(Object.fromEntries(calls.at(-1).query.entries()), { id: CONTROLLER, status: 'completed', agent: 'pool:code', limit: '20' })
   const row = body.tasks[0]
   assert.deepEqual(keys(row), [...ROW_KEYS].filter(k => k !== 'lease_until').sort(), 'undefined lease_until is dropped by JSON')
@@ -134,7 +135,7 @@ test('tasks: filter validated locally, forwarded as query, rows whitelisted', as
   assertNoToken(res.text)
 
   const all = (await get(A('tasks'))).json()
-  assert.deepEqual(all.filter, { status: 'all', limit: 50 })
+  assert.deepEqual(all.filter, { status: 'all', limit: 50, history: 'hide' })
   assert.deepEqual(Object.fromEntries(calls.at(-1).query.entries()), { id: CONTROLLER, limit: '50' })
   await get(A('tasks'), '?status=all')
   assert.deepEqual(Object.fromEntries(calls.at(-1).query.entries()), { id: CONTROLLER, limit: '50' })
@@ -212,7 +213,7 @@ test('hub unreachable: 503 hub-unreachable on every admin route', async () => {
   for (const code of ['ECONNREFUSED', 'ETIMEDOUT', 'DEPTH_ZERO_SELF_SIGNED_CERT']) {
     const { get } = setup(() => ({ networkError: code }))
     for (const path of PATHS) {
-      const res = await get(path, path.endsWith('/task') ? '?task_id=t1' : '')
+      const res = await get(path, path.endsWith('/task') || path.endsWith('/session') ? '?task_id=t1' : '')
       assert.equal(res.statusCode, 503, `${code} ${path}`)
       assert.equal(errorOf(res).code, 'hub-unreachable')
       assert.match(errorOf(res).message, new RegExp(code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ? 'TLS' : code))
@@ -343,10 +344,78 @@ test('presence fields: agent left_at and overview agent_counts pass the whitelis
   const res = await get(A('overview'))
   assert.equal(res.statusCode, 200)
   const body = res.json()
-  assert.deepEqual(keys(body), ['agent_counts', 'agents', 'pending_requests', 'protocol', 'task_counts'])
+  assert.deepEqual(keys(body), ['agent_counts', 'agents', 'dormant_agents', 'fallback_due', 'pending_requests', 'protocol', 'task_counts'])
   assert.deepEqual(body.agent_counts, { online: 1, offline: 0, left: 1 }, 'negative, fractional and unknown counts dropped')
   assert.equal(body.agents[1].left_at, '2026-11-22T13:00:00.000Z')
   assert.equal(body.agents[1].status, 'left')
   assert.deepEqual(keys(body.agents[1]), [...AGENT_KEYS, 'left_at'].sort())
+  assertNoToken(res.text)
+})
+
+test('task rows carry the sticky preference and who did a fallback, nothing else new', () => {
+  const row = adminTaskRow({ task_id: 't1', agent: 'pool:browser', preferred_agent: 'aa', sticky_key: 'session-42', fallback_by: 'dsh-cloud', status: 'pending', secret: 'x' })
+  assert.deepEqual([row.preferred_agent, row.sticky_key, row.fallback_by], ['aa', 'session-42', 'dsh-cloud'])
+  assert.equal(row.secret, undefined)
+})
+
+// --- cloud channel: expiry view, origin, stage, session, ack -------------------------------
+
+test('tasks: history / profile / origin filters validated and forwarded', async () => {
+  const { get, calls } = setup()
+  const res = await get(A('tasks'), '?history=only&profile=web&origin=local')
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(res.json().filter, { status: 'all', limit: 50, history: 'only', profile: 'web', origin: 'local' })
+  assert.deepEqual(Object.fromEntries(calls.at(-1).query.entries()), { id: CONTROLLER, limit: '50', history: 'only', dsh_profile: 'web', origin: 'local' })
+  const before = calls.length
+  for (const query of ['?history=yes', '?profile=../x', '?origin=cloud']) {
+    const bad = await get(A('tasks'), query)
+    assert.equal(bad.statusCode, 400, query)
+  }
+  assert.equal(calls.length, before)
+})
+
+test('task rows carry origin, stage and the expiry view; unknown stages and origin fields dropped', () => {
+  const row = adminTaskRow({
+    task_id: 'local_web_7', status: 'running', dsh_profile: 'web', stage: 'step', in_history: false, quiet: true, session_entries: 12,
+    origin: { kind: 'local', by: 'dsh-local', executor: 'dsh-self/web/front', host: 'secret-host' }, updated_at: '2026-11-24T10:00:00.000Z',
+  })
+  assert.deepEqual(row.origin, { kind: 'local', by: 'dsh-local', executor: 'dsh-self/web/front' })
+  assert.deepEqual([row.dsh_profile, row.stage, row.quiet, row.in_history, row.acknowledged, row.session_entries], ['web', 'step', true, false, false, 12])
+  assert.equal(adminTaskRow({ task_id: 'x', stage: 'dancing', origin: { kind: 'nope' } }).stage, undefined)
+  assert.equal(adminTaskRow({ task_id: 'x', origin: { kind: 'nope' } }).origin.kind, 'controller')
+})
+
+test('session: forwarded to /v1/ctl/session/read, entries whitelisted and masked', async () => {
+  const { get, calls } = setup({
+    ...ROUTES,
+    'GET /v1/ctl/session/read': { body: { task_id: 't1', total: 3, next: 2, full: false, entries: [
+      { index: 0, at: '2026-11-24T10:00:00.000Z', role: 'user', text: 'do it', by: 'dsh-self/web/front', path: '/srv/x' },
+      { index: 1, at: '2026-11-24T10:00:01.000Z', role: 'tool', name: 'shell', text: `ran with ${TOKEN}` },
+    ] } },
+  })
+  const res = await get(A('session'), '?task_id=t1&after=0&limit=2')
+  assert.equal(res.statusCode, 200)
+  const body = res.json()
+  assert.deepEqual([body.task_id, body.total, body.next, body.full], ['t1', 3, 2, false])
+  assert.deepEqual(keys(body.entries[0]), ['at', 'by', 'index', 'role', 'text'])
+  assert.equal(body.entries[1].text, 'ran with dshc_***')
+  assert.deepEqual(Object.fromEntries(calls.at(-1).query.entries()), { id: CONTROLLER, task_id: 't1', after: '0', limit: '2' })
+  for (const query of ['', '?task_id=t1&after=-1', '?task_id=t1&limit=501']) {
+    assert.equal((await get(A('session'), query)).statusCode, 400, query)
+  }
+})
+
+test('ack: POST with a JSON body only; forwarded to /v1/ctl/ack', async () => {
+  const { route, calls } = setup({ ...ROUTES, 'POST /v1/ctl/ack': { body: { task: { ...HUB_TASK, status: 'failed', acknowledged: true, in_history: true } } } })
+  const ack = route(A('ack'))
+  assert.equal((await callRoute(ack, { method: 'GET' })).statusCode, 405)
+  const form = await callRoute(ack, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'task_id=t1' })
+  assert.equal(form.statusCode, 415, 'a cross-site form post is refused')
+  assert.equal((await callRoute(ack, { method: 'POST', headers: jsonHeaders(), body: { task_id: '' } })).statusCode, 400)
+  assert.equal(calls.length, 0)
+  const res = await callRoute(ack, { method: 'POST', headers: jsonHeaders(), body: { task_id: 't1' } })
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual([res.json().task.acknowledged, res.json().task.in_history], [true, true])
+  assert.equal(calls.at(-1).path, '/v1/ctl/ack')
   assertNoToken(res.text)
 })

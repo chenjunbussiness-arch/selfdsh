@@ -6,10 +6,10 @@ import { CONTROLLER, HUB_URL, TOKEN, assertNoToken, b64, makeClient } from './he
 
 const NAMES = [
   'agent_provision', 'agent_revoke', 'agent_list', 'agent_requests', 'agent_approve', 'agent_reject',
-  'task_dispatch', 'task_list', 'task_get', 'task_cancel', 'task_retry',
+  'task_dispatch', 'task_list', 'task_session', 'task_ack', 'task_get', 'task_cancel', 'task_retry',
   'fallback_list', 'fallback_take', 'fallback_submit',
 ]
-const READ_ONLY = new Set(['agent_list', 'agent_requests', 'task_list', 'task_get', 'fallback_list'])
+const READ_ONLY = new Set(['agent_list', 'agent_requests', 'task_list', 'task_get', 'task_session', 'fallback_list'])
 
 function setup(handler = () => ({ body: {} }), options = {}) {
   const base = makeClient(handler, options)
@@ -37,10 +37,10 @@ async function rejectsWith(run, status, code) {
   return caught
 }
 
-test('createTools returns the 14 DSH control tools with unchanged names', () => {
+test('createTools returns the 16 DSH control tools with unchanged names', () => {
   const { tools } = setup()
   assert.deepEqual(TOOL_NAMES, NAMES)
-  assert.equal(tools.length, 14)
+  assert.equal(tools.length, 16)
   assert.deepEqual(tools.map(tool => tool.name), NAMES)
 })
 

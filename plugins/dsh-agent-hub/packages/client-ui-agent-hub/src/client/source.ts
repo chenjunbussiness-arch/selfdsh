@@ -2,12 +2,13 @@
  * Data source of the panel: the host plugin's same-origin, login-guarded,
  * read-only admin routes (`/api/agent-hub/admin/*`).
  *
- * `credentials: 'same-origin'` carries the Web shell's session cookie. Only GET
- * is ever sent: the panel cannot dispatch, approve or cancel anything — control
- * stays with DSH (the model tools).
+ * `credentials: 'same-origin'` carries the Web shell's session cookie. The panel
+ * reads with GET; its one write is {@link ackTask} (put a failed task away).
+ * It cannot dispatch, approve or cancel anything — control stays with DSH (the
+ * model tools).
  */
 
-import type { AgentsDoc, Overview, RequestsDoc, TaskDoc, TaskFilter, TasksDoc } from './contract.ts'
+import type { AgentsDoc, Overview, RequestsDoc, SessionDoc, TaskDoc, TaskFilter, TaskRow, TasksDoc } from './contract.ts'
 
 /** Where the host bridge lives. Mirrors `BRIDGE_BASE` in host-agent-hub/bridge.js. */
 export const ADMIN_BASE = '/api/agent-hub/admin'
@@ -37,16 +38,20 @@ function errorOf(body: unknown): { code?: string; message?: string } | undefined
 }
 
 /** GET one admin document. */
-async function getJson<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
+function getJson<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
   const query = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== '') query.set(key, String(value))
   }
   const text = query.toString()
-  const url = `${ADMIN_BASE}/${path}${text === '' ? '' : `?${text}`}`
+  return send<T>(`${ADMIN_BASE}/${path}${text === '' ? '' : `?${text}`}`, { method: 'GET' })
+}
+
+/** One same-origin request; errors become {@link SourceError}. */
+async function send<T>(url: string, init: RequestInit): Promise<T> {
   let response: Response
   try {
-    response = await fetch(url, { method: 'GET', credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } })
+    response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...init, headers: { accept: 'application/json', ...(init.headers ?? {}) } })
   } catch (error) {
     throw new SourceError(error instanceof Error ? error.message : String(error), 0)
   }
@@ -79,6 +84,7 @@ export function fetchTasks(filter: TaskFilter): Promise<TasksDoc> {
     status: filter.status === 'all' ? undefined : filter.status,
     agent: filter.agent === '' ? undefined : filter.agent,
     limit: filter.limit,
+    history: filter.history === undefined || filter.history === 'hide' ? undefined : filter.history,
   })
 }
 
@@ -90,4 +96,19 @@ export function fetchTask(taskId: string): Promise<TaskDoc> {
 /** Enrollment requests of one status (`pending` by default, or `all`). */
 export function fetchRequests(status: string): Promise<RequestsDoc> {
   return getJson<RequestsDoc>('requests', { status })
+}
+
+/** A slice of a task's stored session, from entry `after` on. */
+export function fetchSession(taskId: string, after = 0, limit = 200): Promise<SessionDoc> {
+  return getJson<SessionDoc>('session', { task_id: taskId, after, limit })
+}
+
+/** Put a failed task away now (it moves to 历史). */
+export async function ackTask(taskId: string): Promise<TaskRow> {
+  const body = await send<{ task: TaskRow }>(`${ADMIN_BASE}/ack`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ task_id: taskId }),
+  })
+  return body.task
 }

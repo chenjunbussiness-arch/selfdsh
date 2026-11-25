@@ -578,9 +578,9 @@ export function createHubClient(options = {}) {
    * @param {string} path      e.g. `ctl/tasks`
    * @param {{ query?: object, body?: object, raw?: boolean, auth?: boolean }} [init]
    */
-  async function call(method, path, { query, body, raw = false, auth = true } = {}) {
+  async function call(method, path, { query, body, raw = false, auth = true, timeoutMs } = {}) {
     const state = current() // one snapshot per call
-    const { config } = state
+    const config = timeoutMs === undefined ? state.config : { ...state.config, timeoutMs: Math.max(state.config.timeoutMs ?? 0, timeoutMs) }
     let value
     if (auth) value = ensureReady(state)
     else if (!config.ok) throw notConfigured(config)
@@ -650,8 +650,24 @@ export function createHubClient(options = {}) {
       if (Array.isArray(warnings) && warnings.length > 0) out.warnings = warnings.filter(w => typeof w === 'string').map(w => w.slice(0, 64))
       return out
     },
-    /** `GET /v1/ctl/tasks?status=&agent=&workspace=&limit=` → task array. */
-    listTasks: async ({ status, agent, workspace, limit } = {}) => asList(await ctlGet('tasks', { status, agent, workspace, limit }), 'tasks'),
+    /**
+     * `GET /v1/ctl/tasks` → task array. `history`: 'hide' (default: finished tasks past their
+     * expiry are left out) | 'include' | 'only'; `origin`: 'controller' | 'agent' | 'local'.
+     */
+    listTasks: async ({ status, agent, workspace, limit, history, dsh_profile, origin } = {}) => asList(await ctlGet('tasks', { status, agent, workspace, limit, history, dsh_profile, origin }), 'tasks'),
+    /** Register a task this DSH runs itself (`run_here`): it shows on the hub like any other. */
+    registerLocal: async task => asObject(await ctlPost('dispatch', { ...task, run_here: true }), 'task'),
+    /** Hide a failed task from the default list at once. */
+    acknowledge: async taskId => asObject(await ctlPost('ack', { task_id: taskId }), 'task'),
+    /**
+     * `GET /v1/ctl/events?after=&wait=` → `{ events, next, latest, reset }` (long poll up to `wait` s).
+     * `reset` means the cursor fell out of the hub's window: start again from `latest`.
+     */
+    events: async ({ after, wait = 0, limit } = {}) => asObject(await call('GET', 'ctl/events', { query: { after, wait, limit }, timeoutMs: (Math.min(25, Math.max(0, wait)) + 10) * 1000 })),
+    /** Append entries ({ role, text, name?, at? }) to the session log of a task this DSH holds. */
+    appendSession: async (taskId, entries) => asObject(await ctlPost('session', { task_id: taskId, entries })),
+    /** `GET /v1/ctl/session/read?task_id=&after=&limit=` → `{ task_id, total, entries }`. */
+    readSession: async (taskId, { after, limit } = {}) => asObject(await ctlGet('session/read', { task_id: taskId, after, limit })),
     /** `GET /v1/ctl/task?task_id=` → task with history and result. */
     getTask: async taskId => asObject(await ctlGet('task', { task_id: taskId }), 'task'),
     /** `GET /v1/ctl/output?task_id=&name=` → Buffer. */

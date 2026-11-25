@@ -88,7 +88,7 @@ $DSH_HOME/.env                ← 只读 fallback，provider 永不写
 |---|---|
 | 左边聊天 | 原生 `conversation`（`main` slot 的默认 key） |
 | 右边任务面板 | **本插件**（`sidebar.right.pane.tab`） |
-| 左栏「项目列表 + API Key」 | **本插件自己分栏**（panel 内部的 `ProjectRail`，理由见 §5） |
+| 左栏「项目列表 + API Key」 | 左栏「模型档位」（`ModelTiers`）+ 任务板「工作区」tab；早期的 `ProjectRail` 已删除，理由见 §5 |
 | worker 的「工作清单 / 干到哪一步」 | 原生 `todos` 投影（本插件只负责读） |
 | 上传附件 | 原生 `dsh-client-file-upload` + `dsh-client-ui-attachment` |
 | 下载产物 | 原生 `present` + `dsh-client-ui-deliverables` |
@@ -141,7 +141,7 @@ openRightbar(track, fullscreen) / closeRightbar()
 
 ### 5.3 所以怎么做
 
-- 我们的 panel 内部自己分两栏：`ProjectRail`（项目 + 启停 + API Key）+ `TaskBoard`（四个 tab + 任务行）。
+- 早期 panel 内部自己分两栏（`ProjectRail` + `TaskBoard`），这两个组件已删除；现在是一个 `CompactBoard`：分段条 + 任务行，项目与文件在「工作区」tab，模型在左栏「模型档位」。
 - 宽容器（≥660px）两栏并排；窄容器（真实的 420px 右栏）退化成「项目 / 任务」二选一视图，
   任务头部 `☰` 打开项目栏，项目栏 `×` 回到任务——同一份 DOM，容器查询驱动，不测 JS。
 - 产物上仍是一块：右侧栏的一个 tab，不抢 `rightbar`，不碰 `sidebar`。

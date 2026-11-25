@@ -3,15 +3,20 @@
  *
  * Workers no longer talk to DSH: they connect straight to the standalone hub
  * (`services/dsh-hub`, port 7891). The old `/api/agent-hub/v1/*` worker routes
- * are gone. What remains are the read-only, DSH-login-guarded panel routes, with
- * the SAME paths and response shapes as before
+ * are gone. What remains are the DSH-login-guarded panel routes, with
+ * the same paths and response shapes as before plus additive fields
  * (packages/client-ui-agent-hub/src/client/contract.ts):
  *
  *   GET  /api/agent-hub/admin/overview                      <- GET /v1/ctl/overview
  *   GET  /api/agent-hub/admin/agents                        <- GET /v1/ctl/agents
- *   GET  /api/agent-hub/admin/tasks?status=&agent=&limit=   <- GET /v1/ctl/tasks
+ *   GET  /api/agent-hub/admin/tasks?status=&agent=&limit=&history=&profile=&origin=
+ *                                                           <- GET /v1/ctl/tasks
  *   GET  /api/agent-hub/admin/task?task_id=                 <- GET /v1/ctl/task
+ *   GET  /api/agent-hub/admin/session?task_id=&after=&limit= <- GET /v1/ctl/session/read
  *   GET  /api/agent-hub/admin/requests?status=              <- GET /v1/ctl/requests
+ *   POST /api/agent-hub/admin/ack  {task_id}  (JSON only)   <- POST /v1/ctl/ack
+ *
+ * The ack is the panel's only write: it puts a failed task into 历史 at once.
  *
  * Each route fetches from the hub (hub-client.js) and re-projects the answer
  * through the same explicit whitelists as v1: no token, token hash or poll
@@ -20,7 +25,8 @@
  *
  * Errors are `{ error: { code, message } }`:
  *   400 bad-query                    invalid query (checked before calling the hub)
- *   405 method-not-allowed           anything but GET
+ *   405 method-not-allowed           wrong method (GET, or POST for ack)
+ *   415 unsupported-media-type       ack without a JSON body
  *   503 hub-unreachable              hub down, refused, DNS, TLS or timeout
  *   503 hub-not-configured | hub-token-missing | hub-token-mismatch | hub-ca-unreadable
  *   502 hub-unauthorized             the hub refused the controller token (NOT 401:
@@ -125,6 +131,8 @@ export function adminAgent(a) {
     pull_every_seconds: int(a?.pull_every_seconds), offline_after_ms: int(a?.offline_after_ms),
     // Additive: per-capability limits ({ browser: 1 }) of a worker that does several kinds of work.
     capability_limits: limits(a?.capability_limits),
+    // Additive (cloud channel): which machine / DSH profile it belongs to, and whether it is out of the default view.
+    node: text(a?.node, 64), dsh_profile: text(a?.dsh_profile, 64), dormant: a?.dormant === true,
   }
 }
 
@@ -140,14 +148,29 @@ function adminOutputs(result) {
   }))
 }
 
+export const HISTORY_FILTERS = ['hide', 'include', 'only']
+export const ORIGINS = ['controller', 'agent', 'local']
+export const STAGES = ['received', 'started', 'step', 'blocked', 'needs_input', 'uploading']
+
+/** Where a task came from: who published it, and for a local one which executor runs it. */
+function adminOrigin(o) {
+  if (!plainObject(o)) return undefined
+  return { kind: oneOf(o.kind, ORIGINS) ?? 'controller', by: text(o.by, 96), executor: text(o.executor, 128) }
+}
+
 /** Whitelisted task row for the list. */
 export function adminTaskRow(t) {
   const outputs = adminOutputs(t?.result)
   return {
     task_id: text(t?.task_id, 96), agent: text(t?.agent, 64), assigned_to: text(t?.assigned_to, 64), type: text(t?.type, 32), title: clean(t?.title, 300),
-    capability: text(t?.capability, 48),
+    capability: text(t?.capability, 48), preferred_agent: text(t?.preferred_agent, 64), sticky_key: text(t?.sticky_key, 128), fallback_by: text(t?.fallback_by, 64),
     status: text(t?.status, 32), priority: text(t?.priority, 16), attempts: int(t?.attempts) ?? 0, progress: num(t?.progress), message: clean(t?.message, 500),
     created_at: text(t?.created_at, 64), lease_until: text(t?.lease_until, 64), depends_on: strings(t?.depends_on),
+    // Additive (cloud channel): origin, stage and the expiry view.
+    dsh_profile: text(t?.dsh_profile, 64), origin: adminOrigin(t?.origin), stage: oneOf(t?.stage, STAGES),
+    updated_at: text(t?.updated_at, 64), finished_at: text(t?.finished_at, 64),
+    acknowledged: t?.acknowledged === true, in_history: t?.in_history === true, quiet: t?.quiet === true,
+    session_entries: int(t?.session_entries) ?? 0, session_updated_at: text(t?.session_updated_at, 64),
     result: !plainObject(t?.result) ? undefined : {
       status: text(t.result.status, 32), summary: clean(t.result.summary, 300), error: adminError(t.result.error),
       needs_input: clean(t.result.needs_input, 300), output_count: outputs.length,
@@ -167,7 +190,7 @@ export function adminTaskDetail(t) {
     inputs,
     output: cleanObject(t?.output),
     context_keys: plainObject(t?.context) ? Object.keys(t.context).slice(0, 50).map(k => clean(k, 100)) : [],
-    history: (Array.isArray(t?.history) ? t.history : []).map(h => ({ at: text(h?.at, 64), event: clean(h?.event, 64), message: clean(h?.message, 500) })),
+    history: (Array.isArray(t?.history) ? t.history : []).map(h => ({ at: text(h?.at, 64), event: clean(h?.event, 64), message: clean(h?.message, 500), stage: oneOf(h?.stage, STAGES) })),
     result: !plainObject(t?.result) ? undefined : {
       status: text(t.result.status, 32), summary: clean(t.result.summary, 4000), error: adminError(t.result.error),
       needs_input: clean(t.result.needs_input, 2000), outputs,
@@ -202,15 +225,40 @@ export function adminOverview(o) {
     task_counts: counts,
     ...(Object.keys(agentCounts).length > 0 ? { agent_counts: agentCounts } : {}),
     pending_requests: Number.isInteger(o?.pending_requests) ? o.pending_requests : 0,
+    fallback_due: Number.isInteger(o?.fallback_due) ? o.fallback_due : 0,
+    dormant_agents: Number.isInteger(o?.dormant_agents) ? o.dormant_agents : 0,
   }
 }
 
-/** `?status=&agent=&limit=` → validated filter for `GET /v1/ctl/tasks`. */
+/** One session entry as the panel shows it (the hub already redacted it). */
+export function adminSessionEntry(e) {
+  return {
+    index: int(e?.index), at: text(e?.at, 64), role: text(e?.role, 16), name: text(e?.name, 100),
+    by: text(e?.by, 128), text: clean(e?.text, 8000),
+  }
+}
+
+/** `?status=&agent=&limit=&history=&profile=&origin=` → validated filter for `GET /v1/ctl/tasks`. */
 export function parseTaskQuery(q) {
   const status = (q.get('status') ?? '').trim()
   const agent = (q.get('agent') ?? '').trim()
   const limitText = (q.get('limit') ?? '').trim()
+  const history = (q.get('history') ?? '').trim()
+  const profile = (q.get('profile') ?? '').trim()
+  const origin = (q.get('origin') ?? '').trim()
   const filter = {}
+  if (history !== '') {
+    if (!HISTORY_FILTERS.includes(history)) throw new HubError(400, 'bad-query', `history must be one of ${HISTORY_FILTERS.join(', ')}`)
+    filter.history = history
+  }
+  if (profile !== '') {
+    if (!ID_RE.test(profile)) throw new HubError(400, 'bad-query', 'profile must be a DSH profile name')
+    filter.dsh_profile = profile
+  }
+  if (origin !== '') {
+    if (!ORIGINS.includes(origin)) throw new HubError(400, 'bad-query', `origin must be one of ${ORIGINS.join(', ')}`)
+    filter.origin = origin
+  }
   if (status !== '' && status !== 'all') {
     if (!TASK_STATUSES.includes(status)) throw new HubError(400, 'bad-query', `status must be one of all, ${TASK_STATUSES.join(', ')}`)
     filter.status = status
@@ -255,12 +303,25 @@ export function createRoutes({ client, logger }) {
     adminGet('tasks', 'admin-tasks', async (q) => {
       const filter = parseTaskQuery(q)
       const tasks = (await client.listTasks(filter)).map(adminTaskRow)
-      return { generated_at: new Date().toISOString(), filter: { status: filter.status ?? 'all', agent: filter.agent, limit: filter.limit }, tasks }
+      return {
+        generated_at: new Date().toISOString(),
+        filter: { status: filter.status ?? 'all', agent: filter.agent, limit: filter.limit, history: filter.history ?? 'hide', profile: filter.dsh_profile, origin: filter.origin },
+        tasks,
+      }
     }),
     adminGet('task', 'admin-task', async (q) => {
       const id = (q.get('task_id') ?? '').trim()
       if (!TASK_ID_RE.test(id)) throw new HubError(400, 'bad-query', 'task_id is required')
       return { generated_at: new Date().toISOString(), task: adminTaskDetail(await client.getTask(id)) }
+    }),
+    adminGet('session', 'admin-session', async (q) => {
+      const id = (q.get('task_id') ?? '').trim()
+      if (!TASK_ID_RE.test(id)) throw new HubError(400, 'bad-query', 'task_id is required')
+      const after = smallInt(q.get('after'), 0, 1_000_000, 'after')
+      const limit = smallInt(q.get('limit'), 1, 500, 'limit') ?? 200
+      const doc = await client.readSession(id, { after, limit })
+      const entries = (Array.isArray(doc?.entries) ? doc.entries : []).map(adminSessionEntry)
+      return { generated_at: new Date().toISOString(), task_id: id, total: int(doc?.total) ?? entries.length, next: int(doc?.next), full: doc?.full === true, entries }
     }),
     adminGet('requests', 'admin-requests', async (q) => {
       const status = (q.get('status') ?? '').trim() || 'pending'
@@ -269,7 +330,46 @@ export function createRoutes({ client, logger }) {
       return { generated_at: new Date().toISOString(), filter: { status }, requests }
     }),
   ]
+  // The one write the panel makes: put a failed task away (it is then in 历史).
+  // JSON body only, so a cross-site form cannot send it (it would need a CORS preflight).
+  adminRoutes.push({
+    kind: 'exact',
+    path: `${ADMIN_BASE}/ack`,
+    handler: guard(logger, 'admin-ack', redact, async (req, res) => {
+      if (req.method !== 'POST') throw new HubError(405, 'method-not-allowed', 'use POST')
+      if (!String(req.headers?.['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+        throw new HubError(415, 'unsupported-media-type', 'send application/json')
+      }
+      const body = await readJsonBody(req)
+      const id = typeof body?.task_id === 'string' ? body.task_id.trim() : ''
+      if (!TASK_ID_RE.test(id)) throw new HubError(400, 'bad-request', 'task_id is required')
+      sendJson(res, 200, { task: adminTaskRow(await client.acknowledge(id)) })
+    }),
+  })
   return { adminRoutes }
+}
+
+/** `?after=` style integer within bounds, or undefined when absent. */
+function smallInt(raw, min, max, name) {
+  const value = (raw ?? '').trim()
+  if (value === '') return undefined
+  const n = Number(value)
+  if (!Number.isInteger(n) || n < min || n > max) throw new HubError(400, 'bad-query', `${name} must be an integer ${min}..${max}`)
+  return n
+}
+
+/** Read a small JSON request body (at most 4 KB). */
+async function readJsonBody(req) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > 4096) throw new HubError(413, 'too-large', 'request body too large')
+    chunks.push(chunk)
+  }
+  const raw = Buffer.concat(chunks).toString('utf8')
+  if (raw.trim() === '') return {}
+  try { return JSON.parse(raw) } catch { throw new HubError(400, 'bad-request', 'body is not JSON') }
 }
 
 /** Same login re-check as host-token-stats: a plugin route outranks `/api`. */
