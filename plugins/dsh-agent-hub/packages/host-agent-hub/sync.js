@@ -31,6 +31,8 @@ const TASK_ID_RE = /^[A-Za-z0-9_.-]{1,96}$/
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SESSION_BATCH = 200
 const TEXT_MAX = 20000
+/** How many tasks' last 作战室 line are remembered (so a repeat is never announced twice). */
+const SAID_MAX = 300
 
 /** Hub task id of one local router row: deterministic, so a restart never registers it twice. */
 export function hubTaskId(profile, rowId) {
@@ -161,7 +163,9 @@ export function noticeOf(event) {
       if (event.stage === 'blocked') return `${title} 卡住了${msg}`
       if (event.stage === 'needs_input') return `${title} 需要回答${msg}`
       if (event.stage === 'started') return `${title} 开始做了${msg}`
-      return event.message ? `${title} 进度${msg}` : undefined
+      // An older client re-sends "working" to keep its lease: that is not news.
+      if (!event.message || /^working$/i.test(String(event.message).trim())) return undefined
+      return `${title} 进度${msg}`
     }
     case 'completed': return `${title} 完成${msg}`
     case 'failed': return `${title} 失败${msg}`
@@ -187,7 +191,7 @@ export function createSync(deps) {
   const opts = { mirror: true, notices: true, intervalMs: 10_000, stepEveryMs: 30_000, backfillHours: 12, waitSeconds: 20, ...deps.options }
   const now = deps.now ?? (() => Date.now())
   const profile = PROFILE_RE.test(deps.profile ?? '') ? deps.profile : 'default'
-  let state = { tasks: {}, cursor: undefined, startedAt: undefined }
+  let state = { tasks: {}, cursor: undefined, startedAt: undefined, said: {} }
   let loaded = false
   let stopped = false
   let mirrorBusy = false
@@ -199,7 +203,7 @@ export function createSync(deps) {
     loaded = true
     try {
       const raw = JSON.parse(await readFile(deps.stateFile, 'utf8'))
-      if (raw && typeof raw === 'object') state = { tasks: raw.tasks ?? {}, cursor: raw.cursor, startedAt: raw.startedAt }
+      if (raw && typeof raw === 'object') state = { tasks: raw.tasks ?? {}, cursor: raw.cursor, startedAt: raw.startedAt, said: raw.said ?? {} }
     } catch { /* first run */ }
     state.startedAt ??= new Date(now()).toISOString()
   }
@@ -340,16 +344,31 @@ export function createSync(deps) {
       await save()
       return { lines: [] }
     }
-    const lines = []
+    // One line per task per read: its latest news. A line the 作战室 already got for
+    // that task (the same words) is not sent again, also across a restart.
+    const latest = new Map()
     for (const event of out.events ?? []) {
       if (isOwnMirror(event, client.config?.controllerId, profile)) continue // our own mirror
       if (event.kind === 'progress' && (event.stage === 'step' || event.stage === undefined)) {
         const last = lastStep.get(`stream:${event.task_id}`) ?? 0
         if (now() - last < opts.stepEveryMs) continue
-        lastStep.set(`stream:${event.task_id}`, now())
       }
       const line = noticeOf(event)
-      if (line !== undefined) lines.push(line)
+      if (line === undefined) continue
+      if (event.kind === 'progress' && (event.stage === 'step' || event.stage === undefined)) lastStep.set(`stream:${event.task_id}`, now())
+      latest.delete(event.task_id) // keep the map in event order
+      latest.set(event.task_id, line)
+    }
+    const lines = []
+    for (const [taskId, line] of latest) {
+      if (state.said[taskId]?.line === line) continue
+      state.said[taskId] = { line, at: new Date(now()).toISOString() }
+      lines.push(line)
+    }
+    const ids = Object.keys(state.said)
+    if (ids.length > SAID_MAX) {
+      ids.sort((a, b) => String(state.said[a].at).localeCompare(String(state.said[b].at)))
+      for (const id of ids.slice(0, ids.length - SAID_MAX)) delete state.said[id]
     }
     state.cursor = out.next ?? state.cursor
     await save()

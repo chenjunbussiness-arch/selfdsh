@@ -27,6 +27,6 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "test": "node --test tests/bridge.test.mjs tests/brief.test.mjs tests/router.test.mjs"
+    "test": "node --test tests/bridge.test.mjs tests/brief.test.mjs tests/notices.test.mjs tests/router.test.mjs"
   }
 }

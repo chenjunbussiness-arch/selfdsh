@@ -140,6 +140,24 @@ test('progress stages: stored, in history, in the event stream; a bare renew rec
   assert.equal(feed.next, feed.latest)
 })
 
+test('a progress report that changes nothing is a keep-alive: lease renewed, no event', async (t) => {
+  const { hub } = await makeHub(t)
+  await worker(hub, 'worker')
+  const task = await dispatchTask(hub)
+  await hub.poll('worker')
+  const before = (await hub.feed()).latest
+  // An older client re-sends "working" every cycle to keep its lease.
+  for (let i = 0; i < 5; i++) await hub.progress('worker', { task_id: task.task_id, progress: null, message: 'working' })
+  await hub.progress('worker', { task_id: task.task_id, stage: 'step', message: 'tests 3/7' })
+  await hub.progress('worker', { task_id: task.task_id, stage: 'step', message: 'tests 3/7' })
+  await hub.progress('worker', { task_id: task.task_id, stage: 'step', message: 'tests 7/7' })
+  await hub.progress('worker', { task_id: task.task_id, stage: 'needs_input', message: 'tests 7/7' })
+  const feed = await hub.feed({ after: before })
+  assert.deepEqual(feed.events.map(e => [e.stage ?? '', e.message]), [['', 'working'], ['step', 'tests 3/7'], ['step', 'tests 7/7'], ['needs_input', 'tests 7/7']])
+  const got = await hub.getTask(task.task_id, { full: true })
+  assert.equal(got.history.filter(e => e.event === 'progress').length, 4)
+})
+
 test('event stream: cursor, long poll woken by a new event, reset on a stale cursor', async (t) => {
   const { hub } = await makeHub(t)
   await worker(hub, 'worker')

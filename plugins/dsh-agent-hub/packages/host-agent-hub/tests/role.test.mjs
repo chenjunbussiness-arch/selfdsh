@@ -18,7 +18,7 @@ import test from 'node:test'
 import { adminAgent, adminRequest } from '../bridge.js'
 import { HubError as ToolHubError } from '../hub-client.js'
 import { AgentHub, HubError as ModelHubError } from '../hub.js'
-import { DEFAULT_ROLE, ROLE_RANK, ROLES, agentRole, isRole, isTestTask, roleOf } from '../roles.js'
+import { DEFAULT_ROLE, ROLE_RANK, ROLES, agentRole, isRole, isTestTask, roleAccepts, roleBoundary, roleDuties, roleOf, roleRefusal, roleWidening, taskNeeds, textRunNeeds } from '../roles.js'
 import { createTools } from '../tools.js'
 import { makeClient } from './helpers.mjs'
 
@@ -62,8 +62,8 @@ async function enroll(hub, agentId, extra = {}, approve = {}) {
 
 // --- the model (roles.js) ---------------------------------------------------
 
-test('roles: the four names, worker by default, invalid values stay invalid', () => {
-  assert.deepEqual(ROLES, ['dispatcher', 'tester', 'worker', 'observer'])
+test('roles: the five names, worker by default, invalid values stay invalid', () => {
+  assert.deepEqual(ROLES, ['dispatcher', 'tester', 'coder', 'worker', 'observer'])
   assert.equal(DEFAULT_ROLE, 'worker')
   assert.equal(roleOf(undefined), 'worker', 'no role at all = worker (old agents, old enroll calls)')
   assert.equal(roleOf(null), 'worker')
@@ -331,4 +331,34 @@ test('overview, agent list and enrollment requests report the role of every agen
       assert.ok(key in agent, key)
     }
   }
+})
+
+test('roles: a coder edits only; asks to run tests, commands or git are read from the text, "不要" turns one off', () => {
+  const asks = {
+    '修复登录页，改完跑一下测试并 git push': ['test', 'git'],
+    '改好后 npm test 验证': ['test'],
+    'run the unit tests': ['test'],
+    '提交代码到 main': ['git'],
+    '开一个 PR': ['git'],
+    '运行这个脚本看输出': ['cmd'],
+    '命令: echo hi': ['cmd'],
+    // editing, not running
+    '修复登录页，改完不要跑测试': [],
+    '写单元测试覆盖 parse()': [],
+    '修 test 文件里的断言': [],
+    '把两个函数合并到一起': [],
+    '解析命令行参数的代码重构一下': [],
+    'fix the runtime test helper': [],
+  }
+  for (const [text, want] of Object.entries(asks)) assert.deepEqual(textRunNeeds(text), want, text)
+  assert.equal(roleAccepts('coder', { type: 'code', title: '修首页', instruction: '只改 CSS' }), true)
+  assert.equal(roleAccepts('coder', { title: '修首页', instruction: '只改 CSS', needs: ['code', 'test'] }), false)
+  assert.deepEqual(taskNeeds({ type: 'code', title: 'x', instruction: '改完跑测试', needs: ['code'] }), ['code', 'test'], 'the text counts even when needs says code')
+  assert.equal(roleRefusal({ title: 'x', instruction: '改完 git push' }, 'coder', 'quick').code, 'role-not-coding')
+  assert.equal(roleRefusal({ title: 'x', instruction: '改完 git push' }, 'worker', 'dsh'), undefined)
+  assert.deepEqual(roleDuties('coder').cannot, ['跑测试', '执行命令或脚本', 'git（提交、推送、开 PR）'])
+  assert.match(roleBoundary('coder'), /^你的角色是 coder：能改代码/)
+  assert.equal(roleWidening('worker', 'coder'), undefined, 'worker -> coder narrows')
+  assert.equal(roleWidening('tester', 'coder')?.code, 'role-widened', 'tester -> coder is another kind of work')
+  assert.equal(roleWidening('coder', 'observer'), undefined)
 })

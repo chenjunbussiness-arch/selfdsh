@@ -238,7 +238,15 @@ worker 客户端在 `task.json` 里写 `effort_resolved`：任务自己的 effor
 
 细节和接口表见 `services/dsh-hub/README.md` 第 5.3、5.4、6、6.2 节，这里只列规则。
 
-**分工**：云端 DSH / 云端 agent 派活（控制方，或角色 `dispatcher` 的 agent）；本地 agent 执行（`worker` / `tester`）；Quick 这类 agent 只干活（`worker`，经 MCP 拉任务）；`observer` 只看。
+**分工**：云端 DSH / 云端 agent 派活（控制方，或角色 `dispatcher` 的 agent）；本地 agent 执行（`worker` / `tester`）；Quick 这类没有命令行的 agent 只改代码（`coder`）；`observer` 只看。
+
+**职责边界（coder / worker）**：
+
+- `coder` 只改代码，不跑测试、不执行命令、不碰 git。派给 coder 的任务如果要这些（任务的 `needs` 含 `test` / `git` / `cmd`，或标题和说明里写了"跑测试""npm test""git push""开 PR""执行命令"等，前面带"不要/别/无需"的不算），hub 直接 400 `role-not-coding`，提示怎么拆；pool 里的 coder 也领不到这种任务。
+- 既要改代码又要测试、提交的活拆两条：改代码派给 coder（`needs: ["code"]`），测试和 git 派给 worker（`needs: ["test","git"]`，`depends_on` 前一条，coder 交的 `changes.patch` 会成为它的输入）。
+- worker 领到的任务带 `duties`（`role`、`can`、`cannot`、`handoff`）和一句 `boundary`，agent 先读它；`agent_list` 也列出每个 worker 的 `duties`。
+- worker 发现任务越界时不做越界部分，`result.json` 写 `needs_input` 交回（`worker_executor.py` 在 coder 上遇到 run / script 任务会自动这样交回）。
+- 角色是批准时定的授权，只能收窄：已注册为 `worker` 的 Quick 把 `DSH_ROLE=coder` 写进自己的 agent 配置，下一次心跳 hub 就把它改成 coder；想放宽要重新申请。
 
 **一个 agent 干多种活**：`capabilities` 写成 `name` 或 `name:N`，例如本地 DSH `["browser:1", "test:2", "code:2"]`。任务带 `capability` 说明走哪条线；`pool:<能力>` 任务自动带上。总数仍受 `max_concurrency` 限制。
 
