@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "File drop",
+    "description": "Temporary download and upload links instead of scp: agents use file_share / file_upload_link, and the File drop page creates, copies and revokes them. Random token, short default lifetime, allowed folders only, never an internal address.",
+    "detail": "README.md"
+  }
+}

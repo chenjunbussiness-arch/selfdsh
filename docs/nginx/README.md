@@ -6,7 +6,7 @@
 
 | 模板 | 端口 | 作用 | 后端 |
 |---|---|---|---|
-| `dsh-web.conf` | 8443 ssl | DSH Web GUI 的固定入口（TLS + basic auth + 旧版 Chromium polyfill） | nginx → `127.0.0.1:42444`（dsh-web-gate）→ `42443`（dsh web） |
+| `dsh-web.conf` | 8443 ssl | DSH Web GUI 的固定入口（TLS + basic auth + 旧版 Chromium polyfill）；另有 dsh-fileshare 临时链接的两条免 Basic 认证的 location | nginx → `127.0.0.1:42444`（dsh-web-gate）→ `42443`（dsh web）；`/api/fileshare/d/`、`/api/fileshare/u/` 直连 `42443` |
 | `browser-novnc.conf` | 8445 ssl | 浏览器桌面（noVNC）独立站点 | nginx → `127.0.0.1:6080`（websockify → VNC 5900） |
 | `gitea.conf` | 8444 ssl | 自建 Gitea，**强制 mTLS**（`ssl_verify_client on`） | nginx → `127.0.0.1:3000` |
 | `couple-fit.conf` | 8450 http | 纯静态单页站点 | `root` 指向页面目录 |

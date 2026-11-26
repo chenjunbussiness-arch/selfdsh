@@ -14,6 +14,7 @@
   - [plugins/dsh-vpn/README.md](../plugins/dsh-vpn/README.md)：VPN 管理
   - [plugins/dsh-secrets/README.md](../plugins/dsh-secrets/README.md)：加密密钥库与密钥看板
   - [plugins/dsh-agent-hub/README.md](../plugins/dsh-agent-hub/README.md)：DSH 作为 dsh-hub 控制方、Agent 调度页、worker 接入
+  - [plugins/dsh-fileshare/README.md](../plugins/dsh-fileshare/README.md)：文件中转，临时下载 / 上传链接（代替 scp）
 
 ## 部署
 

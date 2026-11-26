@@ -1,0 +1,31 @@
+{
+  "name": "dsh-host-fileshare",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Host half of dsh-fileshare: temporary download / upload links (token in the path, expiry, revocation, allowed folders only), the file_* agent tools and the login-guarded routes of the 文件中转 page",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "config.js",
+    "origin.js",
+    "paths.js",
+    "store.js",
+    "service.js",
+    "public.js",
+    "upload-page.js",
+    "manage.js",
+    "tools.js"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}

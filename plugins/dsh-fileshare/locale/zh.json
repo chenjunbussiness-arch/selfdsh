@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "文件中转",
+    "description": "给文件生成临时下载、上传链接，不用再 scp：agent 用 file_share / file_upload_link，侧边栏「文件中转」页面也能生成、复制、撤销。链接带随机令牌，默认短有效期，只限允许的文件夹，不会用内网地址。",
+    "detail": "README.md"
+  }
+}
