@@ -51,6 +51,8 @@ export interface LiveAgent {
     readonly ctx?: unknown;
     /** `dsh-agent-loop` `followup`: queue a message for the next turn and wake the loop. */
     followup?(message: unknown): void;
+    /** `dsh-agent-loop` `inject`: queue a message for the next step without waking the loop. */
+    inject?(message: unknown): void;
     /** Idle or running; read to pick queue vs steer. */
     readonly status?: string;
     /** `dsh-agent-loop` inbox: messages not taken yet, which can be replaced or removed. */

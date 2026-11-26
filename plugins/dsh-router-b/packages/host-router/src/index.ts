@@ -78,8 +78,10 @@ import type { ScmClient } from './scm.ts'
 import { liveSegments } from './live.ts'
 import { mergeNoticeLines, noticeLinesOf, noticeText, isAskLine } from './notices.ts'
 import type { NoticeMessage } from './notices.ts'
+import { ANCHOR_COMPACT_TOKENS, AnchorCompactor, compactStateText, isStateMessage, OpenAsks } from './compact-state.ts'
+import type { CompactionEngineLike } from './compact-state.ts'
 import type { ModelOption, Tier, TierDecision, TierRoute } from './tier.ts'
-import type { ContentBlock, CredentialsServiceLike, LiveAgent, LlmRuntimeLike, PluginContext, SubagentActivation, ToolRunContext, WebRouteLike } from './types.ts'
+import type { ContentBlock, CredentialsServiceLike, LiveAgent, LlmRuntimeLike, PluginContext, SessionEventLike, SubagentActivation, ToolRunContext, WebRouteLike } from './types.ts'
 
 /** Stable plugin name. */
 export const name = 'host-router'
@@ -1393,6 +1395,8 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
   /** Most lines one notice carries; older ones are folded into a count. */
   const NOTICE_MAX_LINES = config.progressNoticeMaxLines ?? 12
   const pendingNotices: string[] = []
+  /** Questions put to the human that nothing has closed yet; re-posted after a compaction. */
+  const openAsks = new OpenAsks()
   /** Last notices, newest first, for the panel. */
   let recentNotices: readonly { readonly at: string; readonly text: string }[] = []
   let noticeTimer: ReturnType<typeof setTimeout> | undefined
@@ -1453,12 +1457,83 @@ export async function apply(ctx: PluginContext, config: RouterConfig): Promise<v
   const notice = (text: string, about?: RouterTask): void => {
     const line = about === undefined ? text : `${text}${groupLineOf(about)}`
     recentNotices = [{ at: new Date().toISOString(), text: line }, ...recentNotices].slice(0, 30)
+    openAsks.note(line)
     ctx.logger.info(`host-router notice: ${line}`)
     if (!noticesEnabled) return
     pendingNotices.push(line)
     scheduleNotices(NOTICE_DEBOUNCE_MS)
   }
   ctx.effect(() => () => { if (noticeTimer !== undefined) clearTimeout(noticeTimer) }, 'host-router: notice timer')
+
+  /**
+   * After the 作战室's history is compacted (automatically past the threshold, or by
+   * `/compact`), put what is still open back in front of it: the board's unfinished rows
+   * and the questions still waiting on the human ({@link compactStateText}). The message is
+   * injected for the next step without waking the loop, so it costs no extra turn; a state
+   * message still waiting from an earlier compaction is replaced, not added to.
+   */
+  /**
+   * The 作战室's own size limit ({@link AnchorCompactor}): DSH compacts automatically only
+   * near the model's window (the setting lives in the agent preset, out of a profile's
+   * reach in web mode), so the router compacts the anchor at `anchorCompactTokens`.
+   */
+  const compactor = new AnchorCompactor({
+    threshold: Math.max(0, config.anchorCompactTokens ?? ANCHOR_COMPACT_TOKENS),
+    agent: () => liveAgent(anchorSessionId),
+    engine: (agent: object) => {
+      const agentCtx = (agent as LiveAgent).ctx
+      if (agentCtx === undefined || agentCtx === null) return undefined
+      const usable = (value: unknown): CompactionEngineLike | undefined =>
+        typeof (value as Partial<CompactionEngineLike> | undefined)?.compactNow === 'function' ? value as CompactionEngineLike : undefined
+      try {
+        const presets = ctx.get('agentPresets') as { serviceFor?(agent: { ctx: unknown }, name: string): unknown } | undefined
+        const found = usable(presets?.serviceFor?.({ ctx: agentCtx }, 'compaction'))
+        if (found !== undefined) return found
+      } catch { /* fall through to the agent's own context */ }
+      try {
+        return usable((agentCtx as { get?(name: string): unknown }).get?.('compaction'))
+      } catch {
+        return undefined
+      }
+    },
+    log: ctx.logger,
+  })
+  ctx.effect(() => () => compactor.dispose(), 'host-router: 作战室 compaction')
+
+  ctx.on('session/event', ((session: { readonly id?: unknown } | undefined, event: { readonly type?: unknown; readonly data?: { readonly error?: unknown } } | undefined) => {
+    if (anchorSessionId === undefined || session?.id !== anchorSessionId || event === undefined) return
+    if (event.type === 'assistant/message') {
+      compactor.sample(pressureTokensOf([event as SessionEventLike]))
+      return
+    }
+    if (event.type === 'turn/end') {
+      compactor.turnEnded()
+      return
+    }
+    if (event.type !== 'compaction/end' || event.data?.error !== undefined) return
+    compactor.compacted()
+    const text = compactStateText(board.list(), openAsks.list())
+    if (text === undefined) return
+    // Not inside the session's append: the agent may still be finishing the compaction.
+    queueMicrotask(() => {
+      const agent = liveAgent(anchorSessionId)
+      if (agent === undefined) return
+      const message = userMessage(text)
+      const inbox = agent.inbox
+      const queued = inbox === undefined ? [] : [...(inbox.nextStep ?? []), ...(inbox.nextTurn ?? [])]
+        .filter((item): item is NoticeMessage => item !== null && typeof item === 'object' && isStateMessage(item as NoticeMessage))
+      const [first, ...rest] = queued
+      for (const item of rest) inbox?.remove?.(item.id)
+      if (first !== undefined && inbox?.replace?.(first.id, message) === true) return
+      try {
+        if (typeof agent.inject === 'function') agent.inject(message)
+        else agent.followup?.(message)
+        ctx.logger.info('host-router: 作战室 compacted; open tasks and questions re-posted')
+      } catch (error) {
+        ctx.logger.warn(`host-router: could not re-post the 作战室 state after compaction: ${String(error)}`)
+      }
+    })
+  }) as never)
 
   /**
    * Keep a manager in its role while some of its tasks are still to come.
