@@ -1433,6 +1433,12 @@ EXCHANGE_README = """\
 
 写结果时把这两个文件也拷进 `outbox/`（或 `failed/`）的结果目录，再最后写 `result.json`。它们不会作为结果文件上传。
 
+**遇到只有人能定的事，就问（回答会回到你这里）**：
+
+- 边做边问：往 `progress.jsonl` 写 `{"stage": "needs_input", "message": "<要问的问题>"}`，任务留在你手上。人在 DSH 作战室回答后，agent_client 会把回答追加到任务目录的 `answers.jsonl`（每行 `{"question", "answer", "at"}`）。定时去看这个文件，有了回答就按回答接着做。
+- 交回去问：在 `result.json` 里写 `"status": "partial"` 和 `"needs_input": "<要问的问题>"`。人回答后，任务会**重新派回给你**，新的 `task.json` 里 `answers` 列出以前问过的问题和人的回答，按回答接着做，不要从头再问一遍。
+- 只问真正卡住、只有人能定的事；能自己判断的照常做完。
+
 **职责边界（先读）**：`task.json` 里的 `boundary` 一句话写明本机 worker 能做什么、不能做什么，`duties` 是同样内容的列表（`role`、`can`、`cannot`、`handoff`）。
 按它做，不要越界：
 
@@ -1464,7 +1470,7 @@ def ensure_exchange(root):
                 old = fh.read()
         except OSError:
             old = None
-        if old is not None and old != EXCHANGE_README and old.startswith("# dsh 交换目录") and "职责边界" not in old:
+        if old is not None and old != EXCHANGE_README and old.startswith("# dsh 交换目录") and ("职责边界" not in old or "answers.jsonl" not in old):
             write_atomic(readme, EXCHANGE_README)
             created.append("README.md (updated)")
     return created
@@ -1486,7 +1492,11 @@ def _upload_order(name):
 # the offline spool). Both files stay local: they are not uploaded as result files.
 
 PROGRESS_FILE, SESSION_FILE, SYNC_DIR = "progress.jsonl", "session.jsonl", ".sync"
-LOCAL_ONLY_FILES = (PROGRESS_FILE, SESSION_FILE)
+# The human's answers to a question this worker put while it keeps the task (progress stage
+# needs_input): the hub hands each one over once, in the reply to a heartbeat or an event, and
+# the bridge appends it here, in the task folder, for the agent to read and carry on.
+ANSWERS_FILE = "answers.jsonl"
+LOCAL_ONLY_FILES = (PROGRESS_FILE, SESSION_FILE, ANSWERS_FILE)
 STAGES = ("received", "started", "step", "blocked", "needs_input", "uploading")
 SESSION_ROLES = ("user", "assistant", "tool", "system", "note")
 SESSION_BATCH = 200
@@ -1598,7 +1608,50 @@ class Bridge:
         res = self.c.heartbeat(status, self.live_workspaces(), running=self.running_ids())
         if isinstance(res, dict) and res.get("abort"):
             self.abort(res["abort"])
+        if isinstance(res, dict) and res.get("answers"):
+            self.take_answers(res["answers"])
         return res
+
+    def take_answers(self, answers, task_id=None):
+        """Answers the hub hands over (each one only once): append them to answers.jsonl in the
+        task's folder (working/, else inbox/). With no folder yet they wait in .sync/ and are
+        moved in by `renew`. Returns how many were kept."""
+        kept = 0
+        for a in answers if isinstance(answers, list) else []:
+            if not isinstance(a, dict):
+                continue
+            tid = a.get("task_id") or task_id
+            answer = a.get("answer")
+            if not isinstance(tid, str) or not TASK_ID_RE.fullmatch(tid) or not isinstance(answer, str) or answer == "":
+                continue
+            line = json.dumps({"question": a.get("question"), "answer": answer, "at": a.get("at")}, ensure_ascii=False)
+            place = None
+            for box in ("working", "inbox"):
+                d = os.path.join(self.root, box, tid)
+                if os.path.isdir(d) and not os.path.exists(os.path.join(d, ABORT_MARK)):
+                    place = os.path.join(d, ANSWERS_FILE)
+                    break
+            if place is None:
+                os.makedirs(os.path.join(self.root, SYNC_DIR), exist_ok=True)
+                place = os.path.join(self.root, SYNC_DIR, f"{tid}.{ANSWERS_FILE}")
+            with open(place, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            kept += 1
+            self.log(f"{tid}: answer from the human -> {ANSWERS_FILE}")
+        return kept
+
+    def _move_pending_answers(self, tid, d):
+        pending = os.path.join(self.root, SYNC_DIR, f"{tid}.{ANSWERS_FILE}")
+        if not os.path.exists(pending):
+            return
+        try:
+            with open(pending, encoding="utf-8") as f:
+                text = f.read()
+            with open(os.path.join(d, ANSWERS_FILE), "a", encoding="utf-8") as f:
+                f.write(text)
+            os.remove(pending)
+        except OSError as e:
+            self.log(f"{tid}: could not move pending answers ({e})")
 
     def abort(self, task_ids):
         """The hub no longer gives us these tasks (cancelled, requeued, reassigned): stop delivering them."""
@@ -1814,7 +1867,9 @@ class Bridge:
             items, n = read_new_lines(os.path.join(d, PROGRESS_FILE), st["progress"])
             attempt = self._attempt(tid, d)
             for upd in progress_updates(items):
-                self.c.progress(tid, upd["progress"], upd["message"], stage=upd["stage"], attempt=attempt)
+                reply = self.c.progress(tid, upd["progress"], upd["message"], stage=upd["stage"], attempt=attempt)
+                if isinstance(reply, dict) and reply.get("answers"):
+                    self.take_answers(reply["answers"], tid)
                 sent = True
             if n != st["progress"]:
                 st["progress"] = n
@@ -1843,9 +1898,12 @@ class Bridge:
             d = os.path.join(base, tid)
             if tid.startswith(".") or not os.path.isdir(d) or os.path.exists(os.path.join(d, ABORT_MARK)):
                 continue
+            self._move_pending_answers(tid, d)
             try:
                 if not self.sync(tid, d):
-                    self.c.progress(tid, renew=True, attempt=self._attempt(tid, d))
+                    reply = self.c.progress(tid, renew=True, attempt=self._attempt(tid, d))
+                    if isinstance(reply, dict) and reply.get("answers"):
+                        self.take_answers(reply["answers"], tid)
             except HubError as e:
                 if e.status in (404, 409):
                     self.log(f"{tid} no longer leased ({e.code})")

@@ -40,13 +40,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
 
 import { AGENT_STATUSES, TASK_STATUSES } from './contract.ts'
-import type { AgentStatus, AgentView, AgentsDoc, HistoryEvent, Overview, RequestView, RequestsDoc, SessionDoc, SessionEntry, TaskDetail, TaskDoc, TaskFilter, TaskRow, TaskStatus, TasksDoc } from './contract.ts'
-import { LANES, agentGroups, clearActionOf, fallbackReason, fallbackTasks, laneOf, lanesOf, registeredBy, selfWorkers, stageOf, timeline } from './desk.ts'
+import type { AgentStatus, AgentView, AgentsDoc, AnswerView, HistoryEvent, MetricRow, MetricsDoc, Overview, RequestView, RequestsDoc, SessionDoc, SessionEntry, TaskDetail, TaskDoc, TaskFilter, TaskRow, TaskStatus, TasksDoc, TimelineDoc } from './contract.ts'
+import { LANES, agentGroups, answerable, clearActionOf, durationParts, fallbackReason, fallbackTasks, laneOf, lanesOf, percentOf, registeredBy, selfWorkers, stageOf, timeline } from './desk.ts'
 import type { AgentGroup, Lane, SelfWorker } from './desk.ts'
 import { absolute, agentCounts, agentStatus, bytes, clock, percent, presence, relative, sortAgents, until } from './format.ts'
 import { HubIcon } from './HubIcon.tsx'
 import type { Translate } from './locales.ts'
-import { SourceError, ackTask, cancelTask, fetchAgents, fetchOverview, fetchRequests, fetchSession, fetchTask, fetchTasks } from './source.ts'
+import { SourceError, ackTask, answerTask, cancelTask, fetchAgents, fetchMetrics, fetchOverview, fetchRequests, fetchSession, fetchTask, fetchTasks, fetchTimeline } from './source.ts'
 
 /** Auto-refresh period. */
 export const REFRESH_MS = 10_000
@@ -327,9 +327,9 @@ function useShown(target: { readonly current: Element | null }, enabled: boolean
 }
 
 /** The embedded form's foldable groups. */
-type Part = 'agents' | 'requests' | 'tasks' | 'fallback' | 'ended'
+type Part = 'agents' | 'requests' | 'tasks' | 'fallback' | 'ended' | 'metrics'
 
-const PARTS: readonly Part[] = ['agents', 'requests', 'tasks', 'fallback', 'ended']
+const PARTS: readonly Part[] = ['agents', 'requests', 'tasks', 'fallback', 'ended', 'metrics']
 
 /** What the person folded or opened by hand; absent = the default. */
 type Folds = Readonly<Partial<Record<Part, boolean>>>
@@ -1001,7 +1001,7 @@ function AckButton({ task, t, onDone }: { readonly task: TaskDetail; readonly t:
  * Clear one task out of 等你回复: put a finished one away (历史), cancel one that is
  * still open. Cancelling stops a worker, so it asks once more on the same spot.
  */
-function ClearWaiting({ task, t, onDone }: { readonly task: TaskRow; readonly t: Translate; readonly onDone: () => void }): ReactNode {
+function ClearWaiting({ task, t, onDone }: { readonly task: Pick<TaskRow, 'task_id' | 'status'>; readonly t: Translate; readonly onDone: () => void }): ReactNode {
   const [busy, setBusy] = useState(false)
   const [asking, setAsking] = useState(false)
   const [error, setError] = useState<unknown>(undefined)
@@ -1034,6 +1034,210 @@ function ClearWaiting({ task, t, onDone }: { readonly task: TaskRow; readonly t:
         )}
       {error !== undefined ? <span className="dah-error-text">{t('waiting.failed', { error: messageOf(error) })}</span> : null}
     </>
+  )
+}
+
+/** ms as 12 分 / 3.5 小时, or — when unknown. */
+function duration(ms: number | undefined, t: Translate): string {
+  const parts = durationParts(ms)
+  return parts === undefined ? t('value.none') : t(`unit.${parts.unit}`, { n: parts.value })
+}
+
+/**
+ * Answer a worker's question from the desk: the answer goes back to the worker that
+ * asked (POST …/admin/answer), and the task leaves 等你回复.
+ */
+function AnswerBox({ task, t, onDone }: { readonly task: TaskDetail; readonly t: Translate; readonly onDone: () => void }): ReactNode {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [sent, setSent] = useState(false)
+  const [error, setError] = useState<unknown>(undefined)
+  const question = task.question?.text ?? task.result?.needs_input ?? task.message ?? ''
+  const send = (): void => {
+    const answer = text.trim()
+    if (answer === '' || busy) return
+    setBusy(true)
+    answerTask(task.task_id, answer).then(
+      () => { setBusy(false); setSent(true); setText(''); setError(undefined); onDone() },
+      (failure: unknown) => { setBusy(false); setError(failure) },
+    )
+  }
+  return (
+    <div className="dah-block dah-answer" data-tone="waiting">
+      <h4 className="dah-block-title">{t('answer.title')}</h4>
+      {question !== '' ? <div className="dah-text"><b>{t('answer.question')}</b>{question}</div> : null}
+      {sent
+        ? <div className="dah-muted">{t('answer.done')}</div>
+        : (
+          <>
+            <textarea
+              className="dah-input" rows={3} maxLength={4000} value={text} placeholder={t('answer.placeholder')} disabled={busy}
+              onChange={(event) => { setText(event.target.value) }}
+              onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) send() }}
+            />
+            <div className="dah-row-actions">
+              <button type="button" className="dah-btn" data-size="sm" data-tone="primary" disabled={busy || text.trim() === ''} onClick={send}>
+                {busy ? t('answer.busy') : t('answer.send')}
+              </button>
+              {error !== undefined ? <span className="dah-error-text">{t('answer.failed', { error: messageOf(error) })}</span> : null}
+            </div>
+          </>
+        )}
+    </div>
+  )
+}
+
+/** The answered questions of a task, oldest first. */
+function AnswersList({ answers, t }: { readonly answers: readonly AnswerView[]; readonly t: Translate }): ReactNode {
+  if (answers.length === 0) return null
+  return (
+    <div className="dah-block">
+      <h4 className="dah-block-title">{t('answers.title')}</h4>
+      <ul className="dah-history">
+        {answers.map((a, index) => (
+          <li key={`${a.at ?? ''}-${String(index)}`}>
+            <span className="dah-history-time" title={absolute(a.at)}>{absolute(a.at)}</span>
+            <span className="dah-history-event">{a.by ?? ''}</span>
+            <span><span className="dah-muted">{a.question ?? ''}</span>{a.question ? ' → ' : ''}<b>{a.answer ?? ''}</b></span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/**
+ * The task's lifecycle: its phase, how long it spent in each (queued, claimed, running,
+ * waiting on you), the due time, and when its result reached the 作战室 / was put away.
+ * Read from …/admin/timeline (archived tasks too); quiet when the hub is older.
+ */
+function LifecycleView({ taskId, tick, t, now }: { readonly taskId: string; readonly tick: number | undefined; readonly t: Translate; readonly now: number }): ReactNode {
+  const [doc, setDoc] = useState<TimelineDoc | undefined>(undefined)
+  const [failed, setFailed] = useState(false)
+  const ticket = useRef(0)
+  useEffect(() => {
+    ticket.current += 1
+    const mine = ticket.current
+    fetchTimeline(taskId).then(
+      (next) => { if (mine === ticket.current) { setDoc(next); setFailed(false) } },
+      () => { if (mine === ticket.current) setFailed(true) },
+    )
+  }, [taskId, tick])
+  useEffect(() => () => { ticket.current += 1 }, [])
+  if (doc === undefined) return failed ? null : <div className="dah-block"><div className="dah-muted">{t('life.loading')}</div></div>
+  const d = doc.durations
+  const row = doc.task
+  return (
+    <div className="dah-block">
+      <h4 className="dah-block-title">{t('life.title')}</h4>
+      <div className="dah-life">
+        {doc.phase !== undefined ? <span className="dah-badge" data-pill="true" data-tone={doc.phase}>{t(`phase.${doc.phase}`)}</span> : null}
+        {row.overdue === true ? <span className="dah-badge" data-tone="failed">{t('life.overdue')}</span> : null}
+        {doc.archived ? <span className="dah-muted">{t('life.archived')}</span> : null}
+      </div>
+      <dl className="dah-meta">
+        <div><dt>{t('life.queue')}</dt><dd className="dah-num">{duration(d.queue_ms, t)}</dd></div>
+        {(d.claim_ms ?? 0) >= 1000 ? <div><dt>{t('life.claim')}</dt><dd className="dah-num">{duration(d.claim_ms, t)}</dd></div> : null}
+        <div><dt>{t('life.run')}</dt><dd className="dah-num">{duration(d.run_ms, t)}</dd></div>
+        {(d.waiting_ms ?? 0) >= 1000 ? <div><dt>{t('life.waiting')}</dt><dd className="dah-num">{duration(d.waiting_ms, t)}</dd></div> : null}
+        <div><dt>{t('life.total')}</dt><dd className="dah-num">{duration(d.total_ms, t)}</dd></div>
+        {row.due_at !== undefined ? <div><dt>{t('life.due')}</dt><dd title={absolute(row.due_at)}>{until(row.due_at, t, now)}</dd></div> : null}
+        {row.delivered_at !== undefined
+          ? <div><dt>{t('life.delivered')}</dt><dd title={absolute(row.delivered_at)}>{`${relative(row.delivered_at, t, now)}${row.delivered_to !== undefined ? ` · ${row.delivered_to}` : ''}`}</dd></div>
+          : null}
+        {row.acknowledged_at !== undefined
+          ? <div><dt>{t('life.acked')}</dt><dd title={absolute(row.acknowledged_at)}>{`${relative(row.acknowledged_at, t, now)}${row.acknowledged_by !== undefined ? ` · ${row.acknowledged_by}` : ''}`}</dd></div>
+          : null}
+      </dl>
+      <AnswersList answers={doc.answers} t={t} />
+    </div>
+  )
+}
+
+const METRIC_HOURS = [24, 168, 720] as const
+
+function pair(row: MetricRow, key: 'queue' | 'run', t: Translate): string {
+  const p50 = row[`${key}_ms_p50`]
+  const p90 = row[`${key}_ms_p90`]
+  if (p50 === undefined && p90 === undefined) return t('value.none')
+  return `${duration(p50, t)} / ${duration(p90, t)}`
+}
+
+function MetricCells({ row, t }: { readonly row: MetricRow; readonly t: Translate }): ReactNode {
+  return (
+    <>
+      <td className="dah-num">{String(row.tasks ?? 0)}</td>
+      <td className="dah-num">{`${String(row.completed ?? 0)} / ${String(row.failed ?? 0)} / ${String(row.open ?? 0)}`}</td>
+      <td className="dah-num" data-tone={(row.fail_rate ?? 0) >= 0.2 ? 'failed' : undefined}>{percentOf(row.fail_rate) ?? t('value.none')}</td>
+      <td className="dah-num">{percentOf(row.ask_rate) ?? t('value.none')}</td>
+      <td className="dah-num">{String(row.fallback ?? 0)}</td>
+      <td className="dah-num" data-tone={(row.overdue ?? 0) > 0 ? 'failed' : undefined}>{String(row.overdue ?? 0)}</td>
+      <td className="dah-num dah-nowrap">{pair(row, 'queue', t)}</td>
+      <td className="dah-num dah-nowrap">{pair(row, 'run', t)}</td>
+    </>
+  )
+}
+
+/** Numbers per executor (…/admin/metrics): how much, how it ended, how long, how often it asked. */
+function MetricsView({ tick, t }: { readonly tick: number | undefined; readonly t: Translate }): ReactNode {
+  const [hours, setHours] = useState<number>(168)
+  const [doc, setDoc] = useState<MetricsDoc | undefined>(undefined)
+  const [error, setError] = useState<unknown>(undefined)
+  const ticket = useRef(0)
+  useEffect(() => {
+    ticket.current += 1
+    const mine = ticket.current
+    fetchMetrics(hours).then(
+      (next) => { if (mine === ticket.current) { setDoc(next); setError(undefined) } },
+      (failure: unknown) => { if (mine === ticket.current) setError(failure) },
+    )
+  }, [hours, tick])
+  useEffect(() => () => { ticket.current += 1 }, [])
+  return (
+    <div className="dah-metrics">
+      <div className="dah-filters">
+        <select className="dah-select" value={String(hours)} aria-label={t('metrics.title')} onChange={(event) => { setHours(Number(event.target.value)) }}>
+          {METRIC_HOURS.map(n => <option key={n} value={String(n)}>{t('metrics.window', { n })}</option>)}
+        </select>
+      </div>
+      <SectionError error={error} t={t} />
+      {doc === undefined
+        ? (error === undefined ? <Empty>{t('loading')}</Empty> : null)
+        : (doc.total.tasks ?? 0) === 0
+          ? <Empty>{t('metrics.empty')}</Empty>
+          : (
+            <div className="dah-table-wrap">
+              <table className="dah-table">
+                <thead>
+                  <tr>
+                    <th>{t('metrics.col.worker')}</th>
+                    <th>{t('metrics.col.tasks')}</th>
+                    <th>{t('metrics.col.done')}</th>
+                    <th>{t('metrics.col.fail')}</th>
+                    <th>{t('metrics.col.ask')}</th>
+                    <th>{t('metrics.col.fallback')}</th>
+                    <th>{t('metrics.col.overdue')}</th>
+                    <th>{t('metrics.col.queue')}</th>
+                    <th>{t('metrics.col.run')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {doc.workers.map(row => (
+                    <tr key={row.worker}>
+                      <td className="dah-id">{row.worker}</td>
+                      <MetricCells row={row} t={t} />
+                    </tr>
+                  ))}
+                  <tr data-total="true">
+                    <td><b>{t('metrics.total')}</b></td>
+                    <MetricCells row={doc.total} t={t} />
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+      {doc?.archived_after_hours !== undefined ? <p className="dah-note">{t('metrics.note', { n: doc.archived_after_hours })}</p> : null}
+    </div>
   )
 }
 
@@ -1111,6 +1315,10 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }: {
               <div><dt>{t('detail.meta.context')}</dt><dd><Chips items={task.context_keys} empty={t('value.none')} /></dd></div>
             </dl>
 
+            {answerable(task) ? <AnswerBox key={`${task.task_id}#${String(task.answers_count ?? 0)}`} task={task} t={t} onDone={() => { onChanged?.() }} /> : null}
+
+            <LifecycleView taskId={task.task_id} tick={detail.at} t={t} now={now} />
+
             {task.message !== undefined && task.message !== ''
               ? (
                 <div className="dah-block">
@@ -1140,7 +1348,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }: {
                 ? <div className="dah-muted">{t('detail.result.none')}</div>
                 : (
                   <div className="dah-result">
-                    <div><span className="dah-badge" data-tone={result.status === 'completed' ? 'completed' : 'failed'}>{result.status}</span></div>
+                    <div><span className="dah-badge" data-tone={result.status === 'completed' ? 'completed' : result.status === 'partial' ? 'waiting' : 'failed'}>{result.status}</span></div>
                     {result.summary !== undefined && result.summary !== '' ? <pre className="dah-pre">{result.summary}</pre> : null}
                     {result.error !== undefined
                       ? (
@@ -1193,6 +1401,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }: {
                           <span>
                             {flag === undefined ? null : <span className="dah-history-flag">{t(PRESENCE_KEY[flag])}</span>}
                             {historyText(event, t)}
+                            {present(event.by) && event.by !== 'hub' ? <span className="dah-sub-line dah-id">{t('life.by', { by: event.by })}</span> : null}
                           </span>
                         </li>
                       )
@@ -1357,7 +1566,7 @@ export function AgentHubPage({ t, embedded = false, onOverview }: AgentHubPagePr
   )
 
   if (embedded) {
-    const isOpen = (part: Part): boolean => folds[part] ?? (part === 'ended' ? false : part !== 'requests' || pendingRequests > 0 || requestStatus !== 'pending')
+    const isOpen = (part: Part): boolean => folds[part] ?? (part === 'ended' || part === 'metrics' ? false : part !== 'requests' || pendingRequests > 0 || requestStatus !== 'pending')
     const flip = (part: Part): void => {
       const next = !isOpen(part)
       setFolds(previous => ({ ...previous, [part]: next }))
@@ -1477,6 +1686,9 @@ export function AgentHubPage({ t, embedded = false, onOverview }: AgentHubPagePr
                     </EmbeddedFold>
                   )
                   : null}
+                <EmbeddedFold part="metrics" title={t('metrics.title')} count="" open={isOpen('metrics')} onToggle={() => { flip('metrics') }}>
+                  <MetricsView tick={board.loadedAt} t={t} />
+                </EmbeddedFold>
                 <p className="dah-foot">{t('desk.hint')}</p>
               </>
             )}
@@ -1615,6 +1827,13 @@ export function AgentHubPage({ t, embedded = false, onOverview }: AgentHubPagePr
               </div>
             )
             : null}
+        </section>
+
+        <section className="dah-section" aria-label={t('metrics.title')}>
+          <div className="dah-section-head">
+            <h2 className="dah-section-title">{t('metrics.title')}</h2>
+          </div>
+          <MetricsView tick={board.loadedAt} t={t} />
         </section>
 
         <p className="dah-foot">{t('readonly.hint')}</p>

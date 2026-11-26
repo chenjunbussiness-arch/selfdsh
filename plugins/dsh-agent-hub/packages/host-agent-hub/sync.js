@@ -166,7 +166,7 @@ export function noticeOf(event) {
     case 'leased': return `${title} 已被领取`
     case 'progress': {
       if (event.stage === 'blocked') return `${title} 卡住了${msg}`
-      if (event.stage === 'needs_input') return `${title} 需要回答${msg}`
+      if (event.stage === 'needs_input') return `${title} 需要回答${msg}（回答：task_answer ${event.task_id}）`
       if (event.stage === 'started') return `${title} 开始做了${msg}`
       // An older client re-sends "working" to keep its lease: that is not news.
       if (!event.message || /^working$/i.test(String(event.message).trim())) return undefined
@@ -178,15 +178,34 @@ export function noticeOf(event) {
     case 'failed': return event.stage === 'needs_input' ? `${title} 需要回答${msg}` : `${title} 失败${msg}`
     case 'cancelled': return `${title} 已取消`
     case 'needs_input': return `${title} 需要回答${msg}`
-    case 'requeued': return `${title} 退回队列${msg}`
+    // Handed back with a question: it waits on the user; the answer goes back to the same worker.
+    case 'waiting_input': return `${title} 需要回答${msg}（回答：task_answer ${event.task_id}）`
+    case 'answered': return `${title} 已把回答交回 worker`
+    // Past its due time (hub.json due / due_minutes): the user decides, unless the hub already reassigned it.
+    case 'overdue': {
+      const m = /(\d+) min since it was published, due after (\d+) min/.exec(String(event.message ?? ''))
+      const late = m ? `（已 ${m[1]} 分钟，期限 ${m[2]} 分钟）` : msg
+      return /taken from/.test(String(event.message))
+        ? `${title} 超时${late}，已从原来的 worker 收回改派给别人`
+        : `${title} 超时${late}，需要你决定：继续等、改派（task_retry 或 task_dispatch 带 replaces）还是取消（task_cancel）`
+    }
+    // The hub took it back from its worker because it ran past its due time (on_overdue: reassign).
+    case 'requeued': return /^overdue/.test(String(event.message ?? ''))
+      ? `${title} 超时，已从原来的 worker 收回，重新排队给别的 worker`
+      : `${title} 退回队列${msg}`
     // Nobody took it: it is back with the DSH that published it (this one).
     case 'fallback_due': return `${title} 没人接（${/no worker/.test(String(event.message)) ? '能接的 worker 都不在线' : '能接的 worker 都忙'}），需要你决定：自己做（fallback_take）、改派（task_dispatch 带 replaces）还是取消`
     default: return undefined
   }
 }
 
+/** A line that waits on the user (a question, or a decision): later news in the same read must not hide it. */
+const ASKS = /需要你决定|需要回答/
+/** Events that settle such a line: once one of them follows, the question or decision is gone. */
+const SETTLES = new Set(['answered', 'completed', 'failed', 'cancelled', 'waiting_input', 'needs_input'])
+
 /** Kinds that end a run: the publisher gets the whole result once per (task, attempt). */
-const FINAL_KINDS = new Set(['completed', 'failed', 'needs_input'])
+const FINAL_KINDS = new Set(['completed', 'failed', 'needs_input', 'waiting_input'])
 
 /** Text flattened to one line (a 作战室 notice is one line per item), at most `max` characters. */
 function flat(text, max) {
@@ -209,7 +228,11 @@ export function resultLineOf(task, event = {}) {
   const tail = `（${attempt > 1 ? `第 ${attempt} 次；` : ''}全文：task_get ${task.task_id}）`
   const files = (r.outputs ?? []).map(o => o?.name).filter(Boolean)
   const out = files.length > 0 ? `；产出 ${files.slice(0, 5).join('、')}${files.length > 5 ? ` 等 ${files.length} 个` : ''}` : ''
-  if (r.needs_input !== undefined && r.needs_input !== null) return `${title} 需要回答：${flat(r.needs_input, 600)}${tail}`
+  if (r.needs_input !== undefined && r.needs_input !== null) {
+    // A hub with the answer loop keeps the task open (waiting_input): answer it, do not re-dispatch.
+    const how = task.status === 'waiting_input' ? `（回答：task_answer ${task.task_id}；全文：task_get ${task.task_id}）` : tail
+    return `${title} 需要回答：${flat(r.needs_input, 600)}${how}`
+  }
   // A summary that ends a sentence (。) and then "；产出" reads twice-stopped; drop the full stop.
   const said = text => (out === '' ? text : text.replace(/[。．.]$/, ''))
   if (task.status === 'completed') return `${title} 完成：${said(flat(r.summary, 800)) || '（没写总结）'}${out}${tail}`
@@ -421,6 +444,7 @@ export function createSync(deps) {
     // One line per task per read: its latest news. A line the 作战室 already got for
     // that task (the same words) is not sent again, also across a restart.
     const latest = new Map()
+    const asks = new Map() // task id -> a question / decision line still open after later news
     const finals = new Map() // task id -> the event that ended its run
     for (const event of out.events ?? []) {
       if (isOwnMirror(event, client.config?.controllerId, profile)) continue // our own mirror
@@ -432,6 +456,8 @@ export function createSync(deps) {
       const line = noticeOf(event)
       if (line === undefined) continue
       if (event.kind === 'progress' && (event.stage === 'step' || event.stage === undefined)) lastStep.set(`stream:${event.task_id}`, now())
+      if (SETTLES.has(event.kind)) asks.delete(event.task_id)
+      if (ASKS.test(line)) asks.set(event.task_id, line)
       latest.delete(event.task_id) // keep the map in event order
       latest.set(event.task_id, line)
       if (FINAL_KINDS.has(event.kind)) finals.set(event.task_id, event)
@@ -440,7 +466,8 @@ export function createSync(deps) {
     // The end of a run goes out whole (summary / question / reason, files), once per
     // task and attempt, so the 作战室 never has to go and look, and never hears it twice.
     for (const [taskId, event] of finals) {
-      const key = `${taskId}#${event.attempt ?? 0}`
+      // A question handed back does not count an attempt, so each one is its own event.
+      const key = event.kind === 'waiting_input' ? `${taskId}#q${event.seq ?? 0}` : `${taskId}#${event.attempt ?? 0}`
       if (state.delivered[key] !== undefined) { latest.delete(taskId); continue }
       try {
         const task = await client.getTask(taskId)
@@ -456,10 +483,20 @@ export function createSync(deps) {
       for (const key of keys.slice(0, keys.length - SAID_MAX)) delete state.delivered[key]
     }
     const lines = []
+    const shown = []
     for (const [taskId, line] of latest) {
+      // A question or decision that later news in this read would have hidden goes first
+      // (unless the run's end line already carries it).
+      const ask = asks.get(taskId)
+      if (ask !== undefined && ask !== line && !finals.has(taskId) && state.said[`${taskId}#ask`]?.line !== ask) {
+        state.said[`${taskId}#ask`] = { line: ask, at: new Date(now()).toISOString() }
+        lines.push(ask)
+        shown.push(taskId)
+      }
       if (state.said[taskId]?.line === line) continue
       state.said[taskId] = { line, at: new Date(now()).toISOString() }
       lines.push(line)
+      if ((finals.has(taskId) || ASKS.test(line)) && !shown.includes(taskId)) shown.push(taskId)
     }
     const ids = Object.keys(state.said)
     if (ids.length > SAID_MAX) {
@@ -472,6 +509,11 @@ export function createSync(deps) {
     for (const line of lines) {
       if (router !== undefined && typeof router.notice === 'function') router.notice(line)
       else logger.info(`agent-hub: ${line}`)
+    }
+    // Tell the hub the result / question reached this 作战室 (the timeline's `delivered`).
+    // Best effort: an older hub has no such route, and a miss never holds the stream up.
+    if (shown.length > 0 && typeof client.delivered === 'function' && router !== undefined && typeof router.notice === 'function') {
+      try { await client.delivered(shown.slice(0, 100), profile) } catch (error) { if (!isOffline(error) && error?.status !== 404) logger.warn(`agent-hub sync: delivered: ${error?.code ?? 'error'}: ${error?.message ?? error}`) }
     }
     return { lines }
   }

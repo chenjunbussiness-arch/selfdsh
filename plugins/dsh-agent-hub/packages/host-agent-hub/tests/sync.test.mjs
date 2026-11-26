@@ -44,6 +44,7 @@ function fakeClient() {
       if (c.tasks[id] === undefined) throw new HubError(404, 'task-not-found', 'no', { fromHub: true })
       return c.tasks[id]
     },
+    async delivered(ids, profile) { if (c.down) throw offline(); calls.push(['delivered', ids, profile]); return { ok: true, marked: ids } },
     of(kind) { return calls.filter(x => x[0] === kind) },
   }
   return c
@@ -393,4 +394,63 @@ test('mirror: a row the board lost while open is closed on the hub after 10 minu
   await s.sync.mirrorOnce()
   await s.sync.mirrorOnce()
   assert.deepEqual(s.client.of('cancel'), [['cancel', 'local_web_a']])
+})
+
+test('stream: a question handed back (waiting_input) asks for task_answer, each question once; shown results are marked delivered', async (t) => {
+  const s = await setup(t)
+  s.client.feed = { events: [], next: 1, latest: 1, reset: false }
+  await s.sync.streamOnce(0)
+  s.client.tasks.q1 = { task_id: 'q1', title: '建表', agent: 'pool:code', status: 'waiting_input', attempts: 0, result: { status: 'partial', needs_input: 'Postgres 还是 SQLite？', agent: 'quick' } }
+  s.client.feed = { next: 2, latest: 2, reset: false, events: [mail({ seq: 2, kind: 'waiting_input', stage: 'needs_input', task_id: 'q1', title: '建表', message: 'Postgres 还是 SQLite？', attempt: 0 })] }
+  await s.sync.streamOnce(0)
+  assert.deepEqual(s.notices, ['「建表」（quick） 需要回答：Postgres 还是 SQLite？（回答：task_answer q1；全文：task_get q1）'])
+  assert.deepEqual(s.client.of('delivered'), [['delivered', ['q1'], 'web']])
+  // Answered, back to the worker, and it asks again (same attempt count): a new question, told again.
+  s.client.tasks.q1 = { ...s.client.tasks.q1, result: { status: 'partial', needs_input: '表名用什么？', agent: 'quick' } }
+  s.client.feed = { next: 4, latest: 4, reset: false, events: [
+    mail({ seq: 3, kind: 'answered', task_id: 'q1', title: '建表', message: 'SQLite' }),
+    mail({ seq: 4, kind: 'waiting_input', stage: 'needs_input', task_id: 'q1', title: '建表', message: '表名用什么？', attempt: 0 }),
+  ] }
+  await s.sync.streamOnce(0)
+  assert.equal(s.notices.length, 2)
+  assert.match(s.notices[1], /表名用什么？（回答：task_answer q1/)
+})
+
+test('stream: overdue asks the user to decide; a reassigned one just says so; an older hub without delivered is fine', async (t) => {
+  const s = await setup(t)
+  s.client.delivered = async () => { throw new HubError(404, 'not-found', 'no route', { fromHub: true }) }
+  s.client.feed = { events: [], next: 1, latest: 1, reset: false }
+  await s.sync.streamOnce(0)
+  s.client.feed = { next: 3, latest: 3, reset: false, events: [
+    mail({ seq: 2, kind: 'overdue', task_id: 'o1', title: '部署', message: '95 min since it was published, due after 90 min; running' }),
+    mail({ seq: 3, kind: 'overdue', task_id: 'o2', title: '抓取', agent: 'quick', message: '40 min since it was published, due after 30 min; taken from quick for another worker' }),
+  ] }
+  await s.sync.streamOnce(0)
+  assert.match(s.notices[0], /^「部署」 超时（已 95 分钟，期限 90 分钟），需要你决定：继续等、改派/)
+  assert.match(s.notices[1], /^「抓取」（quick） 超时（已 40 分钟，期限 30 分钟），已从原来的 worker 收回改派给别人/)
+  assert.deepEqual(s.logger.lines.filter(l => l.startsWith('warn')), [])
+})
+
+test('stream: a decision line is not hidden by later news in the same read; an answer settles a question', async (t) => {
+  const s = await setup(t)
+  s.client.feed = { events: [], next: 1, latest: 1, reset: false }
+  await s.sync.streamOnce(0)
+  s.client.feed = { next: 7, latest: 7, reset: false, events: [
+    // overdue (decide), then an ordinary progress line in the same read: both reach the 作战室, the decision first
+    mail({ seq: 2, kind: 'overdue', task_id: 'o1', title: '部署', message: '95 min since it was published, due after 90 min; running' }),
+    mail({ seq: 3, kind: 'progress', stage: 'started', task_id: 'o1', title: '部署', message: '还在跑' }),
+    // reassigned on overdue: the requeue says why
+    mail({ seq: 4, kind: 'overdue', task_id: 'o2', title: '抓取', message: '40 min since it was published, due after 30 min; taken from quick for another worker' }),
+    mail({ seq: 5, kind: 'requeued', task_id: 'o2', title: '抓取', message: 'overdue: reassigned from quick' }),
+    // asked while working, answered in the same read: nothing waits on the user any more
+    mail({ seq: 6, kind: 'progress', stage: 'needs_input', task_id: 'q1', title: '迁移', message: '旧表要不要保留？' }),
+    mail({ seq: 7, kind: 'answered', task_id: 'q1', title: '迁移', message: '保留' }),
+  ] }
+  await s.sync.streamOnce(0)
+  assert.equal(s.notices.length, 4)
+  assert.match(s.notices[0], /^「部署」 超时（已 95 分钟.*需要你决定/)
+  assert.match(s.notices[1], /^「部署」 开始做了：还在跑/)
+  assert.match(s.notices[2], /^「抓取」 超时，已从原来的 worker 收回，重新排队/)
+  assert.equal(s.notices[3], '「迁移」 已把回答交回 worker')
+  assert.deepEqual(s.client.of('delivered'), [['delivered', ['o1'], 'web']])
 })

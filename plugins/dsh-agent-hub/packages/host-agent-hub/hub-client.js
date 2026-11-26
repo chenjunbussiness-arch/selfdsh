@@ -659,6 +659,14 @@ export function createHubClient(options = {}) {
     registerLocal: async task => asObject(await ctlPost('dispatch', { ...task, run_here: true }), 'task'),
     /** Hide a failed task from the default list at once. */
     acknowledge: async taskId => asObject(await ctlPost('ack', { task_id: taskId }), 'task'),
+    /** Answer the question a worker put on a task this DSH published (it goes back to that worker). */
+    answer: async ({ task_id, answer, profile }) => asObject(await ctlPost('answer', { task_id, answer, profile }), 'task'),
+    /** Note that these tasks' results / questions were put in front of the 作战室 (once per phase). */
+    delivered: async (taskIds, profile) => asObject(await ctlPost('delivered', { task_ids: taskIds, profile })),
+    /** `GET /v1/ctl/timeline?task_id=` → `{ task, phase, events, durations, answers, archived, truncated }`. */
+    timeline: async taskId => asObject(await ctlGet('timeline', { task_id: taskId })),
+    /** `GET /v1/ctl/metrics?hours=` → `{ total, workers, since, until, hours }`. */
+    metrics: async hours => asObject(await ctlGet('metrics', { hours })),
     /**
      * `GET /v1/ctl/events?after=&wait=` → `{ events, next, latest, reset }` (long poll up to `wait` s).
      * `reset` means the cursor fell out of the hub's window: start again from `latest`.

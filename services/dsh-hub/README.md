@@ -83,6 +83,7 @@ curl -s https://127.0.0.1:7891/v1/health            # {"ok":true,"version":"2.0.
 | `fallback` | 对象 `{enabled, noFallbackCapabilities}` | `{"enabled": true, "noFallbackCapabilities": ["quick"]}` | DSH 兜底（见第 6.2 节）。`enabled: false` 关掉兜底；`noFallbackCapabilities` 里的能力永远不兜底（例如只有 Quick 能做的活） | `{"enabled": true, "noFallbackCapabilities": ["quick", "gpu"]}` |
 | `sticky` | 对象 `{holdSeconds, ttlSeconds}` | `{"holdSeconds": 120, "ttlSeconds": 86400}` | 粘性路由（见第 6.3 节）。`holdSeconds`（0..3600）：别的 worker 让给首选 worker 多久，0 = 只排序不让；`ttlSeconds`（60..2592000）：记住「谁做过」多久 | `{"holdSeconds": 60}` |
 | `mcp` | 对象 `{enabled}` | `{"enabled": true}` | 是否开放 `/mcp` 和 `/oauth/token`（见第 5.4 节）。只用 REST 的部署可以关掉 | `{"enabled": false}` |
+| `due` | 对象 `{minutes, onOverdue}` | `{"minutes": {}, "onOverdue": "notify"}`（不计时） | 超时规则（见 docs/DSH-HUB-PROTOCOL-v2.md 第 12 节）。`minutes` 的键是 `default`、某个 `capability`、某个 `type` 或 `local`（DSH 本地分区 worker 的任务），值 1..43200 分钟，从创建算起、不含等人回答的时间；`onOverdue` 是 `notify`（只提醒发布方）或 `reassign`（从当前 worker 收回重排）。派任务时的 `due_minutes` / `on_overdue` 优先 | `{"minutes": {"default": 120, "code": 60}, "onOverdue": "notify"}` |
 
 其他请求体上限是固定的：`enroll`、`enroll/status`、`heartbeat` 16 KiB；`event` 和其他控制方 POST（cancel、retry、approve、reject、revoke、provision）64 KiB。
 
@@ -164,6 +165,10 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 | `POST /v1/ctl/fallback/result?id=` | 和 `/v1/result` 相同的结构 | `{ok, task_status}` |
 | `GET /v1/ctl/fallback/input?id=&task_id=&name=[&from_task=]` | 读兜底任务的输入或上游产出 | 文件字节 |
 | `GET /v1/ctl/overview?id=` | | `{protocol, agents, agent_counts{pending,online,offline,left,revoked}, task_counts, pending_requests}` |
+| `POST /v1/ctl/answer?id=` | `{task_id, answer, profile?}`，回答 worker 的提问（任务在 `waiting_input`，或进度停在 `needs_input`）；只限发布方，否则 403 `not-creator`；没有待答的问题 409 `no-question`；DSH 本地分区 worker 的任务 409 `local-task`（在它的作战室里答） | 任务对象；交回去问的任务回到队列，优先给原提问的 worker |
+| `POST /v1/ctl/delivered?id=` | `{task_ids[], profile?}`，发布方的作战室已经显示了这些结果 / 问题 | `{ok, marked}` |
+| `GET /v1/ctl/timeline?id=&task_id=` | 当前和已归档的任务都能查 | `{generated_at, task, archived, truncated, phase, durations{queue_ms, claim_ms, run_ms, waiting_ms, total_ms}, events[{at, event, phase, by, stage?, message?, elapsed_ms, gap_ms}], answers[]}` |
+| `GET /v1/ctl/metrics?id=&hours=` | `hours` 1..2160，默认 168；含已归档的任务 | `{generated_at, since, until, hours, archived_after_hours, total, workers[{worker, tasks, open, completed, failed, cancelled, fail_rate, asked_human, ask_rate, fallback, overdue, retried, queue_ms_p50/p90, run_ms_p50/p90, total_ms_p50/p90}]}` |
 | `GET /v1/health` | 无令牌（但受 IP 白名单限制） | `{ok:true, version:"2.0.0", client_ip}`；`client_ip` 按 trustProxy 规则取（默认 socket 地址） |
 
 列表和详情接口的外层结构（`generated_at`、`filter`）沿用 v1 面板接口 `/api/agent-hub/admin/*` 的格式，插件可以原样转发给面板。
@@ -177,6 +182,7 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 | `POST /v1/dispatch?id=` | 和 `/v1/ctl/dispatch` 相同；`created_by` 记为 `agent:<id>` | 任务对象 |
 | `GET /v1/dispatched?id=&status=&agent=&workspace=&limit=` | 只列自己派的任务 | `{generated_at, tasks}` |
 | `POST /v1/cancel?id=` | `{task_id, reason?}`；不是自己派的返回 403 `not-creator` | 任务对象 |
+| `POST /v1/answer?id=` | `{task_id, answer}`，回答自己派的任务上的提问 | 任务对象 |
 
 不是 dispatcher 的 agent 调用这三个接口返回 403 `not-dispatcher`。
 
@@ -285,6 +291,7 @@ node --test tests/*.test.mjs
 | `tests/hub-v2.test.mjs` | 控制方注册表、CLI 改动立即生效、mutation 内复查吊销、node 和 workspaces、只能收窄、心跳截断、四个路由条件、409 unroutable、创建者隔离、v1 state 升级、长轮询（被 dispatch、retry、重新排队、心跳、上游完成唤醒；超时；断开；交还；上限；close；等待期间被吊销） |
 | `tests/http.test.mjs` | IP 和 CIDR、`::ffff:` 地址、X-Forwarded-For、URL 和 query 解析、路由表、监听地址检查；handler：health、id 与令牌不一致 401、worker 令牌调 `/ctl` 403、白名单、trustProxy、enroll、body 上限 413、415、400、完整流程、控制方隔离、管理接口、HTTP 长轮询及断开、500 不泄露细节；`e2e:` 开头的用例会启动真实的 node:http 服务 |
 | `tests/config.test.mjs` | hub.json 默认值（端口 7891、offlineAfterMs 90000）和校验、`DSH_HUB_PORT`、没有 TLS 时拒绝非回环地址、TLS 路径、私钥权限检查、CLI |
+| `tests/lifecycle.test.mjs` | 阶段和时间线（含旧历史推断）、提问 → `waiting_input` → 回答回到原 worker（领任务时带 `answers`）、边做边问时回答在进度 / 心跳回复里只交一次、收起等人回答的任务即取消、送达标记、审计文件、归档后查时间线、指标（失败率、问人比例、兜底、p50 / p90）、超时提醒和改派、`due` 配置校验 |
 | `tests/presence.test.mjs` | 状态 pending→offline→online→offline→left→online→revoked、`agent_counts`、`client_version` 校验、心跳 `running` 对账（`abort`、`worker-lost` 重排、30 秒宽限、不带 running 不对账）、leave 立即重排并唤醒别的 worker、offline 持有者被 sweep 重排（进度事件算在线）、dispatch 404/409/`warnings`/`require_online`（具体 agent 和 pool）、`me()`、HTTP `/v1/me`、`/v1/leave`、health 的 `client_ip`（含 trustProxy）、白名单 403 只回调用方自己的 `client_ip` |
 
 开发机（Windows，不能运行 node）上的验证方式：把 `lib/*` 和测试改写成 CommonJS 后，在云端 JS 沙箱里执行。沙箱没有 `node:http`，所以除了唯一的 `e2e:` 用例，其余 112 个用例全部通过（含 `presence.test.mjs` 的 13 个）。另外做过变异测试，每一处都至少有一个用例失败：早先的 8 处（去掉"当前上报"条件、去掉创建者检查、去掉 id 与令牌一致的检查、去掉角色检查、X-Forwarded-For 取最左边一段、dispatch 不唤醒、心跳不截断、dispatch 内不复查控制方），以及这次的 6 处（去掉心跳对账、去掉 30 秒宽限、去掉 offline 重排、忽略 `require_online`、403 不带 `client_ip`、进度事件不算在线）。**在真实 Node 22 上执行 `node --test` 和 e2e 用例，需要在服务器上进行。**

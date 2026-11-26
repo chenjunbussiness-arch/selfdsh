@@ -121,10 +121,10 @@ export function apply(ctx, config = {}) {
         ctx.logger.warn('agent-hub: webServer exposes no register(); panel routes are not mounted')
         return
       }
-      const { adminRoutes } = createRoutes({ client, logger: ctx.logger })
+      const { adminRoutes } = createRoutes({ client, logger: ctx.logger, profile: profileName(ctx, config) })
       const connection = () => (typeof ctx.get === 'function' ? ctx.get('connection') : undefined)
       for (const route of adminRoutes) webCtx.effect(() => webServer.register(requireLogin(route, connection)), `agent-hub: ${route.path}`)
-      ctx.logger.info(`agent-hub: mounted ${ADMIN_BASE}/* (login, read-only, forwarded to the hub)`)
+      ctx.logger.info(`agent-hub: mounted ${ADMIN_BASE}/* (login, forwarded to the hub)`)
     })
   }
   const route = client.route()

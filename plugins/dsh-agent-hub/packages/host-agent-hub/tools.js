@@ -69,7 +69,7 @@ async function dispatchRoleRefusal(client, task) {
 
 export const TOOL_NAMES = [
   'agent_provision', 'agent_revoke', 'agent_list', 'agent_requests', 'agent_approve', 'agent_reject',
-  'task_dispatch', 'task_list', 'task_session', 'task_ack', 'task_get', 'task_cancel', 'task_retry',
+  'task_dispatch', 'task_list', 'task_session', 'task_ack', 'task_answer', 'task_timeline', 'task_metrics', 'task_get', 'task_cancel', 'task_retry',
   'fallback_list', 'fallback_take', 'fallback_submit',
 ]
 
@@ -214,6 +214,8 @@ export function createTools({ client, profile }) {
         sticky_key: { type: 'string', description: 'Same key (session, browser login, test suite) goes back to the worker that handled it last.' },
         sticky: { type: 'boolean', description: 'false: no preference for the last worker.' },
         needs: { type: 'array', items: { type: 'string', enum: [...NEEDS] }, description: 'What the task needs: code (edit), test, git (commit/push/PR), cmd (other commands). A coder takes only ["code"]; the instruction text is checked too.' },
+        due_minutes: { type: 'integer', minimum: 1, maximum: 43200, description: 'Overdue after this many minutes (default: hub.json due). Overdue comes back to you as a question for the user.' },
+        on_overdue: { type: 'string', enum: ['notify', 'reassign'], description: 'reassign: when overdue, take it from its worker for another one.' },
         replaces: { type: 'string', description: 'Task id this one replaces (one that asked a question or failed, now re-sent with the answer): it is put away once this one is queued.' },
       },
     },
@@ -281,6 +283,40 @@ export function createTools({ client, profile }) {
     description: 'Put a finished task away now (it leaves 等你回复 / the default list): a failure you have reported, or a question you have dealt with. A running one: task_cancel.',
     parameters: { required: ['task_id'], properties: { task_id: str } },
     execute: raw => client.acknowledge(raw.task_id),
+  })
+
+  define({
+    name: 'task_answer',
+    description: 'Give the user\'s answer to a worker\'s question (a task in 等你回复 / waiting_input, or one that asked while working). '
+      + 'It goes back to the worker that asked, with the answer; do not re-dispatch it. Pass the user\'s words as they said them.',
+    parameters: { required: ['task_id', 'answer'], properties: { task_id: str, answer: str } },
+    async execute(raw) {
+      try {
+        return await client.answer({ task_id: raw.task_id, answer: raw.answer, profile })
+      } catch (error) {
+        // An older hub has no answer route: the old way still works.
+        if (error?.status === 404 && error?.code === 'not-found') {
+          throw new HubError(404, 'not-found', 'this hub cannot take answers yet: task_dispatch it again with the answer in the instruction and replaces = this task_id')
+        }
+        throw error
+      }
+    },
+  })
+
+  define({
+    name: 'task_timeline',
+    description: 'The whole life of one task, archived ones too: each step with who did it and when, its phase (queued, claimed, running, waiting_input, blocked, completed, failed, cancelled), time spent per phase, and the questions and answers.',
+    parameters: { required: ['task_id'], properties: { task_id: str } },
+    isConcurrencySafe: () => true,
+    execute: raw => client.timeline(raw.task_id),
+  })
+
+  define({
+    name: 'task_metrics',
+    description: 'Numbers per worker over the last hours (default 168): tasks, completed / failed / open, failure rate, how often it asked the user, DSH fallbacks, overdue, retries, p50 / p90 of queue, run and total time (ms).',
+    parameters: { properties: { hours: { type: 'integer', minimum: 1, maximum: 2160 } } },
+    isConcurrencySafe: () => true,
+    execute: raw => client.metrics(raw.hours),
   })
 
   define({
