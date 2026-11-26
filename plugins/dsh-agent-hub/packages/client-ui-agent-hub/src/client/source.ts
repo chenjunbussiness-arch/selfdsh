@@ -8,7 +8,7 @@
  * model tools).
  */
 
-import type { AgentsDoc, Overview, RequestsDoc, SessionDoc, TaskDoc, TaskFilter, TaskRow, TasksDoc } from './contract.ts'
+import type { AgentsDoc, MetricsDoc, Overview, RequestsDoc, SessionDoc, TaskDoc, TaskFilter, TaskRow, TasksDoc, TimelineDoc } from './contract.ts'
 
 /** Where the host bridge lives. Mirrors `BRIDGE_BASE` in host-agent-hub/bridge.js. */
 export const ADMIN_BASE = '/api/agent-hub/admin'
@@ -119,6 +119,26 @@ export async function ackTask(taskId: string): Promise<TaskRow> {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ task_id: taskId }),
+  })
+  return body.task
+}
+
+/** The whole life of one task: steps with who and when, time per phase, questions and answers. */
+export function fetchTimeline(taskId: string): Promise<TimelineDoc> {
+  return getJson<TimelineDoc>('timeline', { task_id: taskId })
+}
+
+/** Numbers per worker over the last `hours`. */
+export function fetchMetrics(hours: number): Promise<MetricsDoc> {
+  return getJson<MetricsDoc>('metrics', { hours })
+}
+
+/** Answer a worker's question; the task goes back to that worker with the answer. */
+export async function answerTask(taskId: string, answer: string): Promise<TaskRow> {
+  const body = await send<{ task: TaskRow }>(`${ADMIN_BASE}/answer`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ task_id: taskId, answer }),
   })
   return body.task
 }

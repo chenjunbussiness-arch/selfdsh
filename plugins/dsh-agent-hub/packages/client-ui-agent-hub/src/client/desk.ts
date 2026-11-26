@@ -21,7 +21,8 @@ export const LANES: readonly Lane[] = ['queued', 'claimed', 'running', 'waiting'
 export const SELF_PREFIX = 'dsh-self'
 
 /** The lane a task belongs in. A task that asks for an answer waits on you whatever its status. */
-export function laneOf(task: Pick<TaskRow, 'status' | 'stage' | 'result'> & Partial<Pick<TaskRow, 'acknowledged' | 'in_history'>>): Lane {
+export function laneOf(task: Pick<TaskRow, 'status' | 'stage'> & { readonly result?: { readonly status: string; readonly needs_input?: string | undefined } | undefined } & Partial<Pick<TaskRow, 'acknowledged' | 'in_history'>>): Lane {
+  if (task.status === 'waiting_input') return 'waiting'
   const finished = isFinished(task)
   const asks = task.stage === 'needs_input' || (task.result?.needs_input !== undefined && task.result.needs_input !== '')
   // A question someone already dealt with (put away, or past its expiry) no longer waits on anybody.
@@ -179,4 +180,26 @@ export function registeredBy(event: Pick<HistoryEvent, 'event' | 'message'>): { 
 export function stageOf(task: Pick<TaskRow, 'stage' | 'status'>): TaskStage | undefined {
   if (task.status === 'completed' || task.status === 'cancelled') return undefined
   return task.stage
+}
+
+/** A task the user can answer from the desk: a cloud task with a question open (local ones answer in their 作战室). */
+export function answerable(task: Pick<TaskRow, 'status' | 'stage' | 'origin'> & Partial<Pick<TaskRow, 'question' | 'phase'>>): boolean {
+  if (task.origin?.kind === 'local') return false
+  if (task.status === 'waiting_input') return true
+  return task.question !== undefined && (task.status === 'accepted' || task.status === 'running')
+}
+
+/** ms -> a short duration: 45 秒, 12 分, 3.5 小时, 2.1 天 (the number and its unit key). */
+export function durationParts(ms: number | undefined): { value: string; unit: 's' | 'm' | 'h' | 'd' } | undefined {
+  if (ms === undefined || !Number.isFinite(ms) || ms < 0) return undefined
+  const s = ms / 1000
+  if (s < 60) return { value: String(Math.round(s)), unit: 's' }
+  if (s < 3600) return { value: String(Math.round(s / 60)), unit: 'm' }
+  if (s < 86400) return { value: (s / 3600).toFixed(s < 36000 ? 1 : 0), unit: 'h' }
+  return { value: (s / 86400).toFixed(1), unit: 'd' }
+}
+
+/** A rate (0..1) as a whole percentage, or undefined. */
+export function percentOf(rate: number | undefined): string | undefined {
+  return rate === undefined || !Number.isFinite(rate) ? undefined : `${Math.round(rate * 100)}%`
 }

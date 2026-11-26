@@ -7,10 +7,10 @@ import { CONTROLLER, HUB_URL, TOKEN, assertNoToken, b64, makeClient } from './he
 
 const NAMES = [
   'agent_provision', 'agent_revoke', 'agent_list', 'agent_requests', 'agent_approve', 'agent_reject',
-  'task_dispatch', 'task_list', 'task_session', 'task_ack', 'task_get', 'task_cancel', 'task_retry',
+  'task_dispatch', 'task_list', 'task_session', 'task_ack', 'task_answer', 'task_timeline', 'task_metrics', 'task_get', 'task_cancel', 'task_retry',
   'fallback_list', 'fallback_take', 'fallback_submit',
 ]
-const READ_ONLY = new Set(['agent_list', 'agent_requests', 'task_list', 'task_get', 'task_session', 'fallback_list'])
+const READ_ONLY = new Set(['agent_list', 'agent_requests', 'task_list', 'task_get', 'task_session', 'task_timeline', 'task_metrics', 'fallback_list'])
 
 function setup(handler = () => ({ body: {} }), options = {}) {
   const base = makeClient(handler, options)
@@ -38,10 +38,10 @@ async function rejectsWith(run, status, code) {
   return caught
 }
 
-test('createTools returns the 16 DSH control tools with unchanged names', () => {
+test('createTools returns the 19 DSH control tools with unchanged names', () => {
   const { tools } = setup()
   assert.deepEqual(TOOL_NAMES, NAMES)
-  assert.equal(tools.length, 16)
+  assert.equal(tools.length, 19)
   assert.deepEqual(tools.map(tool => tool.name), NAMES)
 })
 
@@ -145,6 +145,12 @@ test('each tool is one /v1/ctl call with the right method, query and body', asyn
   assert.equal(provisioned.token, 'dsha_claude-cloud_W0rkerTok', 'the worker token is shown once, by design')
   assert.equal(provisioned.endpoint, `${HUB_URL}/v1`, 'workers connect straight to the hub')
   assert.match(provisioned.note, /not shown again/)
+  await call('task_answer', { task_id: 't1', answer: 'SQLite' })
+  assert.deepEqual([last().method, last().path, last().json], ['POST', '/v1/ctl/answer', { task_id: 't1', answer: 'SQLite' }])
+  await call('task_timeline', { task_id: 't1' })
+  assert.deepEqual([last().method, last().path, q()], ['GET', '/v1/ctl/timeline', { id: CONTROLLER, task_id: 't1' }])
+  await call('task_metrics', { hours: 24 })
+  assert.deepEqual([last().method, last().path, q()], ['GET', '/v1/ctl/metrics', { id: CONTROLLER, hours: '24' }])
   for (const c of calls) assert.equal(c.headers['X-DSH-Token'], TOKEN)
 })
 

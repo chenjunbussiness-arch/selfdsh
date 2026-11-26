@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { LANES, agentGroups, clearActionOf, fallbackReason, fallbackTasks, laneOf, lanesOf, registeredBy, selfParts, selfWorkers, stageOf, timeline } from '../src/client/desk.ts'
+import { LANES, agentGroups, answerable, durationParts, percentOf, clearActionOf, fallbackReason, fallbackTasks, laneOf, lanesOf, registeredBy, selfParts, selfWorkers, stageOf, timeline } from '../src/client/desk.ts'
 
 const task = (over = {}) => ({ task_id: 't', agent: 'pool:code', type: 'code', title: 'x', status: 'running', priority: 'normal', attempts: 1, created_at: '2026-11-24T10:00:00.000Z', depends_on: [], ...over })
 const agent = (over = {}) => ({ agent_id: 'a', capabilities: [], revoked: false, online: true, running_tasks: [], ...over })
@@ -95,4 +95,26 @@ test('等你回复: a handed-back question waits until someone deals with it, an
   assert.equal(clearActionOf(open), 'cancel')
   // A plain failure is not a question.
   assert.equal(laneOf(task({ status: 'failed', result: { status: 'failed', output_count: 0 } })), 'ended')
+})
+
+test('waiting_input: in the 等你回复 lane and answerable here; local tasks and ended tasks are not', () => {
+  assert.equal(laneOf(task({ status: 'waiting_input', question: 'which branch?' })), 'waiting')
+  assert.equal(answerable(task({ status: 'waiting_input' })), true)
+  assert.equal(answerable(task({ status: 'running', stage: 'needs_input', question: 'ok?' })), true)
+  assert.equal(answerable(task({ status: 'running', stage: 'step' })), false)
+  assert.equal(answerable(task({ status: 'completed', question: 'late' })), false)
+  assert.equal(answerable(task({ status: 'waiting_input', origin: { kind: 'local' } })), false)
+})
+
+test('durationParts and percentOf: short readable numbers, nothing for missing values', () => {
+  assert.deepEqual(durationParts(45_000), { value: '45', unit: 's' })
+  assert.deepEqual(durationParts(12 * 60_000), { value: '12', unit: 'm' })
+  assert.deepEqual(durationParts(3.5 * 3_600_000), { value: '3.5', unit: 'h' })
+  assert.deepEqual(durationParts(15 * 3_600_000), { value: '15', unit: 'h' })
+  assert.deepEqual(durationParts(2.1 * 86_400_000), { value: '2.1', unit: 'd' })
+  assert.equal(durationParts(undefined), undefined)
+  assert.equal(durationParts(-1), undefined)
+  assert.equal(percentOf(0.125), '13%')
+  assert.equal(percentOf(0), '0%')
+  assert.equal(percentOf(undefined), undefined)
 })

@@ -819,6 +819,64 @@ class TestBridge(TempCase):
 
 # --- worker dir: .env, profile.json, priorities ---------------------------------------------
 
+class TestAnswers(TempCase):
+    """The human's answer to a question the worker put while keeping the task."""
+
+    def setUp(self):
+        super().setUp()
+        self.ws = self.path("repos", "ws", make=True)
+        self.ex = self.path("exchange")
+        self.logs = Logs()
+
+    def bridge(self, hub):
+        return ac.Bridge(hub, self.ex, 2, log=self.logs, node="mydesk", wait=5, workspaces={"ws": self.ws})
+
+    def test_answers_from_heartbeat_and_event_replies_land_in_the_task_folder(self):
+        class Answering(FakeHub):
+            hb_answers, ev_answers = [], []
+
+            def heartbeat(self, *a, **kw):
+                res = super().heartbeat(*a, **kw)
+                out, self.hb_answers = self.hb_answers, []
+                return dict(res, answers=out) if out else res
+
+            def progress(self, *a, **kw):
+                res = super().progress(*a, **kw)
+                out, self.ev_answers = self.ev_answers, []
+                return dict(res, answers=out) if out else res
+
+        hub = Answering()
+        br = self.bridge(hub)
+        w = os.path.join(self.ex, "working", "t1")
+        os.makedirs(w)
+        hub.hb_answers = [{"task_id": "t1", "question": "which branch?", "answer": "main", "at": "2026-11-26T10:00:00Z"},
+                          {"task_id": "../x", "answer": "no"}, {"task_id": "t1", "answer": ""}]
+        br.heartbeat("idle")
+        hub.ev_answers = [{"question": "keep the old API?", "answer": "yes, keep it", "at": "2026-11-26T10:01:00Z"}]
+        br.renew()
+        with open(os.path.join(w, ac.ANSWERS_FILE), encoding="utf-8") as f:
+            lines = [json.loads(x) for x in f]
+        self.assertEqual([x["answer"] for x in lines], ["main", "yes, keep it"])
+        self.assertEqual(lines[0]["question"], "which branch?")
+        self.assertIn("answer from the human", self.logs.joined())
+        self.assertIn(ac.ANSWERS_FILE, ac.LOCAL_ONLY_FILES, "never uploaded as a result file")
+
+    def test_an_answer_for_a_task_without_a_folder_waits_and_is_moved_in(self):
+        hub = FakeHub()
+        br = self.bridge(hub)
+        self.assertEqual(br.take_answers([{"task_id": "t2", "question": "q", "answer": "a"}]), 1)
+        w = os.path.join(self.ex, "working", "t2")
+        os.makedirs(w)
+        br.renew()
+        with open(os.path.join(w, ac.ANSWERS_FILE), encoding="utf-8") as f:
+            self.assertEqual(json.loads(f.readline())["answer"], "a")
+        self.assertFalse(os.path.exists(os.path.join(self.ex, ac.SYNC_DIR, f"t2.{ac.ANSWERS_FILE}")))
+
+    def test_readme_tells_the_agent_how_to_ask_and_where_answers_come(self):
+        self.assertIn("answers.jsonl", ac.EXCHANGE_README)
+        self.assertIn("needs_input", ac.EXCHANGE_README)
+
+
 class TestBridgeAfterAbort(TempCase):
     """A scheduled worker the hub once told to abort must keep pulling and take a re-leased task again."""
 

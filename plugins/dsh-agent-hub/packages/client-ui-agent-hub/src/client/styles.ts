@@ -348,6 +348,29 @@ button.dah-chip:focus-visible { outline: 2px solid var(--dah-accent); outline-of
 @media (prefers-reduced-motion: reduce) {
   .dah-sub-head[data-button="true"], .dah-link { transition: none; }
 }
+/* ---------- lifecycle: answer box, phases, metrics ---------- */
+.dah-page [data-tone="waiting_input"], .dah-page [data-tone="waiting"], .dah-page [data-tone="blocked"] { --dah-tone: var(--dah-warn); }
+.dah-page [data-tone="queued"] { --dah-tone: var(--dah-warn); }
+.dah-page [data-tone="claimed"] { --dah-tone: var(--dah-accent); }
+.dah-btn[data-tone="primary"] { color: #fff; background: var(--dah-accent); }
+.dah-btn[data-tone="primary"]:hover:not(:disabled) { background: color-mix(in srgb, var(--dah-accent) 86%, #000); }
+.dah-answer { padding: 14px 16px; border-radius: 16px; background: color-mix(in srgb, var(--dah-warn) 10%, var(--dah-base)); }
+.dah-answer .dah-text b { margin-right: 6px; }
+.dah-input {
+  width: 100%; box-sizing: border-box; min-height: 72px; padding: 10px 12px; border: 0; border-radius: 12px; resize: vertical;
+  background: var(--dah-base); color: var(--dah-text); font: inherit; font-size: 13.5px; line-height: 20px; outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dah-text) 10%, transparent); transition: box-shadow 0.15s;
+}
+.dah-input:focus-visible { box-shadow: 0 0 0 1.5px var(--dah-accent); }
+.dah-input:disabled { opacity: 0.6; }
+.dah-row-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.dah-life { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.dah-metrics { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.dah-table td[data-tone="failed"] { color: var(--dah-bad); }
+.dah-table tbody tr[data-total="true"] > td { border-top: 1px solid color-mix(in srgb, var(--dah-text) 10%, transparent); font-weight: 500; }
+@media (prefers-reduced-motion: reduce) {
+  .dah-input { transition: none; }
+}
 `
 
 /** Install the stylesheet once per document; a no-op without a DOM. */

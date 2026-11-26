@@ -554,9 +554,11 @@ test('failed, retryable failure and partial results', async (t) => {
   r = await hub.getTask('r')
   assert.equal(r.result.error, undefined)
 
-  assert.equal((await hub.submitResult('worker', { task_id: 'p', status: 'partial', needs_input: 'need creds' })).task_status, 'failed')
+  // A question handed back waits on the human (it used to fail the task as NEEDS_HUMAN).
+  assert.equal((await hub.submitResult('worker', { task_id: 'p', status: 'partial', needs_input: 'need creds' })).task_status, 'waiting_input')
   const p = await hub.getTask('p')
-  assert.deepEqual(p.result.error, { code: 'NEEDS_HUMAN', message: 'need creds', retryable: false })
+  assert.equal(p.phase, 'waiting_input')
+  assert.equal(p.question.text, 'need creds')
   assert.equal(p.result.needs_input, 'need creds')
   assert.equal(p.result.status, 'partial')
 })

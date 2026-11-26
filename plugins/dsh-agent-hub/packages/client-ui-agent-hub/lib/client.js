@@ -35,13 +35,14 @@ module.exports = __toCommonJS(index_exports);
 var import_react = require("react");
 
 // src/client/contract.ts
-var TASK_STATUSES = ["pending", "accepted", "running", "completed", "failed", "cancelled", "dead"];
+var TASK_STATUSES = ["pending", "accepted", "running", "waiting_input", "completed", "failed", "cancelled", "dead"];
 var AGENT_STATUSES = ["online", "pending", "offline", "left", "revoked"];
 
 // src/client/desk.ts
 var LANES = ["queued", "claimed", "running", "waiting", "ended"];
 var SELF_PREFIX = "dsh-self";
 function laneOf(task) {
+  if (task.status === "waiting_input") return "waiting";
   const finished = isFinished(task);
   const asks = task.stage === "needs_input" || task.result?.needs_input !== void 0 && task.result.needs_input !== "";
   const handled = task.acknowledged === true || task.in_history === true;
@@ -136,6 +137,22 @@ function registeredBy(event) {
 function stageOf(task) {
   if (task.status === "completed" || task.status === "cancelled") return void 0;
   return task.stage;
+}
+function answerable(task) {
+  if (task.origin?.kind === "local") return false;
+  if (task.status === "waiting_input") return true;
+  return task.question !== void 0 && (task.status === "accepted" || task.status === "running");
+}
+function durationParts(ms) {
+  if (ms === void 0 || !Number.isFinite(ms) || ms < 0) return void 0;
+  const s = ms / 1e3;
+  if (s < 60) return { value: String(Math.round(s)), unit: "s" };
+  if (s < 3600) return { value: String(Math.round(s / 60)), unit: "m" };
+  if (s < 86400) return { value: (s / 3600).toFixed(s < 36e3 ? 1 : 0), unit: "h" };
+  return { value: (s / 86400).toFixed(1), unit: "d" };
+}
+function percentOf(rate) {
+  return rate === void 0 || !Number.isFinite(rate) ? void 0 : `${Math.round(rate * 100)}%`;
 }
 
 // src/client/format.ts
@@ -340,6 +357,20 @@ async function ackTask(taskId) {
   });
   return body.task;
 }
+function fetchTimeline(taskId) {
+  return getJson("timeline", { task_id: taskId });
+}
+function fetchMetrics(hours) {
+  return getJson("metrics", { hours });
+}
+async function answerTask(taskId, answer) {
+  const body = await send(`${ADMIN_BASE}/answer`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task_id: taskId, answer })
+  });
+  return body.task;
+}
 
 // src/client/AgentHubPage.tsx
 var import_jsx_runtime2 = require("react/jsx-runtime");
@@ -522,7 +553,7 @@ function useShown(target, enabled) {
   }, [target, enabled]);
   return shown;
 }
-var PARTS = ["agents", "requests", "tasks", "fallback", "ended"];
+var PARTS = ["agents", "requests", "tasks", "fallback", "ended", "metrics"];
 var FOLDS_KEY = "dah.embed.open";
 function readFolds() {
   try {
@@ -1023,6 +1054,222 @@ function ClearWaiting({ task, t, onDone }) {
     error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-error-text", children: t("waiting.failed", { error: messageOf(error) }) }) : null
   ] });
 }
+function duration2(ms, t) {
+  const parts = durationParts(ms);
+  return parts === void 0 ? t("value.none") : t(`unit.${parts.unit}`, { n: parts.value });
+}
+function AnswerBox({ task, t, onDone }) {
+  const [text, setText] = (0, import_react.useState)("");
+  const [busy, setBusy] = (0, import_react.useState)(false);
+  const [sent, setSent] = (0, import_react.useState)(false);
+  const [error, setError] = (0, import_react.useState)(void 0);
+  const question = task.question?.text ?? task.result?.needs_input ?? task.message ?? "";
+  const send2 = () => {
+    const answer = text.trim();
+    if (answer === "" || busy) return;
+    setBusy(true);
+    answerTask(task.task_id, answer).then(
+      () => {
+        setBusy(false);
+        setSent(true);
+        setText("");
+        setError(void 0);
+        onDone();
+      },
+      (failure) => {
+        setBusy(false);
+        setError(failure);
+      }
+    );
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-block dah-answer", "data-tone": "waiting", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h4", { className: "dah-block-title", children: t("answer.title") }),
+    question !== "" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-text", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("b", { children: t("answer.question") }),
+      question
+    ] }) : null,
+    sent ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-muted", children: t("answer.done") }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(
+        "textarea",
+        {
+          className: "dah-input",
+          rows: 3,
+          maxLength: 4e3,
+          value: text,
+          placeholder: t("answer.placeholder"),
+          disabled: busy,
+          onChange: (event) => {
+            setText(event.target.value);
+          },
+          onKeyDown: (event) => {
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) send2();
+          }
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-row-actions", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dah-btn", "data-size": "sm", "data-tone": "primary", disabled: busy || text.trim() === "", onClick: send2, children: busy ? t("answer.busy") : t("answer.send") }),
+        error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-error-text", children: t("answer.failed", { error: messageOf(error) }) }) : null
+      ] })
+    ] })
+  ] });
+}
+function AnswersList({ answers, t }) {
+  if (answers.length === 0) return null;
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-block", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h4", { className: "dah-block-title", children: t("answers.title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "dah-history", children: answers.map((a, index) => /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("li", { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-time", title: absolute(a.at), children: absolute(a.at) }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-event", children: a.by ?? "" }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-muted", children: a.question ?? "" }),
+        a.question ? " \u2192 " : "",
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("b", { children: a.answer ?? "" })
+      ] })
+    ] }, `${a.at ?? ""}-${String(index)}`)) })
+  ] });
+}
+function LifecycleView({ taskId, tick, t, now }) {
+  const [doc, setDoc] = (0, import_react.useState)(void 0);
+  const [failed, setFailed] = (0, import_react.useState)(false);
+  const ticket = (0, import_react.useRef)(0);
+  (0, import_react.useEffect)(() => {
+    ticket.current += 1;
+    const mine = ticket.current;
+    fetchTimeline(taskId).then(
+      (next) => {
+        if (mine === ticket.current) {
+          setDoc(next);
+          setFailed(false);
+        }
+      },
+      () => {
+        if (mine === ticket.current) setFailed(true);
+      }
+    );
+  }, [taskId, tick]);
+  (0, import_react.useEffect)(() => () => {
+    ticket.current += 1;
+  }, []);
+  if (doc === void 0) return failed ? null : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-block", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-muted", children: t("life.loading") }) });
+  const d = doc.durations;
+  const row = doc.task;
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-block", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h4", { className: "dah-block-title", children: t("life.title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-life", children: [
+      doc.phase !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-pill": "true", "data-tone": doc.phase, children: t(`phase.${doc.phase}`) }) : null,
+      row.overdue === true ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-tone": "failed", children: t("life.overdue") }) : null,
+      doc.archived ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-muted", children: t("life.archived") }) : null
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("dl", { className: "dah-meta", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("life.queue") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { className: "dah-num", children: duration2(d.queue_ms, t) })
+      ] }),
+      (d.claim_ms ?? 0) >= 1e3 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("life.claim") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { className: "dah-num", children: duration2(d.claim_ms, t) })
+      ] }) : null,
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("life.run") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { className: "dah-num", children: duration2(d.run_ms, t) })
+      ] }),
+      (d.waiting_ms ?? 0) >= 1e3 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("life.waiting") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { className: "dah-num", children: duration2(d.waiting_ms, t) })
+      ] }) : null,
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("life.total") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { className: "dah-num", children: duration2(d.total_ms, t) })
+      ] }),
+      row.due_at !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("life.due") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { title: absolute(row.due_at), children: until(row.due_at, t, now) })
+      ] }) : null,
+      row.delivered_at !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("life.delivered") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { title: absolute(row.delivered_at), children: `${relative(row.delivered_at, t, now)}${row.delivered_to !== void 0 ? ` \xB7 ${row.delivered_to}` : ""}` })
+      ] }) : null,
+      row.acknowledged_at !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("life.acked") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { title: absolute(row.acknowledged_at), children: `${relative(row.acknowledged_at, t, now)}${row.acknowledged_by !== void 0 ? ` \xB7 ${row.acknowledged_by}` : ""}` })
+      ] }) : null
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AnswersList, { answers: doc.answers, t })
+  ] });
+}
+var METRIC_HOURS = [24, 168, 720];
+function pair(row, key, t) {
+  const p50 = row[`${key}_ms_p50`];
+  const p90 = row[`${key}_ms_p90`];
+  if (p50 === void 0 && p90 === void 0) return t("value.none");
+  return `${duration2(p50, t)} / ${duration2(p90, t)}`;
+}
+function MetricCells({ row, t }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { className: "dah-num", children: String(row.tasks ?? 0) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { className: "dah-num", children: `${String(row.completed ?? 0)} / ${String(row.failed ?? 0)} / ${String(row.open ?? 0)}` }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { className: "dah-num", "data-tone": (row.fail_rate ?? 0) >= 0.2 ? "failed" : void 0, children: percentOf(row.fail_rate) ?? t("value.none") }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { className: "dah-num", children: percentOf(row.ask_rate) ?? t("value.none") }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { className: "dah-num", children: String(row.fallback ?? 0) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { className: "dah-num", "data-tone": (row.overdue ?? 0) > 0 ? "failed" : void 0, children: String(row.overdue ?? 0) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { className: "dah-num dah-nowrap", children: pair(row, "queue", t) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { className: "dah-num dah-nowrap", children: pair(row, "run", t) })
+  ] });
+}
+function MetricsView({ tick, t }) {
+  const [hours, setHours] = (0, import_react.useState)(168);
+  const [doc, setDoc] = (0, import_react.useState)(void 0);
+  const [error, setError] = (0, import_react.useState)(void 0);
+  const ticket = (0, import_react.useRef)(0);
+  (0, import_react.useEffect)(() => {
+    ticket.current += 1;
+    const mine = ticket.current;
+    fetchMetrics(hours).then(
+      (next) => {
+        if (mine === ticket.current) {
+          setDoc(next);
+          setError(void 0);
+        }
+      },
+      (failure) => {
+        if (mine === ticket.current) setError(failure);
+      }
+    );
+  }, [hours, tick]);
+  (0, import_react.useEffect)(() => () => {
+    ticket.current += 1;
+  }, []);
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-metrics", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-filters", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("select", { className: "dah-select", value: String(hours), "aria-label": t("metrics.title"), onChange: (event) => {
+      setHours(Number(event.target.value));
+    }, children: METRIC_HOURS.map((n) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value: String(n), children: t("metrics.window", { n }) }, n)) }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(SectionError, { error, t }),
+    doc === void 0 ? error === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: t("loading") }) : null : (doc.total.tasks ?? 0) === 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Empty, { children: t("metrics.empty") }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-table-wrap", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("table", { className: "dah-table", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("tr", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("th", { children: t("metrics.col.worker") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("th", { children: t("metrics.col.tasks") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("th", { children: t("metrics.col.done") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("th", { children: t("metrics.col.fail") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("th", { children: t("metrics.col.ask") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("th", { children: t("metrics.col.fallback") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("th", { children: t("metrics.col.overdue") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("th", { children: t("metrics.col.queue") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("th", { children: t("metrics.col.run") })
+      ] }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("tbody", { children: [
+        doc.workers.map((row) => /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("tr", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { className: "dah-id", children: row.worker }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(MetricCells, { row, t })
+        ] }, row.worker)),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("tr", { "data-total": "true", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("b", { children: t("metrics.total") }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(MetricCells, { row: doc.total, t })
+        ] })
+      ] })
+    ] }) }),
+    doc?.archived_after_hours !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dah-note", children: t("metrics.note", { n: doc.archived_after_hours }) }) : null
+  ] });
+}
 var FALLBACK_KEY = { "nobody-online": "fallback.nobody-online", "waited-out": "fallback.waited-out", other: "fallback.other" };
 function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
   const task = detail.data?.task;
@@ -1114,6 +1361,10 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Chips, { items: task.context_keys, empty: t("value.none") }) })
         ] })
       ] }),
+      answerable(task) ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(AnswerBox, { task, t, onDone: () => {
+        onChanged?.();
+      } }, `${task.task_id}#${String(task.answers_count ?? 0)}`) : null,
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(LifecycleView, { taskId: task.task_id, tick: detail.at, t, now }),
       task.message !== void 0 && task.message !== "" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-block", children: [
         /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h4", { className: "dah-block-title", children: t("detail.message") }),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-text", children: task.message })
@@ -1129,7 +1380,7 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-block", children: [
         /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h4", { className: "dah-block-title", children: t("detail.result") }),
         result === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-muted", children: t("detail.result.none") }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-result", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-tone": result.status === "completed" ? "completed" : "failed", children: result.status }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-badge", "data-tone": result.status === "completed" ? "completed" : result.status === "partial" ? "waiting" : "failed", children: result.status }) }),
           result.summary !== void 0 && result.summary !== "" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("pre", { className: "dah-pre", children: result.summary }) : null,
           result.error !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dah-error-text", children: [
             `${t("detail.error")}: ${result.error.code ?? ""}${result.error.message !== void 0 && result.error.message !== "" ? ` \u2014 ${result.error.message}` : ""}`,
@@ -1165,7 +1416,8 @@ function TaskDetailView({ detail, t, now, onClose, onTask, onChanged }) {
             /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-event", children: event.stage !== void 0 ? t(`stage.${event.stage}`) : event.event ?? "" }),
             /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
               flag === void 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-history-flag", children: t(PRESENCE_KEY[flag]) }),
-              historyText(event, t)
+              historyText(event, t),
+              present(event.by) && event.by !== "hub" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dah-sub-line dah-id", children: t("life.by", { by: event.by }) }) : null
             ] })
           ] }, `${event.at ?? ""}-${String(index)}`);
         }) })
@@ -1345,7 +1597,7 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
     )
   ] });
   if (embedded) {
-    const isOpen = (part) => folds[part] ?? (part === "ended" ? false : part !== "requests" || pendingRequests > 0 || requestStatus !== "pending");
+    const isOpen = (part) => folds[part] ?? (part === "ended" || part === "metrics" ? false : part !== "requests" || pendingRequests > 0 || requestStatus !== "pending");
     const flip = (part) => {
       const next = !isOpen(part);
       setFolds((previous) => ({ ...previous, [part]: next }));
@@ -1516,6 +1768,9 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
             ]
           }
         ) : null,
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(EmbeddedFold, { part: "metrics", title: t("metrics.title"), count: "", open: isOpen("metrics"), onToggle: () => {
+          flip("metrics");
+        }, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(MetricsView, { tick: board.loadedAt, t }) }),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dah-foot", children: t("desk.hint") })
       ] })
     ] }) });
@@ -1618,6 +1873,10 @@ function AgentHubPage({ t, embedded = false, onOverview }) {
       }, onTask: openTask, onChanged: () => {
         load(true);
       } }) }) : null
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("section", { className: "dah-section", "aria-label": t("metrics.title"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dah-section-head", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h2", { className: "dah-section-title", children: t("metrics.title") }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(MetricsView, { tick: board.loadedAt, t })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "dah-foot", children: t("readonly.hint") })
   ] }) });
@@ -1762,7 +2021,7 @@ function boardTabs() {
 var NS = "agentHub";
 var zh = {
   "page.title": "Agent \u8C03\u5EA6",
-  "page.sub": "\u53EA\u8BFB\u89C6\u56FE \xB7 DSH \u662F\u552F\u4E00\u8C03\u5EA6\u65B9\uFF0C\u6D3E\u4EFB\u52A1 / \u53D6\u6D88 / \u91CD\u8BD5 / \u5BA1\u6279\u90FD\u5728 DSH \u5BF9\u8BDD\u91CC\u7528\u5DE5\u5177\u5B8C\u6210",
+  "page.sub": "DSH \u662F\u552F\u4E00\u8C03\u5EA6\u65B9\uFF0C\u6D3E\u4EFB\u52A1 / \u53D6\u6D88 / \u91CD\u8BD5 / \u5BA1\u6279\u90FD\u5728 DSH \u5BF9\u8BDD\u91CC\u7528\u5DE5\u5177\u5B8C\u6210\uFF1B\u8FD9\u91CC\u53EF\u4EE5\u770B\u5168\u751F\u547D\u5468\u671F\u3001\u56DE\u7B54 worker \u7684\u63D0\u95EE",
   "refresh": "\u5237\u65B0",
   "refreshing": "\u5237\u65B0\u4E2D\u2026",
   "auto": "\u6BCF {n} \u79D2\u81EA\u52A8\u5237\u65B0",
@@ -1783,6 +2042,7 @@ var zh = {
   "status.pending": "\u7B49\u5F85\u9886\u53D6",
   "status.accepted": "\u5DF2\u9886\u53D6",
   "status.running": "\u8FD0\u884C\u4E2D",
+  "status.waiting_input": "\u7B49\u4F60\u56DE\u7B54",
   "status.completed": "\u5DF2\u5B8C\u6210",
   "status.failed": "\u5931\u8D25",
   "status.cancelled": "\u5DF2\u53D6\u6D88",
@@ -1794,7 +2054,7 @@ var zh = {
   "req.expired": "\u5DF2\u8FC7\u671F",
   "req.all": "\u5168\u90E8",
   "approve.hint": "\u6709 {n} \u4E2A\u52A0\u5165\u7533\u8BF7\u7B49\u5F85\u5BA1\u6279\u3002\u9762\u677F\u4E0D\u63D0\u4F9B\u5BA1\u6279\u6309\u94AE\uFF1A\u8BF7\u5728 DSH \u5BF9\u8BDD\u4E2D\u7528 agent_requests \u67E5\u770B\uFF0C\u518D\u7528 agent_approve \u6279\u51C6\uFF08\u53EF\u6536\u7A84\u80FD\u529B / \u5E76\u53D1\uFF09\u6216 agent_reject \u9A73\u56DE\u3002",
-  "readonly.hint": "\u672C\u9762\u677F\u53EA\u8BFB\uFF1B\u4EE4\u724C\u3001\u4EE4\u724C\u54C8\u5E0C\u548C poll secret \u6C38\u8FDC\u4E0D\u4F1A\u663E\u793A\u3002",
+  "readonly.hint": "\u672C\u9762\u677F\u53EA\u80FD\u56DE\u7B54 worker \u7684\u63D0\u95EE\uFF0C\u5176\u4F59\u53EA\u8BFB\uFF1B\u4EE4\u724C\u3001\u4EE4\u724C\u54C8\u5E0C\u548C poll secret \u6C38\u8FDC\u4E0D\u4F1A\u663E\u793A\u3002",
   "agents.title": "Agent",
   "agents.empty": "\u8FD8\u6CA1\u6709 agent\u3002\u53EF\u5728 DSH \u4E2D\u7528 agent_provision \u76F4\u63A5\u7B7E\u53D1\uFF0C\u6216\u8BA9 agent \u53D1\u8D77 enroll \u7533\u8BF7\u540E\u7528 agent_approve \u6279\u51C6\u3002",
   "agents.col.agent": "Agent",
@@ -1964,6 +2224,55 @@ var zh = {
   "waiting.cancel.keep": "\u5148\u7559\u7740",
   "waiting.busy": "\u5904\u7406\u4E2D\u2026",
   "waiting.failed": "\u6CA1\u6210\u529F\uFF1A{error}",
+  "answer.title": "\u56DE\u7B54 worker \u7684\u95EE\u9898",
+  "answer.question": "\u5B83\u95EE\uFF1A",
+  "answer.placeholder": "\u5199\u4E0B\u4F60\u7684\u56DE\u7B54\uFF0C\u4F1A\u4EA4\u56DE\u63D0\u95EE\u7684\u90A3\u4E2A worker \u63A5\u7740\u505A",
+  "answer.send": "\u4EA4\u56DE worker",
+  "answer.busy": "\u53D1\u9001\u4E2D\u2026",
+  "answer.failed": "\u6CA1\u53D1\u51FA\u53BB\uFF1A{error}",
+  "answer.done": "\u5DF2\u4EA4\u56DE\uFF0Cworker \u4F1A\u5E26\u7740\u56DE\u7B54\u63A5\u7740\u505A",
+  "answer.local": "\u8FD9\u662F DSH \u672C\u5730\u4EFB\u52A1\uFF1A\u5728\u5B83\u7684\u4F5C\u6218\u5BA4\u91CC\u56DE\u7B54",
+  "answers.title": "\u95EE\u7B54\u8BB0\u5F55",
+  "life.title": "\u751F\u547D\u5468\u671F",
+  "life.phase": "\u9636\u6BB5",
+  "life.queue": "\u6392\u961F",
+  "life.claim": "\u9886\u53D6\u672A\u52A8",
+  "life.run": "\u6267\u884C",
+  "life.waiting": "\u7B49\u4F60\u56DE\u7B54",
+  "life.total": "\u603B\u8017\u65F6",
+  "life.due": "\u671F\u9650",
+  "life.overdue": "\u5DF2\u8D85\u65F6",
+  "life.delivered": "\u5DF2\u9001\u8FBE",
+  "life.acked": "\u6536\u8D77",
+  "life.archived": "\u5DF2\u5F52\u6863\uFF08\u4ECE\u5F52\u6863\u91CC\u8BFB\u51FA\uFF09",
+  "life.loading": "\u8BFB\u53D6\u65F6\u95F4\u7EBF\u2026",
+  "life.by": "\u7531 {by}",
+  "phase.queued": "\u6392\u961F",
+  "phase.claimed": "\u5DF2\u9886\u53D6",
+  "phase.running": "\u6267\u884C\u4E2D",
+  "phase.waiting_input": "\u7B49\u4F60\u56DE\u7B54",
+  "phase.blocked": "\u5361\u4F4F",
+  "phase.completed": "\u5B8C\u6210",
+  "phase.failed": "\u5931\u8D25",
+  "phase.cancelled": "\u53D6\u6D88",
+  "unit.s": "{n} \u79D2",
+  "unit.m": "{n} \u5206",
+  "unit.h": "{n} \u5C0F\u65F6",
+  "unit.d": "{n} \u5929",
+  "metrics.title": "\u6307\u6807",
+  "metrics.window": "\u6700\u8FD1 {n} \u5C0F\u65F6",
+  "metrics.col.worker": "\u6267\u884C\u8005",
+  "metrics.col.tasks": "\u4EFB\u52A1",
+  "metrics.col.done": "\u5B8C\u6210 / \u5931\u8D25 / \u8FDB\u884C",
+  "metrics.col.fail": "\u5931\u8D25\u7387",
+  "metrics.col.ask": "\u95EE\u4EBA\u6BD4\u4F8B",
+  "metrics.col.fallback": "DSH \u515C\u5E95",
+  "metrics.col.overdue": "\u8D85\u65F6",
+  "metrics.col.queue": "\u6392\u961F p50 / p90",
+  "metrics.col.run": "\u6267\u884C p50 / p90",
+  "metrics.total": "\u5408\u8BA1",
+  "metrics.empty": "\u8FD9\u6BB5\u65F6\u95F4\u6CA1\u6709\u4EFB\u52A1",
+  "metrics.note": "\u53EA\u7B97\u8FD8\u6CA1\u5F52\u6863\u7684\u4EFB\u52A1\uFF08\u5F52\u6863\u524D {n} \u5C0F\u65F6\u5185\u7ED3\u675F\u7684\uFF09\u3002",
   "detail.session": "\u4F1A\u8BDD",
   "detail.session.load": "\u67E5\u770B\u4F1A\u8BDD\uFF08{n} \u6761\uFF09",
   "detail.session.more": "\u518D\u8BFB\u540E\u9762\u7684",
@@ -1980,7 +2289,7 @@ var zh = {
 };
 var en = {
   "page.title": "Agent hub",
-  "page.sub": "Read-only view \xB7 DSH is the only controller; dispatch, cancel, retry and approval happen through the DSH tools in chat",
+  "page.sub": "DSH is the only controller; dispatch, cancel, retry and approval happen through the DSH tools in chat. Here you can follow each task's lifecycle and answer a worker's question",
   "refresh": "Refresh",
   "refreshing": "Refreshing\u2026",
   "auto": "Auto-refresh every {n}s",
@@ -2001,6 +2310,7 @@ var en = {
   "status.pending": "Pending",
   "status.accepted": "Accepted",
   "status.running": "Running",
+  "status.waiting_input": "Waiting on you",
   "status.completed": "Completed",
   "status.failed": "Failed",
   "status.cancelled": "Cancelled",
@@ -2012,7 +2322,7 @@ var en = {
   "req.expired": "expired",
   "req.all": "all",
   "approve.hint": "{n} enrollment request(s) await approval. The panel has no approve button: in the DSH chat, review them with agent_requests, then agent_approve (optionally narrowing capabilities / concurrency) or agent_reject.",
-  "readonly.hint": "This panel is read-only; tokens, token hashes and poll secrets are never shown.",
+  "readonly.hint": "The only thing this panel changes is answering a worker's question; tokens, token hashes and poll secrets are never shown.",
   "agents.title": "Agents",
   "agents.empty": "No agents yet. Provision one from DSH with agent_provision, or let an agent enroll and approve it with agent_approve.",
   "agents.col.agent": "Agent",
@@ -2181,6 +2491,55 @@ var en = {
   "waiting.cancel.keep": "Keep it",
   "waiting.busy": "Working\u2026",
   "waiting.failed": "Did not work: {error}",
+  "answer.title": "Answer the worker",
+  "answer.question": "It asks:",
+  "answer.placeholder": "Your answer goes back to the worker that asked",
+  "answer.send": "Send to worker",
+  "answer.busy": "Sending\u2026",
+  "answer.failed": "Not sent: {error}",
+  "answer.done": "Sent: the worker carries on with your answer",
+  "answer.local": "A DSH local task: answer it in its \u4F5C\u6218\u5BA4",
+  "answers.title": "Questions and answers",
+  "life.title": "Lifecycle",
+  "life.phase": "Phase",
+  "life.queue": "Queued",
+  "life.claim": "Claimed, idle",
+  "life.run": "Running",
+  "life.waiting": "Waiting on you",
+  "life.total": "Total",
+  "life.due": "Due",
+  "life.overdue": "Overdue",
+  "life.delivered": "Delivered",
+  "life.acked": "Put away",
+  "life.archived": "Archived (read from the archive)",
+  "life.loading": "Reading the timeline\u2026",
+  "life.by": "by {by}",
+  "phase.queued": "queued",
+  "phase.claimed": "claimed",
+  "phase.running": "running",
+  "phase.waiting_input": "waiting on you",
+  "phase.blocked": "blocked",
+  "phase.completed": "completed",
+  "phase.failed": "failed",
+  "phase.cancelled": "cancelled",
+  "unit.s": "{n} s",
+  "unit.m": "{n} min",
+  "unit.h": "{n} h",
+  "unit.d": "{n} d",
+  "metrics.title": "Metrics",
+  "metrics.window": "last {n} h",
+  "metrics.col.worker": "Executor",
+  "metrics.col.tasks": "Tasks",
+  "metrics.col.done": "Done / failed / open",
+  "metrics.col.fail": "Fail rate",
+  "metrics.col.ask": "Asked you",
+  "metrics.col.fallback": "DSH fallback",
+  "metrics.col.overdue": "Overdue",
+  "metrics.col.queue": "Queue p50 / p90",
+  "metrics.col.run": "Run p50 / p90",
+  "metrics.total": "Total",
+  "metrics.empty": "No tasks in this window",
+  "metrics.note": "Counts tasks not yet archived (finished within the last {n} h).",
   "detail.session": "Session",
   "detail.session.load": "Show session ({n} entries)",
   "detail.session.more": "Read more",
@@ -2535,6 +2894,29 @@ button.dah-chip:focus-visible { outline: 2px solid var(--dah-accent); outline-of
 .dah-session-foot { display: flex; align-items: center; gap: 10px; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) {
   .dah-sub-head[data-button="true"], .dah-link { transition: none; }
+}
+/* ---------- lifecycle: answer box, phases, metrics ---------- */
+.dah-page [data-tone="waiting_input"], .dah-page [data-tone="waiting"], .dah-page [data-tone="blocked"] { --dah-tone: var(--dah-warn); }
+.dah-page [data-tone="queued"] { --dah-tone: var(--dah-warn); }
+.dah-page [data-tone="claimed"] { --dah-tone: var(--dah-accent); }
+.dah-btn[data-tone="primary"] { color: #fff; background: var(--dah-accent); }
+.dah-btn[data-tone="primary"]:hover:not(:disabled) { background: color-mix(in srgb, var(--dah-accent) 86%, #000); }
+.dah-answer { padding: 14px 16px; border-radius: 16px; background: color-mix(in srgb, var(--dah-warn) 10%, var(--dah-base)); }
+.dah-answer .dah-text b { margin-right: 6px; }
+.dah-input {
+  width: 100%; box-sizing: border-box; min-height: 72px; padding: 10px 12px; border: 0; border-radius: 12px; resize: vertical;
+  background: var(--dah-base); color: var(--dah-text); font: inherit; font-size: 13.5px; line-height: 20px; outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dah-text) 10%, transparent); transition: box-shadow 0.15s;
+}
+.dah-input:focus-visible { box-shadow: 0 0 0 1.5px var(--dah-accent); }
+.dah-input:disabled { opacity: 0.6; }
+.dah-row-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.dah-life { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.dah-metrics { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.dah-table td[data-tone="failed"] { color: var(--dah-bad); }
+.dah-table tbody tr[data-total="true"] > td { border-top: 1px solid color-mix(in srgb, var(--dah-text) 10%, transparent); font-weight: 500; }
+@media (prefers-reduced-motion: reduce) {
+  .dah-input { transition: none; }
 }
 `;
 function installStyles() {

@@ -5,10 +5,10 @@
  */
 
 /** Task lifecycle (hub.js). */
-export type TaskStatus = 'pending' | 'accepted' | 'running' | 'completed' | 'failed' | 'cancelled' | 'dead'
+export type TaskStatus = 'pending' | 'accepted' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled' | 'dead'
 
 /** Display order of the task statuses. */
-export const TASK_STATUSES: readonly TaskStatus[] = ['pending', 'accepted', 'running', 'completed', 'failed', 'cancelled', 'dead']
+export const TASK_STATUSES: readonly TaskStatus[] = ['pending', 'accepted', 'running', 'waiting_input', 'completed', 'failed', 'cancelled', 'dead']
 
 /** Enrollment request lifecycle (hub.js). */
 export type RequestStatus = 'pending' | 'approved' | 'rejected' | 'expired'
@@ -136,6 +136,21 @@ export interface TaskRow {
   quiet?: boolean
   /** Number of session entries stored for it. */
   session_entries?: number
+  /** One phase for every task (services/dsh-hub/lib/lifecycle.js); absent from an older hub. */
+  phase?: TaskPhase
+  /** A question a worker put that waits on the user. */
+  question?: { text?: string; at?: string; by?: string }
+  /** How many of its questions were answered. */
+  answers_count?: number
+  /** When it counts as overdue, and whether it is. */
+  due_at?: string
+  overdue?: boolean
+  /** When its result / question reached the publishing DSH's 作战室, and which one. */
+  delivered_at?: string
+  delivered_to?: string
+  /** Who put it away, and when. */
+  acknowledged_at?: string
+  acknowledged_by?: string
   result?: {
     status: 'completed' | 'failed' | 'partial'
     summary?: string
@@ -143,6 +158,75 @@ export interface TaskRow {
     needs_input?: string
     output_count: number
   }
+}
+
+/** The task lifecycle phases, in order. */
+export type TaskPhase = 'queued' | 'claimed' | 'running' | 'waiting_input' | 'blocked' | 'completed' | 'failed' | 'cancelled'
+
+export const TASK_PHASES: readonly TaskPhase[] = ['queued', 'claimed', 'running', 'waiting_input', 'blocked', 'completed', 'failed', 'cancelled']
+
+/** One question and the user's answer. */
+export interface AnswerView {
+  question?: string
+  answer?: string
+  at?: string
+  by?: string
+}
+
+/** One step of a task's life (`GET /api/agent-hub/admin/timeline`). */
+export interface TimelineEvent {
+  at?: string
+  event?: string
+  phase?: TaskPhase
+  by?: string
+  stage?: TaskStage
+  message?: string
+  elapsed_ms?: number
+  gap_ms?: number
+}
+
+/** `GET /api/agent-hub/admin/timeline?task_id=`. */
+export interface TimelineDoc {
+  generated_at: string
+  task: TaskRow
+  archived: boolean
+  truncated: boolean
+  phase?: TaskPhase
+  durations: { queue_ms?: number; claim_ms?: number; run_ms?: number; waiting_ms?: number; total_ms?: number }
+  events: TimelineEvent[]
+  answers: AnswerView[]
+}
+
+/** Numbers of one worker (or all) over a window. Times in ms. */
+export interface MetricRow {
+  tasks?: number
+  open?: number
+  completed?: number
+  failed?: number
+  cancelled?: number
+  fail_rate?: number
+  asked_human?: number
+  ask_rate?: number
+  fallback?: number
+  overdue?: number
+  retried?: number
+  queue_ms_p50?: number
+  queue_ms_p90?: number
+  run_ms_p50?: number
+  run_ms_p90?: number
+  total_ms_p50?: number
+  total_ms_p90?: number
+}
+
+/** `GET /api/agent-hub/admin/metrics?hours=`. */
+export interface MetricsDoc {
+  generated_at: string
+  since?: string
+  until?: string
+  hours?: number
+  archived_after_hours?: number
+  total: MetricRow
+  workers: (MetricRow & { worker: string })[]
 }
 
 /** Executor stages (progress.jsonl `stage`). */
@@ -170,6 +254,10 @@ export interface HistoryEvent {
   event?: string
   message?: string
   stage?: TaskStage
+  /** Who did it (a controller, a worker, or `hub`); absent from an older hub. */
+  by?: string
+  /** The phase after it. */
+  phase?: TaskPhase
 }
 
 /** Task detail (`GET /api/agent-hub/admin/task?task_id=`). */
@@ -179,6 +267,8 @@ export interface TaskDetail extends Omit<TaskRow, 'result'> {
   output?: Record<string, unknown>
   context_keys: string[]
   history: HistoryEvent[]
+  /** The questions answered so far, oldest first. */
+  answers?: AnswerView[]
   result?: {
     status: 'completed' | 'failed' | 'partial'
     summary?: string

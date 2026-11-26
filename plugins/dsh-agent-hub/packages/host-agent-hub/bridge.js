@@ -16,6 +16,9 @@
  *   GET  /api/agent-hub/admin/requests?status=              <- GET /v1/ctl/requests
  *   POST /api/agent-hub/admin/ack  {task_id}  (JSON only)   <- POST /v1/ctl/ack
  *   POST /api/agent-hub/admin/cancel {task_id} (JSON only)  <- POST /v1/ctl/cancel
+ *   POST /api/agent-hub/admin/answer {task_id, answer} (JSON only) <- POST /v1/ctl/answer
+ *   GET  /api/agent-hub/admin/timeline?task_id=             <- GET /v1/ctl/timeline
+ *   GET  /api/agent-hub/admin/metrics?hours=                <- GET /v1/ctl/metrics
  *
  * The panel's two writes: ack puts a finished task into 历史 at once; cancel stops
  * an open one (only the DSH that created it may).
@@ -47,7 +50,7 @@ export const BRIDGE_BASE = '/api/agent-hub'
 export const ADMIN_BASE = `${BRIDGE_BASE}/admin`
 
 /** Task / request statuses the admin filters accept. */
-export const TASK_STATUSES = ['pending', 'accepted', 'running', 'completed', 'failed', 'cancelled', 'dead']
+export const TASK_STATUSES = ['pending', 'accepted', 'running', 'waiting_input', 'completed', 'failed', 'cancelled', 'dead']
 export const REQUEST_STATUSES = ['pending', 'approved', 'rejected', 'expired', 'all']
 const TOKEN_RE = /dsh[ac]_[A-Za-z0-9_-]+/g
 
@@ -153,6 +156,8 @@ function adminOutputs(result) {
 export const HISTORY_FILTERS = ['hide', 'include', 'only']
 export const ORIGINS = ['controller', 'agent', 'local']
 export const STAGES = ['received', 'started', 'step', 'blocked', 'needs_input', 'uploading']
+/** One phase vocabulary for every task (services/dsh-hub/lib/lifecycle.js). */
+export const PHASES = ['queued', 'claimed', 'running', 'waiting_input', 'blocked', 'completed', 'failed', 'cancelled']
 
 /** Where a task came from: who published it, and for a local one which executor runs it. */
 function adminOrigin(o) {
@@ -173,6 +178,13 @@ export function adminTaskRow(t) {
     updated_at: text(t?.updated_at, 64), finished_at: text(t?.finished_at, 64),
     acknowledged: t?.acknowledged === true, in_history: t?.in_history === true, quiet: t?.quiet === true,
     session_entries: int(t?.session_entries) ?? 0, session_updated_at: text(t?.session_updated_at, 64),
+    // Additive (task lifecycle): the phase, an open question, due time, who saw / put it away.
+    phase: oneOf(t?.phase, PHASES),
+    question: plainObject(t?.question) ? { text: clean(t.question.text, 2000), at: text(t.question.at, 64), by: text(t.question.by, 64) } : undefined,
+    answers_count: int(t?.answers_count) ?? 0,
+    due_at: text(t?.due_at, 64), overdue: t?.overdue === true,
+    delivered_at: text(t?.delivered_at, 64), delivered_to: text(t?.delivered_to, 160),
+    acknowledged_at: text(t?.acknowledged_at, 64), acknowledged_by: text(t?.acknowledged_by, 64),
     result: !plainObject(t?.result) ? undefined : {
       status: text(t.result.status, 32), summary: clean(t.result.summary, 300), error: adminError(t.result.error),
       needs_input: clean(t.result.needs_input, 300), output_count: outputs.length,
@@ -192,12 +204,55 @@ export function adminTaskDetail(t) {
     inputs,
     output: cleanObject(t?.output),
     context_keys: plainObject(t?.context) ? Object.keys(t.context).slice(0, 50).map(k => clean(k, 100)) : [],
-    history: (Array.isArray(t?.history) ? t.history : []).map(h => ({ at: text(h?.at, 64), event: clean(h?.event, 64), message: clean(h?.message, 500), stage: oneOf(h?.stage, STAGES) })),
+    history: (Array.isArray(t?.history) ? t.history : []).map(h => ({ at: text(h?.at, 64), event: clean(h?.event, 64), message: clean(h?.message, 500), stage: oneOf(h?.stage, STAGES), by: text(h?.by, 96), phase: oneOf(h?.phase, PHASES) })),
+    answers: (Array.isArray(t?.answers) ? t.answers : []).slice(-50).map(adminAnswer),
     result: !plainObject(t?.result) ? undefined : {
       status: text(t.result.status, 32), summary: clean(t.result.summary, 4000), error: adminError(t.result.error),
       needs_input: clean(t.result.needs_input, 2000), outputs,
     },
     output_files: outputs.map(o => o.name),
+  }
+}
+
+/** One question and the human's answer. */
+function adminAnswer(a) {
+  return { question: clean(a?.question, 2000), answer: clean(a?.answer, 4000), at: text(a?.at, 64), by: text(a?.by, 64) }
+}
+
+const ms = v => (Number.isFinite(v) && v >= 0 ? Math.round(v) : undefined)
+
+/** Whitelisted timeline: events with who / phase / timings, durations per phase, answers. */
+export function adminTimeline(doc) {
+  const d = plainObject(doc?.durations) ? doc.durations : {}
+  return {
+    task: adminTaskRow(doc?.task),
+    archived: doc?.archived === true,
+    truncated: doc?.truncated === true,
+    phase: oneOf(doc?.phase, PHASES),
+    durations: { queue_ms: ms(d.queue_ms), claim_ms: ms(d.claim_ms), run_ms: ms(d.run_ms), waiting_ms: ms(d.waiting_ms), total_ms: ms(d.total_ms) },
+    events: (Array.isArray(doc?.events) ? doc.events : []).slice(-1000).map(e => ({
+      at: text(e?.at, 64), event: clean(e?.event, 64), phase: oneOf(e?.phase, PHASES), by: text(e?.by, 96),
+      stage: oneOf(e?.stage, STAGES), message: clean(e?.message, 500), elapsed_ms: ms(e?.elapsed_ms), gap_ms: ms(e?.gap_ms),
+    })),
+    answers: (Array.isArray(doc?.answers) ? doc.answers : []).slice(-50).map(adminAnswer),
+  }
+}
+
+const METRIC_NUMBERS = ['tasks', 'open', 'completed', 'failed', 'cancelled', 'fail_rate', 'asked_human', 'ask_rate', 'fallback', 'overdue', 'retried',
+  'queue_ms_p50', 'queue_ms_p90', 'run_ms_p50', 'run_ms_p90', 'total_ms_p50', 'total_ms_p90']
+
+function metricRow(r) {
+  const out = {}
+  for (const key of METRIC_NUMBERS) out[key] = Number.isFinite(r?.[key]) ? r[key] : undefined
+  return out
+}
+
+/** Whitelisted metrics: numbers only, per worker and in total. */
+export function adminMetrics(doc) {
+  return {
+    since: text(doc?.since, 64), until: text(doc?.until, 64), hours: int(doc?.hours), archived_after_hours: num(doc?.archived_after_hours),
+    total: metricRow(doc?.total),
+    workers: (Array.isArray(doc?.workers) ? doc.workers : []).slice(0, 200).map(w => ({ worker: text(w?.worker, 160), ...metricRow(w) })),
   }
 }
 
@@ -279,10 +334,10 @@ export function parseTaskQuery(q) {
 }
 
 /**
- * @param {{ client: ReturnType<typeof import('./hub-client.js').createHubClient>, logger?: any }} deps
+ * @param {{ client: ReturnType<typeof import('./hub-client.js').createHubClient>, logger?: any, profile?: string }} deps
  * @returns {{ adminRoutes: any[] }}
  */
-export function createRoutes({ client, logger }) {
+export function createRoutes({ client, logger, profile }) {
   const redact = typeof client?.redact === 'function' ? client.redact : (x => String(x))
 
   /** Read-only admin GET; the caller wraps it in requireLogin. */
@@ -325,6 +380,15 @@ export function createRoutes({ client, logger }) {
       const entries = (Array.isArray(doc?.entries) ? doc.entries : []).map(adminSessionEntry)
       return { generated_at: new Date().toISOString(), task_id: id, total: int(doc?.total) ?? entries.length, next: int(doc?.next), full: doc?.full === true, entries }
     }),
+    adminGet('timeline', 'admin-timeline', async (q) => {
+      const id = (q.get('task_id') ?? '').trim()
+      if (!TASK_ID_RE.test(id)) throw new HubError(400, 'bad-query', 'task_id is required')
+      return { generated_at: new Date().toISOString(), ...adminTimeline(await client.timeline(id)) }
+    }),
+    adminGet('metrics', 'admin-metrics', async (q) => {
+      const hours = smallInt(q.get('hours'), 1, 2160, 'hours') ?? 168
+      return { generated_at: new Date().toISOString(), ...adminMetrics(await client.metrics(hours)) }
+    }),
     adminGet('requests', 'admin-requests', async (q) => {
       const status = (q.get('status') ?? '').trim() || 'pending'
       if (!REQUEST_STATUSES.includes(status)) throw new HubError(400, 'bad-query', `status must be one of ${REQUEST_STATUSES.join(', ')}`)
@@ -362,6 +426,23 @@ export function createRoutes({ client, logger }) {
       const id = typeof body?.task_id === 'string' ? body.task_id.trim() : ''
       if (!TASK_ID_RE.test(id)) throw new HubError(400, 'bad-request', 'task_id is required')
       sendJson(res, 200, { task: adminTaskRow(await client.cancel(id, '在调度台上取消')) })
+    }),
+  })
+  // The answer box: the user answers a worker's question; it goes back to that worker.
+  adminRoutes.push({
+    kind: 'exact',
+    path: `${ADMIN_BASE}/answer`,
+    handler: guard(logger, 'admin-answer', redact, async (req, res) => {
+      if (req.method !== 'POST') throw new HubError(405, 'method-not-allowed', 'use POST')
+      if (!String(req.headers?.['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+        throw new HubError(415, 'unsupported-media-type', 'send application/json')
+      }
+      const body = await readJsonBody(req)
+      const id = typeof body?.task_id === 'string' ? body.task_id.trim() : ''
+      if (!TASK_ID_RE.test(id)) throw new HubError(400, 'bad-request', 'task_id is required')
+      const answer = typeof body?.answer === 'string' ? body.answer.trim() : ''
+      if (answer === '' || answer.length > 4000) throw new HubError(400, 'bad-request', 'answer must be 1..4000 characters')
+      sendJson(res, 200, { task: adminTaskRow(await client.answer({ task_id: id, answer, profile })) })
     }),
   })
   return { adminRoutes }

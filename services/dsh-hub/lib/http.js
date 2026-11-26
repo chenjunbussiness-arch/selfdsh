@@ -32,7 +32,7 @@ export const TOKEN_HEADER = 'x-dsh-token'
 export const SMALL_BODY = 16 * 1024
 export const EVENT_BODY = 64 * 1024
 export const DEFAULT_MAX_RESULT_BYTES = 20 * 1024 * 1024
-export const TASK_STATUSES = ['pending', 'accepted', 'running', 'completed', 'failed', 'cancelled', 'dead']
+export const TASK_STATUSES = ['pending', 'accepted', 'running', 'waiting_input', 'completed', 'failed', 'cancelled', 'dead']
 export const REQUEST_STATUSES = ['pending', 'approved', 'rejected', 'expired', 'all']
 
 // --- addresses and the allow list ---------------------------------------------
@@ -388,6 +388,7 @@ export const ROUTES = {
     },
   },
   '/v1/cancel': { method: 'POST', auth: 'worker', body: 'event', run: ({ hub, id, body }) => hub.agentCancel(id, requireTaskId(body.task_id), body.reason) },
+  '/v1/answer': { method: 'POST', auth: 'worker', body: 'event', run: ({ hub, id, body }) => hub.answer(undefined, { task_id: requireTaskId(body.task_id), answer: body.answer }, { asAgent: id }) },
   '/v1/artifact': {
     method: 'GET', auth: 'worker',
     run: async ({ hub, id, query }) => {
@@ -446,6 +447,11 @@ export const ROUTES = {
   // the event stream every DSH follows (long poll by cursor)
   '/v1/ctl/events': { method: 'GET', auth: 'controller', run: runEvents },
   '/v1/ctl/ack': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.acknowledge(id, requireTaskId(body.task_id)) },
+  // the task lifecycle: answer a worker's question, mark results shown, one task's timeline, numbers
+  '/v1/ctl/answer': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.answer(id, { task_id: requireTaskId(body.task_id), answer: body.answer, profile: profileValue(body.profile) }) },
+  '/v1/ctl/delivered': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.delivered(id, { task_ids: body.task_ids, profile: profileValue(body.profile) }) },
+  '/v1/ctl/timeline': { method: 'GET', auth: 'controller', run: ({ hub, query }) => hub.timeline(requireTaskId(queryOne(query, 'task_id'))) },
+  '/v1/ctl/metrics': { method: 'GET', auth: 'controller', run: ({ hub, query }) => hub.metrics({ hours: intQuery(query, 'hours', 1, 24 * 90, 168) }) },
   // full session logs: DSH uploads those of the tasks it runs itself; any controller reads any
   '/v1/ctl/session': { method: 'POST', auth: 'controller', body: 'result', run: ({ hub, id, body }) => hub.controllerSession(id, body) },
   '/v1/ctl/session/read': {

@@ -5,8 +5,8 @@ import { HubError } from '../hub-client.js'
 import { CONTROLLER, TOKEN, assertNoToken, callRoute, fakeLogger, findRoute, jsonHeaders, makeClient } from './helpers.mjs'
 
 const A = name => `${ADMIN_BASE}/${name}`
-const PATHS = ['overview', 'agents', 'tasks', 'task', 'requests', 'session'].map(A)
-const ALL_PATHS = [...PATHS, A('ack'), A('cancel')]
+const PATHS = ['overview', 'agents', 'tasks', 'task', 'requests', 'session', 'timeline', 'metrics'].map(A)
+const ALL_PATHS = [...PATHS, A('ack'), A('cancel'), A('answer')]
 const errorOf = res => res.json().error
 
 // --- hub fixtures, with fields that must NOT pass the whitelist ---------------------
@@ -32,8 +32,8 @@ const HUB_TASK = {
     error: { code: 'NONE', message: 'n/a', retryable: false, stack: 'at hub.js:1' },
   },
 }
-const ROW_KEYS = ['task_id', 'agent', 'assigned_to', 'type', 'title', 'status', 'priority', 'attempts', 'progress', 'message', 'created_at', 'lease_until', 'depends_on', 'result', 'acknowledged', 'in_history', 'quiet', 'session_entries']
-const DETAIL_KEYS = [...ROW_KEYS, 'instruction', 'inputs', 'output', 'context_keys', 'history', 'output_files']
+const ROW_KEYS = ['task_id', 'agent', 'assigned_to', 'type', 'title', 'status', 'priority', 'attempts', 'progress', 'message', 'created_at', 'lease_until', 'depends_on', 'result', 'acknowledged', 'in_history', 'quiet', 'session_entries', 'answers_count', 'overdue']
+const DETAIL_KEYS = [...ROW_KEYS, 'instruction', 'inputs', 'output', 'context_keys', 'history', 'answers', 'output_files']
 
 const HUB_REQUEST = {
   request_id: 'req_1', status: 'pending', agent_id: 'kiro-mydesk', platform: 'kiro', mode: 'push', node: 'mydesk', workspaces: ['deepseek-harness'],
@@ -78,7 +78,7 @@ test('route table: six read-only admin routes plus ack and cancel; no worker /v1
     assert.ok(!r.path.includes('/v1'))
   }
   assert.equal(ADMIN_BASE, '/api/agent-hub/admin')
-  assert.deepEqual(TASK_STATUSES, ['pending', 'accepted', 'running', 'completed', 'failed', 'cancelled', 'dead'])
+  assert.deepEqual(TASK_STATUSES, ['pending', 'accepted', 'running', 'waiting_input', 'completed', 'failed', 'cancelled', 'dead'])
   assert.deepEqual(REQUEST_STATUSES, ['pending', 'approved', 'rejected', 'expired', 'all'])
 })
 
@@ -213,7 +213,7 @@ test('hub unreachable: 503 hub-unreachable on every admin route', async () => {
   for (const code of ['ECONNREFUSED', 'ETIMEDOUT', 'DEPTH_ZERO_SELF_SIGNED_CERT']) {
     const { get } = setup(() => ({ networkError: code }))
     for (const path of PATHS) {
-      const res = await get(path, path.endsWith('/task') || path.endsWith('/session') ? '?task_id=t1' : '')
+      const res = await get(path, path.endsWith('/task') || path.endsWith('/session') || path.endsWith('/timeline') ? '?task_id=t1' : '')
       assert.equal(res.statusCode, 503, `${code} ${path}`)
       assert.equal(errorOf(res).code, 'hub-unreachable')
       assert.match(errorOf(res).message, new RegExp(code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ? 'TLS' : code))
@@ -433,4 +433,44 @@ test('cancel: POST with a JSON body only; forwarded to /v1/ctl/cancel with a rea
   assert.equal(res.json().task.status, 'cancelled')
   assert.equal(calls.at(-1).path, '/v1/ctl/cancel')
   assertNoToken(res.text)
+})
+
+test('answer: POST JSON only, forwarded to /v1/ctl/answer; the new row carries the phase', async () => {
+  const { route, calls } = setup({ ...ROUTES, 'POST /v1/ctl/answer': { body: { task: { ...HUB_TASK, status: 'pending', phase: 'queued', answers_count: 1 } } } })
+  const answer = route(A('answer'))
+  assert.equal((await callRoute(answer, { method: 'GET' })).statusCode, 405)
+  assert.equal((await callRoute(answer, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'x' })).statusCode, 415)
+  assert.equal((await callRoute(answer, { method: 'POST', headers: jsonHeaders(), body: { task_id: 't1', answer: '  ' } })).statusCode, 400)
+  assert.equal(calls.length, 0)
+  const res = await callRoute(answer, { method: 'POST', headers: jsonHeaders(), body: { task_id: 't1', answer: 'SQLite' } })
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual([res.json().task.phase, res.json().task.answers_count], ['queued', 1])
+  assert.deepEqual([calls.at(-1).path, calls.at(-1).json], ['/v1/ctl/answer', { task_id: 't1', answer: 'SQLite' }])
+})
+
+test('timeline and metrics: forwarded and whitelisted', async () => {
+  const { get, calls } = setup({
+    ...ROUTES,
+    'GET /v1/ctl/timeline': { body: {
+      task: HUB_TASK, phase: 'completed', archived: true, secret: 'dsha_x_y',
+      durations: { queue_ms: 1000, claim_ms: 0, run_ms: 5000, waiting_ms: 0, total_ms: 6000, other: 1 },
+      events: [{ at: '2026-11-22T10:00:00.000Z', event: 'created', phase: 'queued', by: 'dsh-cloud', elapsed_ms: 0, gap_ms: 0, path: '/srv/x' }],
+      answers: [{ question: 'A?', answer: 'B', at: '2026-11-22T10:01:00.000Z', by: 'dsh-cloud', delivered: true }],
+    } },
+    'GET /v1/ctl/metrics': { body: { since: 'a', until: 'b', hours: 24, total: { tasks: 3, fail_rate: 0.5, junk: 'x' }, workers: [{ worker: 'quick', tasks: 3, run_ms_p50: 1000 }] } },
+  })
+  const line = (await get(A('timeline'), '?task_id=t1')).json()
+  assert.equal(line.phase, 'completed')
+  assert.equal(line.archived, true)
+  assert.deepEqual(line.durations, { queue_ms: 1000, claim_ms: 0, run_ms: 5000, waiting_ms: 0, total_ms: 6000 })
+  assert.deepEqual(line.events[0], { at: '2026-11-22T10:00:00.000Z', event: 'created', phase: 'queued', by: 'dsh-cloud', elapsed_ms: 0, gap_ms: 0 })
+  assert.deepEqual(line.answers, [{ question: 'A?', answer: 'B', at: '2026-11-22T10:01:00.000Z', by: 'dsh-cloud' }])
+  assert.ok(!JSON.stringify(line).includes('dsha_x_y'))
+  assert.equal((await get(A('timeline'))).statusCode, 400)
+  const m = (await get(A('metrics'), '?hours=24')).json()
+  assert.deepEqual(Object.fromEntries(calls.at(-1).query.entries()), { id: CONTROLLER, hours: '24' })
+  assert.equal(m.total.tasks, 3)
+  assert.equal(m.total.junk, undefined)
+  assert.deepEqual([m.workers[0].worker, m.workers[0].run_ms_p50], ['quick', 1000])
+  assert.equal((await get(A('metrics'), '?hours=0')).statusCode, 400)
 })

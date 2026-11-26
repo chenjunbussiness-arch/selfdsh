@@ -210,10 +210,11 @@ function anchorInstructions(partitions) {
         '7. 用户要把任务挂起等前置：`task_suspend`，填 task_id 和原因，前置写在 `prerequisite`（会新建前置任务）或在',
         '   `wait_for` 填已有任务号，前置完成后自动接着做。只是先放着的只写原因，之后用 `task_control` 的 `resume` 继续。',
         '8. 「【进度提醒】」开头的消息来自路由器，不派新任务。普通进度一两句话转告用户，不调用工具。',
-        '   带「需要你决定 / 需要回答 / 卡住了 / 没法开始 / 没法继续 / 没有动静」的条目是在等用户：不要只转述，要直接问用户。',
+        '   带「需要你决定 / 需要回答 / 卡住了 / 没法开始 / 没法继续 / 没有动静 / 超时」的条目是在等用户：不要只转述，要直接问用户。',
         '   说清是哪个任务、卡在哪，给两三个可选做法（例如补充信息后继续、换个做法或改派、取消），一个任务只问一次；',
         '   原因没写清时可以先用 `task_board`（或云端任务的 `task_get`）看一眼再问。用户回答后：本地任务用 `task_control`',
-        '   `resume`（`value` 写用户的决定）；云端任务按回答 `task_dispatch` 重派（`replaces` 填原任务号）、`task_retry` 或 `task_cancel`。',
+        '   `resume`（`value` 写用户的决定）；云端任务提问（带「task_answer」的条目）就用 `task_answer`（task_id + 用户的原话），',
+        '   答案会交回提问的那个 worker 接着做，不要重派；超时或没人接的按用户决定 `task_retry`、`task_dispatch`（`replaces` 填原任务号）或 `task_cancel`。',
     ].join('\n');
 }
 /** Directory the anchor Session lives in: the partitions' shared parent, else the first root. */

@@ -73,9 +73,10 @@ Content-Type 一律 `application/json`（下载产物除外）。错误统一 `{
 |---|---|
 | `POST /v1/enroll?id=` | 无令牌。body `{platform, mode, node, workspaces[], capabilities[], max_concurrency, description}` → `{request_id, poll_secret, status:"pending"}` |
 | `POST /v1/enroll/status?id=` | 无令牌。body `{request_id, poll_secret}` → 状态；批准后**首次**返回 `token` |
-| `POST /v1/heartbeat?id=` | body `{status, workspaces[], running?[task_id], client_version?}`，`workspaces` 超出批准范围的部分被截断 → `{ok, status, server_time, workspaces, ignored_workspaces, abort[], requeued[]}`（对账规则见第 9 节） |
+| `POST /v1/heartbeat?id=` | body `{status, workspaces[], running?[task_id], client_version?}`，`workspaces` 超出批准范围的部分被截断 → `{ok, status, server_time, workspaces, ignored_workspaces, abort[], requeued[], answers?[{task_id, question, answer, at}]}`（对账规则见第 9 节；`answers` 见第 12 节） |
 | `GET /v1/poll?id=&max=1&wait=25` | 领任务；`wait` 秒内没有任务就长轮询等待（上限 55），有新任务立刻返回 |
-| `POST /v1/event?id=` | `{task_id, attempt?, progress, message}`，续租 |
+| `POST /v1/event?id=` | `{task_id, attempt?, progress, message, stage?}`，续租；回复里可能带 `answers`（第 12 节） |
+| `POST /v1/answer?id=` | 派单 agent 用：`{task_id, answer}`，回答自己派的任务上 worker 提的问题（第 12 节） |
 | `POST /v1/result?id=` | `{task_id, attempt?, status, summary, files[{name,base64}], error, needs_input}`。`attempt` 是领任务时拿到的第几次执行；和任务当前的不一样（租约过期后已重排）回 409 `stale-attempt`，旧的结果不会盖掉新的 |
 | `GET /v1/artifact?id=&task_id=&name=[&from_task=]` | 下载本任务输入或上游产出 |
 | `GET /v1/me?id=` | hub 眼里的自己：`status`、`last_seen`、`version`、授予的 `workspaces` / `capabilities`、`reported_workspaces`、`ignored_workspaces`、`running_tasks`、`offline_after_ms`、`client_ip` |
@@ -95,6 +96,10 @@ Content-Type 一律 `application/json`（下载产物除外）。错误统一 `{
 | `POST /v1/ctl/approve?id=` | `{request_id, capabilities?, workspaces?, max_concurrency?}`，只能收窄 |
 | `POST /v1/ctl/reject?id=`、`/v1/ctl/revoke?id=`、`/v1/ctl/provision?id=` | 驳回、吊销、直接签发 worker |
 | `GET /v1/ctl/overview?id=` | 总览（给面板用） |
+| `POST /v1/ctl/answer?id=` | `{task_id, answer, profile?}`：回答 worker 的提问，回答回到提问的那个 worker（第 12 节）；只限发布方（否则 403 `not-creator`） |
+| `POST /v1/ctl/delivered?id=` | `{task_ids[], profile?}`：发布方的作战室已经显示了这些结果 / 问题（DSH 插件自动调） |
+| `GET /v1/ctl/timeline?id=&task_id=` | 一条任务的全生命周期：阶段、每步谁做的、各阶段耗时、问答；已归档的任务也能查 |
+| `GET /v1/ctl/metrics?id=&hours=168` | 窗口内（1 小时到 90 天）按执行者的指标：数量、完成 / 失败 / 未结束、失败率、问人比例、兜底次数、超时、排队和运行时长 p50 / p90 |
 | `GET /v1/health` | 无令牌（但受 IP 白名单限制），返回 `{ok, version, client_ip}`；`client_ip` 是 hub 实际看到的来源地址 |
 
 ### 5.3 CLI（只在 hub 机器上）
@@ -271,3 +276,30 @@ worker 客户端在 `task.json` 里写 `effort_resolved`：任务自己的 effor
 - 首选：同一个 `sticky_key`（会话、浏览器账号、测试套件）的上次完成者；否则上游或父任务的完成者；否则同一工作区的上次完成者。`sticky: false` 关掉。
 - 别的 worker 让它 `sticky.holdSeconds`（默认 120 秒）；首选 worker 不在线、满了或交还了，立即放开。
 - 只记成功完成的 worker，DSH 兜底不记；记一天（`sticky.ttlSeconds`）。
+
+## 12. 任务生命周期：阶段、问答、审计、指标、超时
+
+实现：`services/dsh-hub/lib/lifecycle.js`（纯函数）和 `lib/hub.js`。
+
+**一套阶段**（作战室、调度台、指标都用它）：`queued`（排队）→ `claimed`（已领，还没报进度）→ `running` / `blocked`（卡在别的事上）→ `waiting_input`（等人回答）→ `completed` / `failed` / `cancelled`。`dead`（重试用完）算 `failed`。另有三个不改阶段的标记：`delivered`（结果或问题已经显示在发布方的作战室）、`acknowledged`（有人收起了）、`overdue`（超时）。任务状态多了一个 `waiting_input`。
+
+**问答闭环**：
+
+- worker 交回去问：`result` 带 `status: "partial"` 和 `needs_input` → 任务进 `waiting_input`（不算失败，不扣尝试次数），记下提问的 worker。作战室收到「等你回答」。
+- 回答：DSH 里 `task_answer`（`/v1/ctl/answer`），或调度台「等你回复」里的回答框。任务回到队列，**优先给原来提问的 worker**（粘性），领任务时 `answers` 列出以前的问题和回答，worker 接着做。
+- worker 边做边问：`event` 带 `stage: "needs_input"`，任务留在它手上；回答在下一次 `event` 或 `heartbeat` 的回复里以 `answers` 交给它，每条只交一次。`agent_client.py` 把它追加到任务目录的 `answers.jsonl`。
+- 不想回答：收起（acknowledge）或取消，任务以 `cancelled` 结束。
+
+**审计**：每条历史事件带 `by`（谁做的：控制方、worker 或 `hub`）和 `phase`。所有事件同时追加到 `DSH_HOME/audit/<YYYY-MM>.jsonl`（每行一条，按月分文件，不截断）。任务归档后 `timeline` 仍从 `archive/*.jsonl.gz` 读；任务自己的历史超过 200 条被截断时，从审计文件补全。
+
+**指标**：`/v1/ctl/metrics` 按执行者（worker、`dsh-self` 兜底、DSH 本地分区 worker）汇总窗口内创建的任务。失败率 = 失败 /（完成 + 失败），取消不计；问人比例 = 进过 `waiting_input` 的任务 / 全部；运行时长 = 已领 + 运行 + 卡住（只算完成的任务）。
+
+**超时（SLA）**：`hub.json` 的 `due`，或派任务时的 `due_minutes`（1 到 43200）和 `on_overdue`：
+
+```json
+{ "due": { "minutes": { "default": 120, "code": 60, "local": 240 }, "onOverdue": "notify" } }
+```
+
+- `minutes` 按 `capability`、再按 `type`、再按 `default` 取；`local` 管 DSH 本地分区 worker 的任务。不配就不计时。
+- 从创建算起，等人回答的时间不算。到时只标一次 `overdue`，并给发布方信箱发一条事件。
+- `onOverdue: "notify"`（默认）只提醒；`"reassign"` 把任务从当前 worker 手里收回重排（这个 worker 不再领它，不扣尝试次数），没人持有的照样只提醒。

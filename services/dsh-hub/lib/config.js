@@ -25,9 +25,10 @@ import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
 import { compileAllow, DEFAULT_MAX_RESULT_BYTES, resolveListenHost } from './http.js'
+import { MAX_DUE_MINUTES, OVERDUE_ACTIONS } from './hub.js'
 
 export const DEFAULT_PORT = 7891
-export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'sticky', 'mcp', 'autoApprove', 'expiry']
+export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'sticky', 'mcp', 'autoApprove', 'expiry', 'due']
 
 /** A configuration problem: the service must not start (exit code 78, EX_CONFIG). */
 export class ConfigError extends Error {}
@@ -107,7 +108,20 @@ export function resolveConfig(raw = {}, { env = {}, dir = '.' } = {}) {
   const mcp = raw.mcp ?? {}
   if (typeof mcp !== 'object' || Array.isArray(mcp) || mcp === null || (mcp.enabled !== undefined && typeof mcp.enabled !== 'boolean')) throw new ConfigError('hub.json: mcp must be {"enabled": true|false}')
 
+  // due: when an unfinished task counts as overdue (minutes since created), per
+  // capability / type / `local` / `default`, and what then: notify (default) or reassign.
+  const due = raw.due ?? {}
+  if (typeof due !== 'object' || Array.isArray(due) || due === null) throw new ConfigError('hub.json: due must be an object')
+  const dueMinutes = due.minutes ?? {}
+  if (typeof dueMinutes !== 'object' || Array.isArray(dueMinutes) || dueMinutes === null) throw new ConfigError('hub.json: due.minutes must be an object of {name: minutes}')
+  for (const [key, value] of Object.entries(dueMinutes)) {
+    if (!/^[a-z][a-z0-9-]{0,47}$/.test(key)) throw new ConfigError(`hub.json: due.minutes key "${key}" is not a capability / type name`)
+    if (!Number.isInteger(value) || value < 1 || value > MAX_DUE_MINUTES) throw new ConfigError(`hub.json: due.minutes.${key} must be an integer 1..${MAX_DUE_MINUTES}`)
+  }
+  if (due.onOverdue !== undefined && !OVERDUE_ACTIONS.includes(due.onOverdue)) throw new ConfigError(`hub.json: due.onOverdue must be one of ${OVERDUE_ACTIONS.join(', ')}`)
+
   const config = {
+    due: { minutes: { ...dueMinutes }, onOverdue: due.onOverdue ?? 'notify' },
     fallback: { enabled: fb.enabled !== false, noFallbackCapabilities: fb.noFallbackCapabilities ?? ['quick'] },
     sticky: {
       holdSeconds: integer(st.holdSeconds, 'sticky.holdSeconds', 0, 3600, 120),
