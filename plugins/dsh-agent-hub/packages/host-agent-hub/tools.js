@@ -214,13 +214,14 @@ export function createTools({ client }) {
         sticky_key: { type: 'string', description: 'Same key (session, browser login, test suite) goes back to the worker that handled it last.' },
         sticky: { type: 'boolean', description: 'false: no preference for the last worker.' },
         needs: { type: 'array', items: { type: 'string', enum: [...NEEDS] }, description: 'What the task needs: code (edit), test, git (commit/push/PR), cmd (other commands). A coder takes only ["code"]; the instruction text is checked too.' },
+        replaces: { type: 'string', description: 'Task id this one replaces (one that asked a question or failed, now re-sent with the answer): it is put away once this one is queued.' },
       },
     },
     async execute(raw) {
       if (raw.type === 'code' && (typeof raw.workspace !== 'string' || raw.workspace.trim() === '')) {
         throw new HubError(400, 'bad-task', 'workspace is required for type "code" (a workspace name, not a path)')
       }
-      const task = { ...raw }
+      const { replaces, ...task } = raw
       const effort = raw.effort
       if (effort !== undefined) {
         if (effort === null || typeof effort !== 'object' || Array.isArray(effort)) throw new HubError(400, 'bad-task', 'effort must be an object { mode, thinking, agent }')
@@ -237,7 +238,16 @@ export function createTools({ client }) {
       // test tasks, a pool only the tasks one of its worker / tester members accepts.
       const refusal = await dispatchRoleRefusal(client, task)
       if (refusal !== undefined) throw new HubError(400, refusal.code, refusal.message)
-      return client.dispatch(task)
+      const created = await client.dispatch(task)
+      if (typeof replaces !== 'string' || replaces.trim() === '') return created
+      // The task it replaces leaves 等你回复 now, not when its expiry comes round.
+      try {
+        await client.acknowledge(replaces.trim())
+        return { ...created, replaced: { task_id: replaces.trim(), put_away: true } }
+      } catch (error) {
+        const note = error?.code === 'task-active' ? 'still running: task_cancel it if it should stop' : `${error?.code ?? 'error'}: ${error?.message ?? error}`
+        return { ...created, replaced: { task_id: replaces.trim(), put_away: false, note } }
+      }
     },
   })
 
@@ -266,7 +276,7 @@ export function createTools({ client }) {
 
   define({
     name: 'task_ack',
-    description: 'Seen this failed task: hide it from the default task list now.',
+    description: 'Put a finished task away now (it leaves 等你回复 / the default list): a failure you have reported, or a question you have dealt with. A running one: task_cancel.',
     parameters: { required: ['task_id'], properties: { task_id: str } },
     execute: raw => client.acknowledge(raw.task_id),
   })

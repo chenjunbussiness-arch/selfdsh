@@ -103,6 +103,16 @@ export function fetchSession(taskId: string, after = 0, limit = 200): Promise<Se
   return getJson<SessionDoc>('session', { task_id: taskId, after, limit })
 }
 
+/** Stop a task that is still open (only the DSH that created it may); it moves to 已结束. */
+export async function cancelTask(taskId: string): Promise<TaskRow> {
+  const body = await send<{ task: TaskRow }>(`${ADMIN_BASE}/cancel`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ task_id: taskId }),
+  })
+  return body.task
+}
+
 /** Put a failed task away now (it moves to 历史). */
 export async function ackTask(taskId: string): Promise<TaskRow> {
   const body = await send<{ task: TaskRow }>(`${ADMIN_BASE}/ack`, {

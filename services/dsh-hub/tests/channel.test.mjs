@@ -239,6 +239,13 @@ test('expiry: done tasks leave the default list after 12 h, failed after 2 days 
   assert.deepEqual(overview.expiry, { doneHours: 12, failedHours: 48, dormantHours: 72, archiveHours: 168 })
   const pending = await dispatchTask(hub)
   await expectHubError(() => hub.acknowledge(CTL, pending.task_id), 409, 'task-active')
+  // A finished task that handed back a question (partial) is put away the same way.
+  const asked = await dispatchTask(hub, { title: 'asked' })
+  await hub.poll('worker', { max: 2 })
+  await hub.submitResult('worker', { task_id: asked.task_id, status: 'partial', summary: '', needs_input: 'v1 or v2?' })
+  assert.ok((await listed()).includes('asked'))
+  await hub.acknowledge(CTL, asked.task_id)
+  assert.ok(!(await listed()).includes('asked'))
 })
 
 test('expiry: an agent silent for 3 days is dormant; revoked ones always are', async (t) => {

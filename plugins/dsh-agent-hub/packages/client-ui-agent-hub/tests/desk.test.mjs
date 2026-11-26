@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { LANES, agentGroups, fallbackReason, fallbackTasks, laneOf, lanesOf, registeredBy, selfParts, selfWorkers, stageOf, timeline } from '../src/client/desk.ts'
+import { LANES, agentGroups, clearActionOf, fallbackReason, fallbackTasks, laneOf, lanesOf, registeredBy, selfParts, selfWorkers, stageOf, timeline } from '../src/client/desk.ts'
 
 const task = (over = {}) => ({ task_id: 't', agent: 'pool:code', type: 'code', title: 'x', status: 'running', priority: 'normal', attempts: 1, created_at: '2026-11-24T10:00:00.000Z', depends_on: [], ...over })
 const agent = (over = {}) => ({ agent_id: 'a', capabilities: [], revoked: false, online: true, running_tasks: [], ...over })
@@ -79,4 +79,20 @@ test('registeredBy: reads the hub line for a task DSH runs itself', () => {
   assert.deepEqual(registeredBy({ event: 'registered', message: 'dsh-cloud runs it itself' }), { by: 'dsh-cloud' })
   assert.equal(registeredBy({ event: 'created', message: 'dsh-cloud runs it itself' }), undefined)
   assert.equal(registeredBy({ event: 'registered', message: 'something else' }), undefined)
+})
+
+test('等你回复: a handed-back question waits until someone deals with it, and every row there can be cleared', () => {
+  // A worker that hands the task back with a question ends as failed on the hub.
+  const asked = task({ status: 'failed', result: { status: 'failed', needs_input: '越界：请改派给 worker', output_count: 0 } })
+  assert.equal(laneOf(asked), 'waiting')
+  assert.equal(clearActionOf(asked), 'ack')
+  // Put away (or past its expiry): it leaves the lane at once.
+  assert.equal(laneOf({ ...asked, acknowledged: true }), 'ended')
+  assert.equal(laneOf({ ...asked, in_history: true }), 'ended')
+  // Still open and asking: the way out is to cancel it.
+  const open = task({ status: 'running', stage: 'needs_input' })
+  assert.equal(laneOf(open), 'waiting')
+  assert.equal(clearActionOf(open), 'cancel')
+  // A plain failure is not a question.
+  assert.equal(laneOf(task({ status: 'failed', result: { status: 'failed', output_count: 0 } })), 'ended')
 })

@@ -31,6 +31,8 @@ const TASK_ID_RE = /^[A-Za-z0-9_.-]{1,96}$/
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SESSION_BATCH = 200
 const TEXT_MAX = 20000
+/** How long a mirrored row may be missing from the board before its hub task is closed. */
+const ORPHAN_MS = 10 * 60_000
 /** How many tasks' last 作战室 line are remembered (so a repeat is never announced twice). */
 const SAID_MAX = 300
 
@@ -168,7 +170,9 @@ export function noticeOf(event) {
       return `${title} 进度${msg}`
     }
     case 'completed': return `${title} 完成${msg}`
-    case 'failed': return `${title} 失败${msg}`
+    // A worker that handed the task back with a question (needs_input / partial) ends as
+    // failed on the hub; to the 作战室 that is a question, not a failure.
+    case 'failed': return event.stage === 'needs_input' ? `${title} 需要回答${msg}` : `${title} 失败${msg}`
     case 'cancelled': return `${title} 已取消`
     case 'needs_input': return `${title} 需要回答${msg}`
     case 'requeued': return `${title} 退回队列${msg}`
@@ -184,14 +188,14 @@ export function noticeOf(event) {
  * @param {string} deps.profile              this DSH's profile name
  * @param {string} deps.stateFile            where the sync state is kept
  * @param {object} deps.logger
- * @param {object} [deps.options]            { mirror, notices, intervalMs, stepEveryMs, backfillHours, waitSeconds }
+ * @param {object} [deps.options]            { mirror, notices, intervalMs, stepEveryMs, backfillHours, waitSeconds, stallMinutes, stallCheckMs }
  */
 export function createSync(deps) {
   const { client, logger } = deps
-  const opts = { mirror: true, notices: true, intervalMs: 10_000, stepEveryMs: 30_000, backfillHours: 12, waitSeconds: 20, ...deps.options }
+  const opts = { mirror: true, notices: true, intervalMs: 10_000, stepEveryMs: 30_000, backfillHours: 12, waitSeconds: 20, stallMinutes: 20, stallCheckMs: 120_000, ...deps.options }
   const now = deps.now ?? (() => Date.now())
   const profile = PROFILE_RE.test(deps.profile ?? '') ? deps.profile : 'default'
-  let state = { tasks: {}, cursor: undefined, startedAt: undefined, said: {} }
+  let state = { tasks: {}, cursor: undefined, startedAt: undefined, said: {}, stalled: {} }
   let loaded = false
   let stopped = false
   let mirrorBusy = false
@@ -203,7 +207,7 @@ export function createSync(deps) {
     loaded = true
     try {
       const raw = JSON.parse(await readFile(deps.stateFile, 'utf8'))
-      if (raw && typeof raw === 'object') state = { tasks: raw.tasks ?? {}, cursor: raw.cursor, startedAt: raw.startedAt, said: raw.said ?? {} }
+      if (raw && typeof raw === 'object') state = { tasks: raw.tasks ?? {}, cursor: raw.cursor, startedAt: raw.startedAt, said: raw.said ?? {}, stalled: raw.stalled ?? {} }
     } catch { /* first run */ }
     state.startedAt ??= new Date(now()).toISOString()
   }
@@ -318,8 +322,25 @@ export function createSync(deps) {
         }
       }
       if (offlineSince !== undefined && synced > 0) backOnline()
-      // Forget rows the board no longer has once they are finished on the hub.
       const live = new Set((snap?.tasks ?? []).map(row => row.id))
+      // A row the board lost while it was still open (board reset, profile moved) would stay
+      // "进行中" on the hub for ever, with nobody able to clear it. Once it has been missing
+      // for ORPHAN_MS, close it there. An empty board is never trusted (it may still be loading).
+      if (live.size > 0 && offlineSince === undefined) {
+        for (const [rowId, rec] of Object.entries(state.tasks)) {
+          if (live.has(rowId) || rec.finished || rec.gone) { delete rec.missingSince; continue }
+          rec.missingSince ??= now()
+          if (now() - rec.missingSince < ORPHAN_MS) continue
+          try {
+            await client.cancel(rec.hubId, '本机已没有这个任务')
+            rec.finished = true
+          } catch (error) {
+            if (isOffline(error)) { wentOffline(error); break }
+            rec.gone = true
+          }
+        }
+      }
+      // Forget rows the board no longer has once they are finished on the hub.
       for (const [rowId, rec] of Object.entries(state.tasks)) if (!live.has(rowId) && (rec.finished || rec.gone)) delete state.tasks[rowId]
       await save()
       return { rows: synced }
@@ -380,6 +401,47 @@ export function createSync(deps) {
     return { lines }
   }
 
+  /**
+   * Cloud tasks that went quiet: leased or running, no news (progress, stage or
+   * session upload) for `stallMinutes`. A keep-alive renews the lease but is no
+   * news, so a worker stuck in a loop used to sit "进行中" for hours in silence.
+   * One 作战室 line per silence (「没有动静」), which it puts to the human; the task
+   * has to move again before it is reported a second time. Tasks a DSH runs itself
+   * are left to that DSH's router, which watches its own workers' logs.
+   */
+  async function stallOnce() {
+    const limitMs = opts.stallMinutes * 60_000
+    if (!(limitMs > 0)) return { lines: [] }
+    await load()
+    const rows = await client.listTasks({ limit: 200 })
+    const lines = []
+    const active = new Set()
+    for (const row of rows ?? []) {
+      if (row?.status !== 'accepted' && row?.status !== 'running') continue
+      const kind = typeof row.origin === 'string' ? row.origin : row.origin?.kind
+      if (kind === 'local') continue
+      active.add(row.task_id)
+      if (row.stage === 'blocked' || row.stage === 'needs_input') continue // already a question
+      const last = [row.updated_at, row.session_updated_at].map(at => Date.parse(at ?? '')).filter(Number.isFinite)
+      if (last.length === 0) continue
+      const at = Math.max(...last)
+      if (now() - at < limitMs) continue
+      const mark = new Date(at).toISOString()
+      if (state.stalled[row.task_id] === mark) continue
+      state.stalled[row.task_id] = mark
+      const who = row.agent && row.agent !== 'dsh-self' ? `（${row.agent}）` : ''
+      lines.push(`「${oneLine(row.title ?? row.task_id, 60)}」${who} 没有动静：已经 ${Math.max(1, Math.floor((now() - at) / 60_000))} 分钟没有新进展`)
+    }
+    for (const id of Object.keys(state.stalled)) if (!active.has(id)) delete state.stalled[id]
+    await save()
+    const router = deps.router?.()
+    for (const line of lines) {
+      if (router !== undefined && typeof router.notice === 'function') router.notice(line)
+      else logger.info(`agent-hub: ${line}`)
+    }
+    return { lines }
+  }
+
   async function loop(name, body, pause) {
     while (!stopped) {
       try {
@@ -401,12 +463,14 @@ export function createSync(deps) {
   return {
     mirrorOnce,
     streamOnce,
+    stallOnce,
     get state() { return state },
     /** Start both loops; returns a stop function. */
     start() {
       stopped = false
       if (opts.mirror) void loop('mirror', mirrorOnce, () => opts.intervalMs)
       if (opts.notices) void loop('stream', () => streamOnce(), () => 0)
+      if (opts.notices && opts.stallMinutes > 0) void loop('stall', stallOnce, () => opts.stallCheckMs)
       return () => { stopped = true }
     },
   }

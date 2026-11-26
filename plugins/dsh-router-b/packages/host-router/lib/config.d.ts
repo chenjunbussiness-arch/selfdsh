@@ -182,6 +182,11 @@ export interface RouterConfig {
     /** Most lines in one notice; older ones are folded into a count. Default 12. */
     readonly progressNoticeMaxLines?: number;
     /**
+     * A running worker whose log has been silent this many minutes gets one 【进度提醒】
+     * (「没有动静」), which the 作战室 puts to the human as a question. Default 20; 0 turns it off.
+     */
+    readonly stallNoticeMinutes?: number;
+    /**
      * Headless screenshot command used by `browser_capture`:
      * `<command> <url> <out.png> [--full] [--wait ms]`. Default `/srv/workspace/bin/screenshot`.
      */

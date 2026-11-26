@@ -22,10 +22,17 @@ export declare function noticeLinesOf(message: NoticeMessage): string[] | undefi
  * router's own, the whole line otherwise. A newer line about the same thing replaces the older.
  */
 export declare function noticeSubject(line: string): string;
+/** Whether a notice line waits on the human. */
+export declare function isAskLine(line: string): boolean;
 /**
  * Older lines (still waiting) then newer ones, one per subject, the latest kept, in the
  * order their subjects last changed; at most `max` lines, with a note on how many were folded.
+ * A line that waits on the human ({@link isAskLine}) is kept beside later progress about the
+ * same subject; only a newer question or the subject finishing replaces it. Questions are
+ * never folded away.
  */
 export declare function mergeNoticeLines(older: readonly string[], newer: readonly string[], max?: number): string[];
+/** Closing line of a notice that carries questions: what the 作战室 has to do with them. */
+export declare const ASK_FOOTER = "\uFF08\u5E26\u300C\u9700\u8981\u4F60\u51B3\u5B9A / \u9700\u8981\u56DE\u7B54 / \u5361\u4F4F\u4E86 / \u6CA1\u6709\u52A8\u9759\u300D\u7684\u6761\u76EE\u5728\u7B49\u7528\u6237\uFF1A\u6309\u89C4\u5219 8 \u76F4\u63A5\u95EE\u7528\u6237\u3002\uFF09";
 /** The text of one 【进度提醒】 message. */
 export declare function noticeText(lines: readonly string[]): string;

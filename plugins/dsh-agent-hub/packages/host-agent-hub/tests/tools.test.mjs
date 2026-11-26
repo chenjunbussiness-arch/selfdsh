@@ -282,3 +282,20 @@ test('fallback_take with nothing due returns task null and reads no input', asyn
   assert.deepEqual(await call('fallback_take'), { task: null })
   assert.equal(calls.length, 1)
 })
+
+test('task_dispatch replaces: the answered task is put away once the new one is queued; a running one is only reported', async () => {
+  const { call, calls } = setup((c) => {
+    if (c.path === '/v1/ctl/dispatch') return { body: { task_id: 'new1', status: 'pending' } }
+    if (c.path === '/v1/ctl/ack' && c.json.task_id === 'old1') return { body: { task: { task_id: 'old1', acknowledged: true } } }
+    if (c.path === '/v1/ctl/ack') return { status: 409, body: { error: { code: 'task-active', message: 'task is running' } } }
+    return { body: {} }
+  })
+  const out = await call('task_dispatch', { agent: 'pool:research', title: 't', instruction: 'Use the v2 field names.', replaces: 'old1' })
+  assert.deepEqual(out, { task_id: 'new1', status: 'pending', replaced: { task_id: 'old1', put_away: true } })
+  const sent = calls.find(c => c.path === '/v1/ctl/dispatch').json
+  assert.equal('replaces' in sent, false, 'replaces is not sent to the hub')
+  assert.deepEqual(calls.at(-1).json, { task_id: 'old1' })
+  const busy = await call('task_dispatch', { agent: 'pool:research', title: 't', instruction: 'i', replaces: 'old2' })
+  assert.equal(busy.replaced.put_away, false)
+  assert.match(busy.replaced.note, /task_cancel/)
+})

@@ -539,7 +539,10 @@ export function partitionBrief(partition, options) {
             + (options.taskId === undefined ? '' : ` ("${options.taskId}")`)
             + ' with a one-line `reason` and a self-contained `prerequisite` (plus `partition` if it belongs elsewhere), then end.',
         '- Run only the tests that cover what you changed; a full suite only when the task asks for it.',
-        '- Do not probe the environment up front. If something you need is missing, say what in your report.',
+        '- Do not probe the environment up front.',
+        '- When you cannot go on without the human (the task reads two ways, access or a credential is missing, the next step'
+            + ' could destroy data, or the same approach failed twice), do not guess and do not keep retrying: call `task_control`'
+            + ` \`block\`${options.taskId === undefined ? ' on your task' : ` on "${options.taskId}"`} with one clear question and two or three options, then end.`,
         '- Server changes (services, system files, media, DNS, firewall, users) go through `ops_run`.',
         '- Never write a host plugin\'s `lib/` and never stop or restart DSH. Client bundles may be rebuilt.',
     ];

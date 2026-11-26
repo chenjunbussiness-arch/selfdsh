@@ -72,6 +72,8 @@ export const AGENT_HUB_CSS = `
 .dah-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .dah-btn[data-size="sm"] { height: 30px; padding: 0 14px; font-size: 12.5px; }
 .dah-btn[data-icon="true"] { width: 30px; padding: 0; font-size: 16px; color: var(--dah-text-2); }
+.dah-btn[data-tone="danger"] { color: var(--dah-bad); background: color-mix(in srgb, var(--dah-bad) 10%, transparent); }
+.dah-btn[data-tone="danger"]:hover:not(:disabled) { background: color-mix(in srgb, var(--dah-bad) 16%, transparent); }
 .dah-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .dah-select {
   height: 30px; max-width: 220px; padding: 0 10px 0 14px; border: 0; border-radius: 999px; background: var(--dah-fill);
@@ -273,6 +275,7 @@ button.dah-chip:focus-visible { outline: 2px solid var(--dah-accent); outline-of
 .dah-item-note { color: var(--dah-text-2); }
 .dah-item-note[data-tone="failed"] { color: var(--dah-bad); }
 .dah-item-row .dah-chips { margin-top: 4px; }
+.dah-item-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 8px 8px; }
 .dah-item-row .dah-bar { width: 100%; margin: 4px 0 2px; }
 .dah-page[data-embedded="true"] .dah-badge { flex: none; font-size: 12.5px; line-height: 20px; }
 

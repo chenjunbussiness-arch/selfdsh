@@ -21,14 +21,29 @@ export const LANES: readonly Lane[] = ['queued', 'claimed', 'running', 'waiting'
 export const SELF_PREFIX = 'dsh-self'
 
 /** The lane a task belongs in. A task that asks for an answer waits on you whatever its status. */
-export function laneOf(task: Pick<TaskRow, 'status' | 'stage' | 'result'>): Lane {
-  const finished = task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled' || task.status === 'dead'
+export function laneOf(task: Pick<TaskRow, 'status' | 'stage' | 'result'> & Partial<Pick<TaskRow, 'acknowledged' | 'in_history'>>): Lane {
+  const finished = isFinished(task)
   const asks = task.stage === 'needs_input' || (task.result?.needs_input !== undefined && task.result.needs_input !== '')
-  if (asks && (!finished || task.result?.status === 'partial')) return 'waiting'
+  // A question someone already dealt with (put away, or past its expiry) no longer waits on anybody.
+  const handled = task.acknowledged === true || task.in_history === true
+  if (asks && !handled && (!finished || task.result?.status === 'partial' || task.status === 'failed')) return 'waiting'
   if (finished) return 'ended'
   if (task.status === 'pending') return 'queued'
   if (task.status === 'accepted') return 'claimed'
   return 'running'
+}
+
+/** Whether a task has ended (nothing more will run). */
+export function isFinished(task: Pick<TaskRow, 'status'>): boolean {
+  return task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled' || task.status === 'dead'
+}
+
+/**
+ * How a task in 等你回复 is cleared from the desk: a finished one is put away (ack,
+ * it moves to 历史); one still open is cancelled (its worker stops).
+ */
+export function clearActionOf(task: Pick<TaskRow, 'status'>): 'ack' | 'cancel' {
+  return isFinished(task) ? 'ack' : 'cancel'
 }
 
 /** Tasks per lane, newest activity first inside a lane. */

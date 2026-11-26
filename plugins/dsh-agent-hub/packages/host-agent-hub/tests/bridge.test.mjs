@@ -6,7 +6,7 @@ import { CONTROLLER, TOKEN, assertNoToken, callRoute, fakeLogger, findRoute, jso
 
 const A = name => `${ADMIN_BASE}/${name}`
 const PATHS = ['overview', 'agents', 'tasks', 'task', 'requests', 'session'].map(A)
-const ALL_PATHS = [...PATHS, A('ack')]
+const ALL_PATHS = [...PATHS, A('ack'), A('cancel')]
 const errorOf = res => res.json().error
 
 // --- hub fixtures, with fields that must NOT pass the whitelist ---------------------
@@ -68,7 +68,7 @@ function setup(handler = ROUTES, options = {}) {
 
 const keys = obj => Object.keys(obj).sort()
 
-test('route table: six read-only admin routes plus ack; no worker /v1 routes any more', () => {
+test('route table: six read-only admin routes plus ack and cancel; no worker /v1 routes any more', () => {
   const { adminRoutes } = setup()
   assert.deepEqual(adminRoutes.map(r => r.path).sort(), [...ALL_PATHS].sort())
   for (const r of adminRoutes) {
@@ -417,5 +417,20 @@ test('ack: POST with a JSON body only; forwarded to /v1/ctl/ack', async () => {
   assert.equal(res.statusCode, 200)
   assert.deepEqual([res.json().task.acknowledged, res.json().task.in_history], [true, true])
   assert.equal(calls.at(-1).path, '/v1/ctl/ack')
+  assertNoToken(res.text)
+})
+
+test('cancel: POST with a JSON body only; forwarded to /v1/ctl/cancel with a reason; hub refusals pass through', async () => {
+  const { route, calls } = setup({ ...ROUTES, 'POST /v1/ctl/cancel': { body: { task: { ...HUB_TASK, status: 'cancelled' } } } })
+  const cancel = route(A('cancel'))
+  assert.equal((await callRoute(cancel, { method: 'GET' })).statusCode, 405)
+  const form = await callRoute(cancel, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'task_id=t1' })
+  assert.equal(form.statusCode, 415, 'a cross-site form post is refused')
+  assert.equal((await callRoute(cancel, { method: 'POST', headers: jsonHeaders(), body: {} })).statusCode, 400)
+  assert.equal(calls.length, 0)
+  const res = await callRoute(cancel, { method: 'POST', headers: jsonHeaders(), body: { task_id: 't1' } })
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().task.status, 'cancelled')
+  assert.equal(calls.at(-1).path, '/v1/ctl/cancel')
   assertNoToken(res.text)
 })

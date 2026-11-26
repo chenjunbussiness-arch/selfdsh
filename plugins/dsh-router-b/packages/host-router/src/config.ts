@@ -196,6 +196,11 @@ export interface RouterConfig {
   /** Most lines in one notice; older ones are folded into a count. Default 12. */
   readonly progressNoticeMaxLines?: number
   /**
+   * A running worker whose log has been silent this many minutes gets one 【进度提醒】
+   * (「没有动静」), which the 作战室 puts to the human as a question. Default 20; 0 turns it off.
+   */
+  readonly stallNoticeMinutes?: number
+  /**
    * Headless screenshot command used by `browser_capture`:
    * `<command> <url> <out.png> [--full] [--wait ms]`. Default `/srv/workspace/bin/screenshot`.
    */
@@ -834,7 +839,10 @@ export function partitionBrief(
       + (options.taskId === undefined ? '' : ` ("${options.taskId}")`)
       + ' with a one-line `reason` and a self-contained `prerequisite` (plus `partition` if it belongs elsewhere), then end.',
     '- Run only the tests that cover what you changed; a full suite only when the task asks for it.',
-    '- Do not probe the environment up front. If something you need is missing, say what in your report.',
+    '- Do not probe the environment up front.',
+    '- When you cannot go on without the human (the task reads two ways, access or a credential is missing, the next step'
+      + ' could destroy data, or the same approach failed twice), do not guess and do not keep retrying: call `task_control`'
+      + ` \`block\`${options.taskId === undefined ? ' on your task' : ` on "${options.taskId}"`} with one clear question and two or three options, then end.`,
     '- Server changes (services, system files, media, DNS, firewall, users) go through `ops_run`.',
     '- Never write a host plugin\'s `lib/` and never stop or restart DSH. Client bundles may be rebuilt.',
   ]

@@ -30,6 +30,8 @@ function fakeClient() {
     async fallbackResult(body) { c.guard(body.task_id); calls.push(['result', body.task_id, body.status, body.summary, body.error?.code]); return { ok: true } },
     async cancel(id) { c.guard(id); calls.push(['cancel', id]); return {} },
     async appendSession(id, entries) { c.guard(id); calls.push(['session', id, entries.map(e => `${e.role}:${e.text}`)]); return { ok: true } },
+    list: [],
+    async listTasks() { if (c.down) throw offline(); calls.push(['list']); return c.list },
     async events({ after, wait }) {
       if (c.down) throw offline()
       calls.push(['events', after, wait])
@@ -283,4 +285,60 @@ test('stream without a router notice hook only logs', async (t) => {
 test('noticeOf skips plain step events without a message', () => {
   assert.equal(noticeOf({ kind: 'progress', stage: 'step', task_id: 't' }), undefined)
   assert.equal(noticeOf({ kind: 'progress', stage: 'blocked', message: '要密钥', title: 'z' }), '「z」 卡住了：要密钥')
+})
+
+test('noticeOf: a task handed back with a question reads as a question, not a failure', () => {
+  assert.equal(noticeOf({ kind: 'failed', stage: 'needs_input', title: 'z', agent: 'quick', message: '用 v1 还是 v2？' }), '「z」（quick） 需要回答：用 v1 还是 v2？')
+  assert.equal(noticeOf({ kind: 'failed', title: 'z', message: '编译失败' }), '「z」 失败：编译失败')
+})
+
+test('stall: a cloud task with no news for stallMinutes gets one 没有动静 line per silence', async (t) => {
+  const s = await setup(t, { options: { stallMinutes: 20 } })
+  const at = new Date(Date.parse('2026-11-24T10:00:00Z') - 5 * 60_000).toISOString()
+  s.client.list = [
+    { task_id: 'c1', title: '改接口', agent: 'quick', status: 'running', updated_at: at, origin: { kind: 'controller' } },
+    { task_id: 'c2', title: '问过了', agent: 'quick', status: 'running', stage: 'needs_input', updated_at: at, origin: { kind: 'controller' } },
+    { task_id: 'l1', title: '本机的', status: 'running', updated_at: at, origin: { kind: 'local' } },
+    { task_id: 'd1', title: '早做完', status: 'completed', updated_at: at, origin: { kind: 'controller' } },
+  ]
+  assert.deepEqual((await s.sync.stallOnce()).lines, [], 'five minutes is not a stall')
+  s.tick(16 * 60_000)
+  assert.deepEqual((await s.sync.stallOnce()).lines, ['「改接口」（quick） 没有动静：已经 21 分钟没有新进展'])
+  assert.deepEqual(s.notices, ['「改接口」（quick） 没有动静：已经 21 分钟没有新进展'])
+  s.tick(10 * 60_000)
+  assert.deepEqual((await s.sync.stallOnce()).lines, [], 'said once per silence, also after a restart')
+  assert.deepEqual((await s.make().stallOnce()).lines, [])
+  // A session upload is news: the clock restarts from it.
+  s.client.list = [{ ...s.client.list[0], session_updated_at: new Date(Date.parse('2026-11-24T10:00:00Z') + 25 * 60_000).toISOString() }]
+  assert.deepEqual((await s.sync.stallOnce()).lines, [])
+  s.tick(21 * 60_000)
+  assert.equal((await s.sync.stallOnce()).lines.length, 1, 'quiet again: one more line')
+  // Gone from the active list: forgotten.
+  s.client.list = []
+  await s.sync.stallOnce()
+  assert.deepEqual(s.sync.state.stalled, {})
+})
+
+test('stall check is off with stallMinutes 0', async (t) => {
+  const s = await setup(t, { options: { stallMinutes: 0 } })
+  assert.deepEqual((await s.sync.stallOnce()).lines, [])
+  assert.equal(s.client.of('list').length, 0)
+})
+
+test('mirror: a row the board lost while open is closed on the hub after 10 minutes, never on an empty board', async (t) => {
+  const s = await setup(t, { rows: [row('a', 'running'), row('b', 'running')] })
+  await s.sync.mirrorOnce()
+  s.board.tasks = [row('b', 'running')]
+  await s.sync.mirrorOnce()
+  assert.deepEqual(s.client.of('cancel'), [], 'just gone: wait')
+  s.tick(11 * 60_000)
+  await s.sync.mirrorOnce()
+  assert.deepEqual(s.client.of('cancel'), [['cancel', 'local_web_a']])
+  assert.equal(s.sync.state.tasks.a, undefined, 'then forgotten')
+  // An empty board says nothing: b stays.
+  s.board.tasks = []
+  s.tick(60 * 60_000)
+  await s.sync.mirrorOnce()
+  await s.sync.mirrorOnce()
+  assert.deepEqual(s.client.of('cancel'), [['cancel', 'local_web_a']])
 })

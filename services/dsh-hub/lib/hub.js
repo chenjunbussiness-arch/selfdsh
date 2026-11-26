@@ -1375,12 +1375,13 @@ export class AgentHub {
    */
   inHistory(task) {
     if (!TERMINAL.has(task.status)) return false
-    if (task.status !== 'completed' && task.status !== 'cancelled' && task.acknowledged === true) return true
+    // Put away by a controller (a failure reported, a question dealt with): out of the default views now.
+    if (task.acknowledged === true) return true
     const hours = task.status === 'completed' || task.status === 'cancelled' ? this.expiry.doneHours : this.expiry.failedHours
     return this.clock() - this.endedAt(task) > hours * 3600_000
   }
 
-  /** A controller has seen a failed task: it leaves the default views now. */
+  /** A controller has dealt with a finished task (a failure, a question): it leaves the default views now. */
   acknowledge(controllerId, id) {
     return this.mutate(async (state) => {
       await this.liveController(controllerId)
