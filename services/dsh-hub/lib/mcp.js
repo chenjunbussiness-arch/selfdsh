@@ -49,7 +49,7 @@ export const TOOLS = [
   },
   {
     name: 'report_progress',
-    description: 'Report progress on your task; also keeps it yours.',
+    description: 'Report progress on your task; also keeps it yours. Its reply may carry answers to your earlier questions.',
     inputSchema: {
       type: 'object', required: ['task_id'], additionalProperties: false,
       properties: { task_id: id, progress: { type: 'number', minimum: 0, maximum: 1 }, message: { type: 'string' } },
@@ -57,7 +57,7 @@ export const TOOLS = [
   },
   {
     name: 'submit_result',
-    description: 'Finish your task. status completed, failed or partial (needs a human); files are optional.',
+    description: 'Finish your task. status completed, failed or partial (asks a human: needs_input; the task comes back to you with the answer in answers); files are optional.',
     inputSchema: {
       type: 'object', required: ['task_id', 'status', 'summary'], additionalProperties: false,
       properties: {

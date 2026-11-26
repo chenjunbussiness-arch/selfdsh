@@ -56,10 +56,11 @@
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { appendFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
-import { gzipSync } from 'node:zlib'
+import { gunzipSync, gzipSync } from 'node:zlib'
 
+import { metricsOf, phaseOf, timelineOf } from './lifecycle.js'
 import { DEFAULT_ROLE, ROLES, agentRole, needsOf, needsProblem, roleAccepts, roleBoundary, roleDuties, roleOf, roleRefusal, roleTakesWork, roleWidening } from './roles.js'
 
 export const PROTOCOL = 'dsh-agent/2.0'
@@ -174,6 +175,13 @@ export const own = (obj, key) => (obj != null && typeof key === 'string' && Obje
 const sha256 = text => createHash('sha256').update(text, 'utf8').digest()
 const nowIso = (now = Date.now()) => new Date(now).toISOString()
 const isActive = task => task.status === 'accepted' || task.status === 'running'
+
+/** When a task is expected to be done (ISO), from its due_minutes; undefined without one. */
+function dueAtOf(task) {
+  if (!Number.isInteger(task.due_minutes)) return undefined
+  const at = Date.parse(task.created_at) + task.due_minutes * 60_000
+  return Number.isFinite(at) ? new Date(at).toISOString() : undefined
+}
 
 /** Reject names that could escape a directory. */
 export function safeFileName(raw) {
@@ -400,6 +408,27 @@ export function validateRuntime(raw) {
  * declared -> only a named agent is a problem (mode / thinking are best effort).
  */
 /** A worker that lists no capabilities takes any kind of task sent to it by id. */
+/** Longest due time a task may be given: 30 days. */
+export const MAX_DUE_MINUTES = 43_200
+export const OVERDUE_ACTIONS = ['notify', 'reassign']
+
+/**
+ * hub.json "due": expected completion times in minutes, by task type, capability (lane)
+ * or `local` (a DSH's own task), with `default` for the rest, and what to do when a task
+ * runs past it (`onOverdue`: notify the publisher, or reassign a worker's task to another).
+ * Unknown keys and bad numbers are dropped. Nothing set = no due time unless the dispatch gives one.
+ */
+export function dueConfig(raw) {
+  const minutes = {}
+  const src = raw !== null && typeof raw === 'object' ? raw : {}
+  const table = src.minutes !== null && typeof src.minutes === 'object' ? src.minutes : {}
+  for (const [key, value] of Object.entries(table)) {
+    if (Number.isInteger(value) && value >= 1 && value <= MAX_DUE_MINUTES && /^[a-z][a-z0-9-]{0,47}$/.test(key)) minutes[key] = value
+  }
+  const onOverdue = OVERDUE_ACTIONS.includes(src.onOverdue) ? src.onOverdue : 'notify'
+  return { minutes, onOverdue }
+}
+
 export function hasCapability(agent, capability) {
   return capability === undefined || (agent.capabilities ?? []).length === 0 || agent.capabilities.includes(capability)
 }
@@ -465,6 +494,10 @@ export class AgentHub {
       dormantHours: hours(ex.dormantHours, DEFAULT_EXPIRY.dormantHours),
       archiveHours: hours(ex.archiveHours, DEFAULT_EXPIRY.archiveHours),
     }
+    this.auditDir = join(this.dataDir, 'audit')
+    /** History entries not written to the audit log yet (flushed with every save). */
+    this.audit = []
+    this.due = dueConfig(options.due)
     this.feedWaiters = 0
     this.feedDirty = false
     this.logger = options.logger
@@ -519,6 +552,29 @@ export class AgentHub {
     const temp = `${this.statePath}.tmp-${process.pid}-${Date.now()}`
     await writeFile(temp, `${JSON.stringify(this.state, undefined, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
     await rename(temp, this.statePath)
+    await this.flushAudit()
+  }
+
+  /**
+   * Append the entries recorded since the last save to audit/<YYYY-MM>.jsonl: one line
+   * per entry, never rewritten, so every step of every task can be looked up later,
+   * also after the task left state.json. A failed write is logged and retried next save.
+   */
+  async flushAudit() {
+    if (this.audit.length === 0) return
+    const batch = this.audit
+    this.audit = []
+    try {
+      await mkdir(this.auditDir, { recursive: true, mode: 0o700 })
+      const byMonth = new Map()
+      for (const line of batch) byMonth.set(line.at.slice(0, 7), [...(byMonth.get(line.at.slice(0, 7)) ?? []), line])
+      for (const [month, lines] of byMonth) {
+        await appendFile(join(this.auditDir, `${month}.jsonl`), lines.map(l => JSON.stringify(l)).join('\n') + '\n', { mode: 0o600 })
+      }
+    } catch (error) {
+      this.audit = [...batch, ...this.audit]
+      this.warn(`dsh-hub: audit log not written (${error?.message ?? error}); will retry`)
+    }
   }
 
   /** Serialize every mutation; save after it; then wake the workers it marked. */
@@ -1105,6 +1161,10 @@ export class AgentHub {
     if (fallback !== 'dsh' && fallback !== 'none') throw new HubError(400, 'bad-task', 'fallback must be dsh or none')
     const fallbackAfter = t.fallback_after_seconds ?? undefined
     if (fallbackAfter !== undefined && (!Number.isInteger(fallbackAfter) || fallbackAfter < 60 || fallbackAfter > 7 * 86400)) throw new HubError(400, 'bad-task', 'fallback_after_seconds must be 60..604800')
+    const dueMinutes = t.due_minutes ?? undefined
+    if (dueMinutes !== undefined && (!Number.isInteger(dueMinutes) || dueMinutes < 1 || dueMinutes > MAX_DUE_MINUTES)) throw new HubError(400, 'bad-task', `due_minutes must be 1..${MAX_DUE_MINUTES}`)
+    const onOverdue = t.on_overdue ?? undefined
+    if (onOverdue !== undefined && !OVERDUE_ACTIONS.includes(onOverdue)) throw new HubError(400, 'bad-task', `on_overdue must be ${OVERDUE_ACTIONS.join(' or ')}`)
     const stickyKey = t.sticky_key ?? undefined
     if (stickyKey !== undefined && (typeof stickyKey !== 'string' || !STICKY_KEY_RE.test(stickyKey))) throw new HubError(400, 'bad-task', 'sticky_key must be 1-128 letters, digits or _ . : / -')
     if (t.sticky !== undefined && typeof t.sticky !== 'boolean') throw new HubError(400, 'bad-task', 'sticky must be true or false')
@@ -1192,11 +1252,13 @@ export class AgentHub {
         created_by: creator, created_at: nowIso(this.clock()), pendingSince: nowIso(this.clock()),
         fallback, fallback_after_seconds: fallbackAfter,
         sticky_key: stickyKey, sticky: t.sticky === false ? false : undefined,
+        due_minutes: dueMinutes ?? this.due.minutes[capability ?? ''] ?? this.due.minutes[type] ?? this.due.minutes.default,
+        on_overdue: onOverdue,
         status: 'pending', attempts: 0, assignedTo: undefined, leaseUntil: undefined,
         progress: undefined, message: undefined, stage: undefined, result: undefined, history: [],
       }
       state.tasks[id] = task
-      this.event(task, 'created', `${creator} -> ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''}${dshProfile ? ` (profile ${dshProfile})` : ''}`)
+      this.event(task, 'created', `${creator} -> ${target}${workspace ? ` [${workspace}]` : ''}${node ? ` @${node}` : ''}${dshProfile ? ` (profile ${dshProfile})` : ''}`, { by: creator })
       task.preferred = this.preferredFor(state, task)
       if (task.preferred !== undefined) this.event(task, 'sticky', `prefers ${task.preferred}`)
       this.wakeFor(state, task)
@@ -1243,12 +1305,13 @@ export class AgentHub {
         parent_task_id: parent, depends_on: [], context: t.context ?? {},
         created_by: controllerId, created_at: nowIso(now), pendingSince: undefined,
         fallback: 'none', fallback_after_seconds: undefined, sticky: false,
+        due_minutes: Number.isInteger(t.due_minutes) && t.due_minutes >= 1 && t.due_minutes <= MAX_DUE_MINUTES ? t.due_minutes : this.due.minutes.local ?? this.due.minutes.default,
         status: 'running', attempts: 1, assignedTo: FALLBACK_AGENT, fallbackBy: controllerId,
         leaseUntil: nowIso(now + v.leaseSeconds * 1000), leasedAt: nowIso(now),
         progress: undefined, message: undefined, stage: 'received', result: undefined, history: [],
       }
       state.tasks[id] = task
-      this.event(task, 'registered', `${controllerId} runs it itself${v.executor ? ` (${v.executor})` : ''}`, { stage: 'received' })
+      this.event(task, 'registered', `${controllerId} runs it itself${v.executor ? ` (${v.executor})` : ''}`, { stage: 'received', by: controllerId })
       this.log(`dsh-hub: ${controllerId} registered local task ${id}${v.executor ? ` (${v.executor})` : ''}`)
       return this.publicTask(task)
     })
@@ -1294,7 +1357,7 @@ export class AgentHub {
       const holder = isActive(task) ? task.assignedTo : undefined
       task.status = 'cancelled'
       task.leaseUntil = undefined
-      this.event(task, 'cancelled', reason === undefined || reason === null || reason === '' ? `cancelled by ${controllerId}` : String(reason).slice(0, 500))
+      this.event(task, 'cancelled', reason === undefined || reason === null || reason === '' ? `cancelled by ${controllerId}` : String(reason).slice(0, 500), { by: controllerId })
       if (holder !== undefined) this.wakes.add(holder) // a slot was freed
       return this.publicTask(task)
     })
@@ -1321,7 +1384,7 @@ export class AgentHub {
       }
       task.status = 'pending'; task.assignedTo = undefined; task.leaseUntil = undefined; task.attempts = 0; task.result = undefined
       task.pendingSince = nowIso(this.clock()); task.fallbackBy = undefined; task.declined = undefined
-      this.event(task, 'retried', `${controllerId} -> ${task.agent}`)
+      this.event(task, 'retried', `${controllerId} -> ${task.agent}`, { by: controllerId })
       this.wakeFor(state, task)
       return this.publicTask(task)
     })
@@ -1364,8 +1427,14 @@ export class AgentHub {
       session_entries: task.sessionEntries ?? 0, session_updated_at: task.sessionUpdatedAt,
       quiet: task.origin?.kind === 'local' && isActive(task) && task.leaseUntil !== undefined && Date.parse(task.leaseUntil) < this.clock() ? true : undefined,
       result: task.result === undefined ? undefined : { status: task.result.status, summary: task.result.summary, outputs: task.result.outputs, error: task.result.error, needs_input: task.result.needs_input },
+      phase: phaseOf(task),
+      question: task.question === undefined ? undefined : { text: task.question.text, at: task.question.at, by: task.question.by },
+      answers_count: (task.answers ?? []).length || undefined,
+      due_at: dueAtOf(task), overdue: task.overdueAt !== undefined ? true : undefined,
+      delivered_at: task.deliveredAt, delivered_to: task.deliveredTo,
+      acknowledged_at: task.acknowledgedAt, acknowledged_by: task.acknowledgedBy,
     }
-    if (full) { out.instruction = task.instruction; out.inputs = task.inputs; out.output = task.output; out.history = task.history; out.context = task.context }
+    if (full) { out.instruction = task.instruction; out.inputs = task.inputs; out.output = task.output; out.history = task.history; out.context = task.context; out.answers = task.answers?.map(a => ({ question: a.question, answer: a.answer, at: a.at, by: a.by })) }
     return out
   }
 
@@ -1374,23 +1443,30 @@ export class AgentHub {
    * controllers' event stream (`feed`, read with /v1/ctl/events). Text is
    * redacted before it is stored anywhere.
    */
-  event(task, kind, message, { stage, feedOnly = false } = {}) {
+  event(task, kind, message, { stage, feedOnly = false, historyOnly = false, by = 'hub' } = {}) {
     const at = nowIso(this.clock())
     const text = message === undefined || message === null ? undefined : redact(message)
     const entry = { at, event: kind, message: text }
     if (stage !== undefined) entry.stage = stage
+    entry.by = by
+    entry.phase = phaseOf(task)
     // feedOnly: a notice to the publisher that changes nothing on the task (no history entry).
-    if (!feedOnly) task.history.push(entry)
+    if (!feedOnly) {
+      task.history.push(entry)
+      // The audit log keeps every entry for good (history keeps the last 200 and is archived).
+      this.audit.push({ task_id: task.task_id, ...entry, status: task.status, attempt: task.attempts })
+    }
     if (task.history.length > 200) task.history.splice(0, task.history.length - 200)
     const state = this.state
-    if (state === undefined) return
+    // historyOnly: a marker for the record (delivered, acknowledged) nobody needs to be told about.
+    if (state === undefined || historyOnly) return
     state.feedSeq += 1
     state.feed.push({
       seq: state.feedSeq, at, task_id: task.task_id, kind, stage, message: text,
       title: task.title, status: task.status, progress: task.progress,
       agent: task.assignedTo ?? task.agent, created_by: task.created_by, origin: task.origin?.kind ?? 'controller',
       dsh_profile: task.dsh_profile, reply_to: task.reply_to, attempt: task.attempts,
-      held_by: task.fallbackBy,
+      held_by: task.fallbackBy, by, phase: entry.phase,
     })
     if (state.feed.length > FEED_MAX) state.feed.splice(0, state.feed.length - FEED_MAX)
     this.feedDirty = true
@@ -1420,9 +1496,158 @@ export class AgentHub {
     return this.mutate(async (state) => {
       await this.liveController(controllerId)
       const task = this.mustTask(state, id)
+      // A question nobody will answer: putting it away ends the task (cancelled), so it
+      // does not sit in 等你回复 for ever.
+      if (task.status === 'waiting_input') {
+        task.status = 'cancelled'
+        task.question = undefined
+        task.leaseUntil = undefined
+        this.event(task, 'cancelled', `put away by ${controllerId} without an answer`, { by: controllerId })
+      }
       if (!TERMINAL.has(task.status)) throw new HubError(409, 'task-active', `task is ${task.status}`)
-      task.acknowledged = true
+      if (task.acknowledged !== true) {
+        task.acknowledged = true
+        task.acknowledgedAt = nowIso(this.clock())
+        task.acknowledgedBy = controllerId
+        this.event(task, 'acknowledged', `put away by ${controllerId}`, { by: controllerId, historyOnly: true })
+      }
       return this.publicTask(task)
+    })
+  }
+
+  /**
+   * The human's answer to a question a worker put (POST /v1/ctl/answer). The creator of
+   * the task, or the DSH it reports to, answers. A task given back with the question
+   * (`waiting_input`) goes back to the queue, held for the worker that asked, attempt
+   * not counted; a worker still holding the task gets the answer with its next progress
+   * report or heartbeat. Either way the answer travels with the task from now on
+   * (`answers` in every lease).
+   */
+  answer(controllerId, { task_id: taskId, answer, profile } = {}, { asAgent } = {}) {
+    if (typeof answer !== 'string' || answer.trim() === '') throw new HubError(400, 'bad-answer', 'answer is required')
+    return this.mutate(async (state) => {
+      const by = await this.creator(state, controllerId, asAgent)
+      const task = this.mustTask(state, taskId)
+      const replyTo = typeof profile === 'string' && profile !== '' && task.reply_to === profile
+      if (task.created_by !== by && !replyTo) throw new HubError(403, 'not-creator', `task ${task.task_id} was published by another DSH`)
+      if (task.origin?.kind === 'local') throw new HubError(409, 'local-task', `${task.task_id} runs in its DSH; answer it in that 作战室`)
+      const asks = task.status === 'waiting_input' || (isActive(task) && task.question !== undefined)
+      if (!asks) throw new HubError(409, 'no-question', `${task.task_id} is ${task.status} and asks nothing`)
+      const entry = { question: task.question?.text ?? task.result?.needs_input ?? '', answer: redact(answer.trim().slice(0, 4000)), at: nowIso(this.clock()), by }
+      task.answers = [...(task.answers ?? []), entry]
+      task.question = undefined
+      if (task.status === 'waiting_input') {
+        const holder = task.lastHolder
+        task.status = 'pending'
+        task.stage = undefined
+        task.result = undefined
+        task.pendingSince = nowIso(this.clock())
+        // Back to the worker that asked: others leave it alone for the sticky hold.
+        if (holder !== undefined) { task.preferred = holder; this.wakes.add(holder) }
+        this.event(task, 'answered', entry.answer.slice(0, 200), { by })
+        this.wakeFor(state, task)
+      } else {
+        if (task.stage === 'needs_input') task.stage = 'step'
+        this.event(task, 'answered', entry.answer.slice(0, 200), { by })
+        if (task.assignedTo !== undefined) this.wakes.add(task.assignedTo)
+      }
+      return this.publicTask(task)
+    })
+  }
+
+  /**
+   * The publishing DSH put these tasks' results (or questions) in front of its 作战室
+   * (POST /v1/ctl/delivered). Recorded once per task and phase, for the timeline.
+   */
+  delivered(controllerId, { task_ids: ids, profile } = {}) {
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100 || ids.some(id => typeof id !== 'string')) throw new HubError(400, 'bad-request', 'task_ids must be 1..100 task ids')
+    return this.mutate(async (state) => {
+      await this.liveController(controllerId)
+      const marked = []
+      for (const id of ids) {
+        const task = own(state.tasks, id)
+        if (task === undefined) continue
+        const phase = phaseOf(task)
+        if (task.deliveredPhase === phase) continue
+        task.deliveredPhase = phase
+        task.deliveredAt = nowIso(this.clock())
+        task.deliveredTo = typeof profile === 'string' && profile !== '' ? `${controllerId}/${profile}` : controllerId
+        this.event(task, 'delivered', `shown in the 作战室 of ${task.deliveredTo}`, { by: controllerId, historyOnly: true })
+        marked.push(id)
+      }
+      return { ok: true, marked }
+    })
+  }
+
+  /**
+   * The whole timeline of one task (GET /v1/ctl/timeline): from state.json, else from the
+   * archive; when its history was cut at 200 entries, the full list comes from the audit log.
+   */
+  async timeline(taskId) {
+    if (typeof taskId !== 'string' || !TASK_ID_RE.test(taskId)) throw new HubError(400, 'bad-request', 'task_id is required')
+    const live = await this.read(state => own(state.tasks, taskId))
+    const task = live ?? await this.findArchived(taskId)
+    if (task === undefined) throw new HubError(404, 'task-not-found', `task not found: ${taskId}`)
+    let record = task
+    if (Array.isArray(task.history) && task.history.length >= 200) {
+      const full = await this.auditOf(taskId, task.created_at)
+      if (full.length > task.history.length) record = { ...task, history: full }
+    }
+    const view = timelineOf(record, this.clock())
+    return {
+      task: this.publicTask(task), archived: live === undefined, ...view,
+      truncated: view.truncated && record === task,
+      answers: (task.answers ?? []).map(a => ({ question: a.question, answer: a.answer, at: a.at, by: a.by })),
+    }
+  }
+
+  /** A task record moved to archive/<YYYY-MM>.jsonl.gz, newest month first. */
+  async findArchived(taskId) {
+    let names
+    try { names = (await readdir(this.archiveDir)).filter(n => /^\d{4}-\d{2}\.jsonl\.gz$/.test(n)).sort().reverse() } catch { return undefined }
+    for (const name of names) {
+      let text
+      try { text = gunzipSync(await readFile(join(this.archiveDir, name))).toString('utf8') } catch (error) { this.warn(`dsh-hub: archive ${name} not readable: ${error?.message ?? error}`); continue }
+      let found
+      for (const line of text.split('\n')) {
+        if (!line.includes(`"task_id":"${taskId}"`)) continue
+        try { const rec = JSON.parse(line); if (rec.task_id === taskId) found = rec } catch { /* skip a torn line */ }
+      }
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+
+  /** Every audit entry of one task, from the month it was created on. */
+  async auditOf(taskId, createdAt) {
+    let names
+    try { names = (await readdir(this.auditDir)).filter(n => /^\d{4}-\d{2}\.jsonl$/.test(n)).sort() } catch { return [] }
+    const from = String(createdAt ?? '').slice(0, 7)
+    const out = []
+    for (const name of names.filter(n => n.slice(0, 7) >= from)) {
+      const text = await readFile(join(this.auditDir, name), 'utf8').catch(() => '')
+      for (const line of text.split('\n')) {
+        if (!line.includes(`"task_id":"${taskId}"`)) continue
+        try {
+          const { task_id: id, status, attempt, ...entry } = JSON.parse(line)
+          if (id === taskId) out.push(entry)
+        } catch { /* skip a torn line */ }
+      }
+    }
+    return out
+  }
+
+  /**
+   * Numbers over the tasks created in the last `hours` (default 7 days), overall and per
+   * worker (GET /v1/ctl/metrics). Covers what is still in state.json: archived tasks
+   * (older than expiry.archiveHours) are left out.
+   */
+  metrics({ hours = 168 } = {}) {
+    const span = Number.isFinite(hours) && hours > 0 ? Math.min(hours, 24 * 90) : 168
+    return this.read((state) => {
+      const now = this.clock()
+      const out = metricsOf(Object.values(state.tasks), { since: now - span * 3600_000, now })
+      return { ...out, hours: span, archived_after_hours: this.expiry.archiveHours }
     })
   }
 
@@ -1510,7 +1735,7 @@ export class AgentHub {
     task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000)
     task.leasedAt = nowIso(this.clock())
     task.lastHolder = undefined
-    this.event(task, 'reclaimed', `${agentId} came back still working on it`)
+    this.event(task, 'reclaimed', `${agentId} came back still working on it`, { by: agentId })
     this.log(`dsh-hub: ${agentId} reclaimed ${task.task_id}`)
   }
 
@@ -1612,9 +1837,17 @@ export class AgentHub {
         if (abort.length > 0) this.log(`dsh-hub: ${agentId} told to abort ${abort.join(', ')}`)
         if (requeued.length > 0) this.warn(`dsh-hub: ${agentId} lost ${requeued.join(', ')}; requeued`)
       }
+      // Answers to questions this worker put on tasks it still holds, not handed over yet.
+      const answers = []
+      for (const task of Object.values(state.tasks)) {
+        if (task.assignedTo !== agentId || !isActive(task)) continue
+        const reply = this.withAnswers(task, {}, agentId)
+        for (const a of reply.answers ?? []) answers.push({ task_id: task.task_id, ...a })
+      }
       return {
         ok: true, agent_id: agentId, status: 'online', server_time: agent.lastSeen,
         workspaces: agent.reportedWorkspaces, ignored_workspaces: ignored, abort, requeued, reclaimed,
+        ...(answers.length > 0 ? { answers } : {}),
         pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
         ...(agent.dshProfile === undefined ? {} : { dsh_profile: agent.dshProfile }), ...(profileMismatch === undefined ? {} : { profile_mismatch: profileMismatch }),
       }
@@ -1704,15 +1937,18 @@ export class AgentHub {
         task.attempts += 1
         task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000)
         task.leasedAt = nowIso(this.clock())
-        this.event(task, 'accepted', `leased by ${agentId} (attempt ${task.attempts})`)
+        this.event(task, 'accepted', `leased by ${agentId} (attempt ${task.attempts})`, { by: agentId })
         // Upstream outputs become downloadable inputs.
         const upstream = task.depends_on.flatMap(d => (own(state.tasks, d).result?.outputs ?? []).map(o => ({ from_task: d, name: o.name })))
+        for (const a of task.answers ?? []) a.delivered = true
         leased.push({
           protocol: PROTOCOL, task_id: task.task_id, type: task.type, title: task.title, instruction: task.instruction,
           workspace: task.workspace, node: task.node, ref: task.ref, effort: task.effort, capability: task.capability, created_by: task.created_by,
           inputs: task.inputs.map(name => ({ name, from_task: task.task_id })).concat(upstream),
           output: task.output, priority: task.priority, deadline: task.deadline, lease_until: task.leaseUntil,
           parent_task_id: task.parent_task_id, context: task.context, attempt: task.attempts,
+          // Questions this task asked earlier and the human's answers, oldest first: carry on from them.
+          answers: (task.answers ?? []).length > 0 ? task.answers.map(a => ({ question: a.question, answer: a.answer, at: a.at })) : undefined,
           // What this worker may do here, so its agent reads the boundary before the instruction.
           needs: task.needs, duties: roleDuties(agentRole(agent)), boundary: roleBoundary(agentRole(agent)),
         })
@@ -1736,7 +1972,7 @@ export class AgentHub {
         task.leaseUntil = undefined
         task.leasedAt = undefined
         task.attempts = Math.max(0, task.attempts - 1)
-        this.event(task, 'released', why)
+        this.event(task, 'released', why, { by: agentId })
         this.wakeFor(state, task)
         changed++
       }
@@ -1761,7 +1997,7 @@ export class AgentHub {
       task.pendingSince = nowIso(this.clock())
       task.declined = [...new Set([...(task.declined ?? []), agentId])]
       const reason = typeof b.reason === 'string' && b.reason.trim() !== '' ? b.reason.trim().slice(0, 500) : 'given back'
-      this.event(task, 'released', `${agentId}: ${reason}`)
+      this.event(task, 'released', `${agentId}: ${reason}`, { by: agentId })
       this.wakes.add(agentId)
       this.wakeFor(state, task)
       return { ok: true, task_status: task.status }
@@ -1791,7 +2027,7 @@ export class AgentHub {
     return this.mutate((state) => {
       const task = this.owned(state, agentId, b.task_id, { reclaim: true, attempt: b.attempt })
       task.status = 'running'
-      return this.applyProgress(task, b, stage)
+      return this.applyProgress(task, b, stage, agentId)
     })
   }
 
@@ -1801,10 +2037,10 @@ export class AgentHub {
    * that changes nothing. Otherwise the stage / percentage / message are stored
    * and one event goes out.
    */
-  applyProgress(task, b, stage) {
+  applyProgress(task, b, stage, by) {
     task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000)
     const said = stage !== undefined || typeof b.message === 'string' || typeof b.progress === 'number'
-    if (b.renew === true && !said) return { ok: true, lease_until: task.leaseUntil }
+    if (b.renew === true && !said) return this.withAnswers(task, { ok: true, lease_until: task.leaseUntil }, by)
     const progress = typeof b.progress === 'number' && b.progress >= 0 && b.progress <= 1 ? b.progress : undefined
     const message = typeof b.message === 'string' ? redact(b.message.slice(0, 1000)) : undefined
     // A report that repeats what the task already says (an older client re-sends "working"
@@ -1812,12 +2048,27 @@ export class AgentHub {
     const changed = (stage !== undefined && stage !== task.stage)
       || (message !== undefined && message !== task.message)
       || (progress !== undefined && progress !== task.progress)
-    if (!changed) return { ok: true, lease_until: task.leaseUntil }
+    if (!changed) return this.withAnswers(task, { ok: true, lease_until: task.leaseUntil }, by)
     if (progress !== undefined) task.progress = progress
     if (message !== undefined) task.message = message
     if (stage !== undefined) task.stage = stage
-    this.event(task, 'progress', task.message, { stage })
-    return { ok: true, lease_until: task.leaseUntil }
+    // A question put while the worker keeps the task: it stays open until the human answers.
+    if (stage === 'needs_input') task.question = { text: task.message ?? '', at: nowIso(this.clock()), by, attempt: task.attempts }
+    else if (stage !== undefined && stage !== 'blocked') task.question = undefined // it moved on
+    this.event(task, 'progress', task.message, { stage, by })
+    return this.withAnswers(task, { ok: true, lease_until: task.leaseUntil }, by)
+  }
+
+  /**
+   * Hand the worker that holds a task the answers it has not seen yet (`answers` in the
+   * reply to its progress / keep-alive), and note that it got them.
+   */
+  withAnswers(task, reply, by) {
+    const fresh = (task.answers ?? []).filter(a => a.delivered !== true)
+    if (fresh.length === 0) return reply
+    for (const a of fresh) a.delivered = true
+    this.event(task, 'answer_delivered', `${fresh.length} answer(s) handed to ${by}`, { by, historyOnly: true })
+    return { ...reply, answers: fresh.map(a => ({ question: a.question, answer: a.answer, at: a.at })) }
   }
 
   /** Final result. Files are inline (base64) and land under outputs/. */
@@ -1853,10 +2104,21 @@ export class AgentHub {
       }
       task.leaseUntil = undefined
       if (status === 'completed') { task.status = 'completed'; task.progress = 1; this.rememberSticky(state, task, agentId) }
+      else if (status === 'partial' && agentId !== FALLBACK_AGENT && task.result.needs_input !== undefined) {
+        // A worker gave the task back with a question: it waits on the human (not a failure).
+        // The answer (task_answer) puts it back in the queue for the same worker, attempt not counted.
+        task.status = 'waiting_input'
+        task.question = { text: task.result.needs_input, at: task.result.finished_at, by: agentId, attempt: task.attempts }
+        task.assignedTo = undefined
+        task.leasedAt = undefined
+        task.lastHolder = agentId
+        task.attempts = Math.max(0, task.attempts - 1)
+      }
       else if (status === 'partial') { task.status = 'failed'; task.result.error = task.result.error ?? { code: 'NEEDS_HUMAN', message: task.result.needs_input ?? '', retryable: false } }
       else if (error?.retryable && retry) { this.requeue(state, task, `retryable failure: ${error.code}`) }
       else task.status = 'failed'
-      if (task.status !== 'pending') this.event(task, task.status, (task.result.needs_input ?? (task.result.summary || task.result.error?.message || '')).slice(0, 200), { stage: task.result.needs_input === undefined ? undefined : 'needs_input' })
+      if (task.status !== 'pending') this.event(task, task.status, (task.result.needs_input ?? (task.result.summary || task.result.error?.message || '')).slice(0, 200), { stage: task.result.needs_input === undefined ? undefined : 'needs_input', by: agentId === FALLBACK_AGENT ? (task.fallbackBy ?? agentId) : agentId })
+      if (task.status === 'completed' || task.status === 'failed') task.question = undefined
       this.wakes.add(agentId) // a slot was freed
       if (task.status === 'completed') {
         for (const other of Object.values(state.tasks)) if (other.status === 'pending' && other.depends_on.includes(task.task_id)) this.wakeFor(state, other)
@@ -1944,7 +2206,7 @@ export class AgentHub {
       task.leasedAt = nowIso(now)
       task.lastHolder = undefined
       const why = this.anyOnlineFor(state, task) ? 'nobody took it in time' : 'no worker for it is online'
-      this.event(task, 'fallback', `${why}; DSH (${controllerId}) does it itself`)
+      this.event(task, 'fallback', `${why}; DSH (${controllerId}) does it itself`, { by: controllerId })
       this.log(`dsh-hub: ${controllerId} took ${task.task_id} over as ${FALLBACK_AGENT}`)
       const upstream = task.depends_on.flatMap(d => (own(state.tasks, d).result?.outputs ?? []).map(o => ({ from_task: d, name: o.name })))
       return {
@@ -1970,7 +2232,7 @@ export class AgentHub {
     return this.mutate(async (state) => {
       await this.liveController(controllerId)
       const task = this.heldByFallback(state, controllerId, b.task_id)
-      return this.applyProgress(task, b, stage)
+      return this.applyProgress(task, b, stage, controllerId)
     })
   }
 
@@ -2115,6 +2377,24 @@ export class AgentHub {
           this.event(task, 'failed', 'upstream failed')
           changed++
         }
+      }
+      // Past its due time: tell the publisher once (an `overdue` entry, which its DSH turns into a
+      // question to the human); with on_overdue reassign, a worker's task also goes to another worker.
+      for (const task of Object.values(state.tasks)) {
+        if (TERMINAL.has(task.status) || task.overdueAt !== undefined) continue
+        const due = Date.parse(dueAtOf(task) ?? '')
+        if (!Number.isFinite(due) || due > now) continue
+        task.overdueAt = nowIso(now)
+        const late = `${Math.round((now - Date.parse(task.created_at)) / 60_000)} min since it was published, due after ${task.due_minutes} min`
+        const holder = isActive(task) && task.assignedTo !== FALLBACK_AGENT ? task.assignedTo : undefined
+        const reassign = (task.on_overdue ?? this.due.onOverdue) === 'reassign' && holder !== undefined && task.origin?.kind !== 'local'
+        this.event(task, 'overdue', reassign ? `${late}; taken from ${holder} for another worker` : `${late}; ${phaseOf(task)}`, { by: 'hub' })
+        if (reassign) {
+          task.declined = [...new Set([...(task.declined ?? []), holder])]
+          task.attempts = Math.max(0, task.attempts - 1)
+          this.requeue(state, task, `overdue: reassigned from ${holder}`)
+        }
+        changed++
       }
       // Nobody took it in time (or nobody who could is online): hand it back to whoever
       // published it, once per wait, instead of leaving it for someone to find in a list.

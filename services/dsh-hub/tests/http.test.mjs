@@ -84,6 +84,7 @@ test('matchRoute: every contract endpoint exists with its method; unknown 404, w
     '/v1/release': 'POST', '/v1/dispatch': 'POST', '/v1/dispatched': 'GET', '/v1/cancel': 'POST',
     '/v1/ctl/fallback': 'GET', '/v1/ctl/fallback/take': 'POST', '/v1/ctl/fallback/event': 'POST', '/v1/ctl/fallback/result': 'POST', '/v1/ctl/fallback/input': 'GET',
     '/v1/session': 'POST', '/v1/ctl/events': 'GET', '/v1/ctl/ack': 'POST', '/v1/ctl/session': 'POST', '/v1/ctl/session/read': 'GET',
+    '/v1/ctl/answer': 'POST', '/v1/ctl/delivered': 'POST', '/v1/ctl/timeline': 'GET', '/v1/ctl/metrics': 'GET', '/v1/answer': 'POST',
   }
   assert.deepEqual(Object.keys(ROUTES).sort(), Object.keys(expected).sort())
   for (const [path, method] of Object.entries(expected)) {
@@ -456,4 +457,31 @@ test('e2e: real server on 127.0.0.1 - health, auth, 413 on a streamed oversized 
   await dispatchTask(hub, { task_id: 'e2e' })
   const polled = await poll
   assert.deepEqual(JSON.parse(polled.text).tasks.map(x => x.task_id), ['e2e'])
+})
+
+test('lifecycle over HTTP: question, answer, delivered, timeline, metrics', async (t) => {
+  const { call, asWorker, asCtl, asCtl2 } = await setup(t)
+  await call({ method: 'POST', url: `/v1/ctl/dispatch?id=${CTL}`, headers: asCtl(), body: { task_id: 'q1', agent: 'worker', title: 'Ask', instruction: 'Ask first', due_minutes: 90 } })
+  await call({ method: 'POST', url: '/v1/heartbeat?id=worker', headers: asWorker(), body: { status: 'idle' } })
+  await call({ url: '/v1/poll?id=worker', headers: asWorker() })
+  const back = await call({ method: 'POST', url: '/v1/result?id=worker', headers: asWorker(), body: { task_id: 'q1', status: 'partial', needs_input: 'Which env?' } })
+  assert.equal(back.json().task_status, 'waiting_input')
+  const waiting = (await call({ url: `/v1/ctl/tasks?id=${CTL}&status=waiting_input`, headers: asCtl() })).json()
+  assert.deepEqual(waiting.tasks.map(x => [x.task_id, x.phase, x.question.text]), [['q1', 'waiting_input', 'Which env?']])
+  assert.equal((await call({ method: 'POST', url: `/v1/ctl/answer?id=dsh-local`, headers: asCtl2(), body: { task_id: 'q1', answer: 'prod' } })).statusCode, 403)
+  const answered = await call({ method: 'POST', url: `/v1/ctl/answer?id=${CTL}`, headers: asCtl(), body: { task_id: 'q1', answer: 'staging' } })
+  assert.equal(answered.json().status, 'pending')
+  const again = (await call({ url: '/v1/poll?id=worker', headers: asWorker() })).json()
+  assert.deepEqual(again.tasks[0].answers.map(a => a.answer), ['staging'])
+  await call({ method: 'POST', url: '/v1/result?id=worker', headers: asWorker(), body: { task_id: 'q1', status: 'completed', summary: 'ok' } })
+  assert.deepEqual((await call({ method: 'POST', url: `/v1/ctl/delivered?id=${CTL}`, headers: asCtl(), body: { task_ids: ['q1'], profile: 'web' } })).json().marked, ['q1'])
+  const line = (await call({ url: `/v1/ctl/timeline?id=${CTL}&task_id=q1`, headers: asCtl() })).json()
+  assert.equal(line.phase, 'completed')
+  assert.deepEqual(line.events.map(e => e.event), ['created', 'accepted', 'waiting_input', 'answered', 'accepted', 'completed', 'delivered'])
+  assert.equal(typeof line.durations.total_ms, 'number')
+  assert.equal(line.task.due_at !== undefined, true)
+  const m = (await call({ url: `/v1/ctl/metrics?id=${CTL}&hours=24`, headers: asCtl() })).json()
+  assert.equal(m.total.tasks, 1)
+  assert.equal(m.total.asked_human, 1)
+  assert.equal((await call({ url: `/v1/ctl/metrics?id=${CTL}&hours=0`, headers: asCtl() })).statusCode, 400)
 })
