@@ -2,6 +2,8 @@
 
 # 依赖目录：任何层级都不入库（含 vendor/**/node_modules/）
 node_modules/
+# 构建脚本建的 node_modules 软链接（指向构建依赖目录）也不入库：带斜杠的规则只匹配目录
+node_modules
 
 # safe-build / safe-restart 中间态与回滚副本
 lib.prev/

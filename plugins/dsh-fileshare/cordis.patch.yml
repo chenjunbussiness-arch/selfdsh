@@ -1,0 +1,43 @@
+# dsh-fileshare — bundle patch layer
+#
+# Mounts the two halves of dsh-fileshare:
+#
+#   host-fileshare        the tools file_share / file_upload_link / file_links /
+#                         file_link_revoke; the public routes /api/fileshare/d/*
+#                         (download) and /api/fileshare/u/* (upload page + PUT),
+#                         where the random token in the path is the credential;
+#                         and the login-guarded routes of the page
+#                         (/api/fileshare/{hello,links,create,revoke})
+#   client-ui-fileshare   the 文件中转 page and its Sidebar row. Needs
+#                         lib/client.js built (scripts/build.mjs).
+#
+# ── 配置（config 下每一项都可省略；括号里是默认值）────────────────────────────
+#   publicBaseUrl        链接用的对外地址，如 https://dsh.example.com:8443（不填就用你浏览器访问
+#                        DSH 时的地址，打开过一次 DSH 页面就记住）。内网地址（私有 IP、localhost、
+#                        .local/.lan/.internal 等）一律拒绝，配置了也不用。
+#   roots                允许分享和接收的文件夹列表（[]）。agent 当前的工作目录也自动算（见下）。
+#                        太宽的目录（/、家目录、<DSH home> 及其上级）会被忽略。
+#   includeSessionCwd    agent 会话的工作目录也算允许的文件夹（true）
+#   inboxDir             上传链接不指定文件夹时放这里（<DSH home>/fileshare/inbox）
+#   hubArtifactsDir      dsh-hub 任务产物目录，file_share 的 hub_task 用（<DSH home>/agent-hub/artifacts）；
+#                        只能分享 <任务>/outputs/ 里的文件
+#   stateFile            链接记录（<DSH home>/fileshare/links.json，600；只存令牌哈希）
+#   downloadTtlMinutes   下载链接默认有效期（60），上限 downloadMaxTtlMinutes（10080 = 7 天）
+#   uploadTtlMinutes     上传链接默认有效期（30），上限 uploadMaxTtlMinutes（1440 = 1 天）
+#   uploadMaxFiles       上传链接默认最多文件数（20）
+#   uploadMaxMb          上传链接默认总容量 MB（512），上限 uploadMaxMbCap（4096）
+#                        注意 nginx 的 client_max_body_size 也要够大
+#   maxActiveLinks       同时有效的链接上限（500）
+#   keepExpiredDays      过期/撤销的记录保留几天再清掉（7）
+#   deny                 永不分享、永不写入的名字（默认含 .ssh .git .env* *.pem *.key id_rsa* secrets.* tokens 等）
+#
+# 机器相关的值（publicBaseUrl、roots）建议写在 profile 的 cordis.patch.yml 里覆盖。
+
+- insert:
+    - id: host-fileshare
+      name: dsh-host-fileshare
+      config:
+        downloadTtlMinutes: 60
+        uploadTtlMinutes: 30
+    - id: client-ui-fileshare
+      name: dsh-client-ui-fileshare
