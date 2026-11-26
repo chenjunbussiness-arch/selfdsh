@@ -187,6 +187,15 @@ export interface RouterConfig {
      */
     readonly stallNoticeMinutes?: number;
     /**
+     * Compact the 作战室 (the anchor session) once its context passes this many tokens:
+     * checked after each of its turns, while it is idle. DSH's own automatic compaction
+     * belongs to the agent preset and starts much later on large-window models (about
+     * 550k on a 1M window); this keeps the 作战室 near the size the human chose. After any
+     * compaction the router re-posts the open tasks and questions (【作战室状态】).
+     * Default 300000; 0 turns it off.
+     */
+    readonly anchorCompactTokens?: number;
+    /**
      * Headless screenshot command used by `browser_capture`:
      * `<command> <url> <out.png> [--full] [--wait ms]`. Default `/srv/workspace/bin/screenshot`.
      */

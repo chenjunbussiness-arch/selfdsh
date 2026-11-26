@@ -22,6 +22,8 @@ export declare function noticeLinesOf(message: NoticeMessage): string[] | undefi
  * router's own, the whole line otherwise. A newer line about the same thing replaces the older.
  */
 export declare function noticeSubject(line: string): string;
+/** Whether a notice line says its subject finished or was cancelled: an open question about it is moot. */
+export declare function closesSubject(line: string): boolean;
 /** Whether a notice line waits on the human. */
 export declare function isAskLine(line: string): boolean;
 /**

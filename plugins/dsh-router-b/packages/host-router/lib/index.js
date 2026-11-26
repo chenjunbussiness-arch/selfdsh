@@ -57,6 +57,7 @@ import { DEFAULT_POLICY, OutletStore, classifyCommand, gitFacts, hostAllowed, pu
 import { createScmClient, defaultTokenEnv, envToken } from "./scm.js";
 import { liveSegments } from "./live.js";
 import { mergeNoticeLines, noticeLinesOf, noticeText, isAskLine } from "./notices.js";
+import { ANCHOR_COMPACT_TOKENS, AnchorCompactor, compactStateText, isStateMessage, OpenAsks } from "./compact-state.js";
 /** Stable plugin name. */
 export const name = 'host-router';
 /** The tool registry and the subagent seam are hard dependencies. */
@@ -1309,6 +1310,8 @@ export async function apply(ctx, config) {
     /** Most lines one notice carries; older ones are folded into a count. */
     const NOTICE_MAX_LINES = config.progressNoticeMaxLines ?? 12;
     const pendingNotices = [];
+    /** Questions put to the human that nothing has closed yet; re-posted after a compaction. */
+    const openAsks = new OpenAsks();
     /** Last notices, newest first, for the panel. */
     let recentNotices = [];
     let noticeTimer;
@@ -1377,6 +1380,7 @@ export async function apply(ctx, config) {
     const notice = (text, about) => {
         const line = about === undefined ? text : `${text}${groupLineOf(about)}`;
         recentNotices = [{ at: new Date().toISOString(), text: line }, ...recentNotices].slice(0, 30);
+        openAsks.note(line);
         ctx.logger.info(`host-router notice: ${line}`);
         if (!noticesEnabled)
             return;
@@ -1385,6 +1389,86 @@ export async function apply(ctx, config) {
     };
     ctx.effect(() => () => { if (noticeTimer !== undefined)
         clearTimeout(noticeTimer); }, 'host-router: notice timer');
+    /**
+     * After the 作战室's history is compacted (automatically past the threshold, or by
+     * `/compact`), put what is still open back in front of it: the board's unfinished rows
+     * and the questions still waiting on the human ({@link compactStateText}). The message is
+     * injected for the next step without waking the loop, so it costs no extra turn; a state
+     * message still waiting from an earlier compaction is replaced, not added to.
+     */
+    /**
+     * The 作战室's own size limit ({@link AnchorCompactor}): DSH compacts automatically only
+     * near the model's window (the setting lives in the agent preset, out of a profile's
+     * reach in web mode), so the router compacts the anchor at `anchorCompactTokens`.
+     */
+    const compactor = new AnchorCompactor({
+        threshold: Math.max(0, config.anchorCompactTokens ?? ANCHOR_COMPACT_TOKENS),
+        agent: () => liveAgent(anchorSessionId),
+        engine: (agent) => {
+            const agentCtx = agent.ctx;
+            if (agentCtx === undefined || agentCtx === null)
+                return undefined;
+            const usable = (value) => typeof value?.compactNow === 'function' ? value : undefined;
+            try {
+                const presets = ctx.get('agentPresets');
+                const found = usable(presets?.serviceFor?.({ ctx: agentCtx }, 'compaction'));
+                if (found !== undefined)
+                    return found;
+            }
+            catch { /* fall through to the agent's own context */ }
+            try {
+                return usable(agentCtx.get?.('compaction'));
+            }
+            catch {
+                return undefined;
+            }
+        },
+        log: ctx.logger,
+    });
+    ctx.effect(() => () => compactor.dispose(), 'host-router: 作战室 compaction');
+    ctx.on('session/event', ((session, event) => {
+        if (anchorSessionId === undefined || session?.id !== anchorSessionId || event === undefined)
+            return;
+        if (event.type === 'assistant/message') {
+            compactor.sample(pressureTokensOf([event]));
+            return;
+        }
+        if (event.type === 'turn/end') {
+            compactor.turnEnded();
+            return;
+        }
+        if (event.type !== 'compaction/end' || event.data?.error !== undefined)
+            return;
+        compactor.compacted();
+        const text = compactStateText(board.list(), openAsks.list());
+        if (text === undefined)
+            return;
+        // Not inside the session's append: the agent may still be finishing the compaction.
+        queueMicrotask(() => {
+            const agent = liveAgent(anchorSessionId);
+            if (agent === undefined)
+                return;
+            const message = userMessage(text);
+            const inbox = agent.inbox;
+            const queued = inbox === undefined ? [] : [...(inbox.nextStep ?? []), ...(inbox.nextTurn ?? [])]
+                .filter((item) => item !== null && typeof item === 'object' && isStateMessage(item));
+            const [first, ...rest] = queued;
+            for (const item of rest)
+                inbox?.remove?.(item.id);
+            if (first !== undefined && inbox?.replace?.(first.id, message) === true)
+                return;
+            try {
+                if (typeof agent.inject === 'function')
+                    agent.inject(message);
+                else
+                    agent.followup?.(message);
+                ctx.logger.info('host-router: 作战室 compacted; open tasks and questions re-posted');
+            }
+            catch (error) {
+                ctx.logger.warn(`host-router: could not re-post the 作战室 state after compaction: ${String(error)}`);
+            }
+        });
+    }));
     /**
      * Keep a manager in its role while some of its tasks are still to come.
      *

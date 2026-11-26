@@ -41,6 +41,10 @@ export function noticeSubject(line) {
 const ASK_RE = /需要你决定|需要回答|卡住了|没法开始|没法继续|没有动静|需要你处理|等你决定/;
 /** Lines that close a subject: an open question about it is moot then. */
 const DONE_RE = /^「[^」]*」(?:（[^）]*）)? (?:完成|已取消)|^任务 \S+?（.*）(?:已完成|已取消)/;
+/** Whether a notice line says its subject finished or was cancelled: an open question about it is moot. */
+export function closesSubject(line) {
+    return !ASK_RE.test(line) && DONE_RE.test(line);
+}
 /** Whether a notice line waits on the human. */
 export function isAskLine(line) {
     return ASK_RE.test(line);
