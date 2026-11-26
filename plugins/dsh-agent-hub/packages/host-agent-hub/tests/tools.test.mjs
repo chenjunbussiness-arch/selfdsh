@@ -299,3 +299,20 @@ test('task_dispatch replaces: the answered task is put away once the new one is 
   assert.equal(busy.replaced.put_away, false)
   assert.match(busy.replaced.note, /task_cancel/)
 })
+
+test('mailbox: task_dispatch asks for the answers to come back to this profile; fallback_* only see what came back here', async () => {
+  const base = makeClient((c) => {
+    if (c.path === '/v1/ctl/dispatch') return { body: { task_id: 'n1', status: 'pending' } }
+    if (c.path === '/v1/ctl/fallback') return { body: { tasks: [] } }
+    if (c.path === '/v1/ctl/fallback/take') return { body: { task: null } }
+    return { body: {} }
+  })
+  const tools = new Map(createTools({ client: base.client, profile: 'cloud' }).map(tool => [tool.name, tool]))
+  const run = (name, args) => tools.get(name).execute(args, { signal: new AbortController().signal })
+  await run('task_dispatch', { agent: 'pool:research', title: 't', instruction: 'i' })
+  assert.equal(base.calls.find(c => c.path === '/v1/ctl/dispatch').json.reply_to, 'cloud')
+  await run('fallback_list', {})
+  assert.equal(base.calls.find(c => c.path === '/v1/ctl/fallback').query.get('profile'), 'cloud')
+  await run('fallback_take', {})
+  assert.equal(base.calls.find(c => c.path === '/v1/ctl/fallback/take').json.profile, 'cloud')
+})

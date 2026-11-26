@@ -111,7 +111,7 @@ export function apply(ctx, config = {}) {
   if (source === undefined) ctx.logger.warn(`agent-hub: ${tokenMissingMessage(resolved)}; tools and panel will answer hub-token-missing (issue one on the hub: node server.mjs controller add ${resolved.controllerId || '<controllerId>'})`)
   else ctx.logger.info(`agent-hub: controller token from ${source === 'env' ? `environment variable ${tokenEnv}` : `${envFile} (${tokenEnv})`}`)
 
-  for (const tool of createTools({ client })) ctx.effect(() => ctx.tools.register(tool))
+  for (const tool of createTools({ client, profile: profileName(ctx, config) })) ctx.effect(() => ctx.tools.register(tool))
   startSync(ctx, config, client, env)
 
   if (typeof ctx.inject === 'function') {

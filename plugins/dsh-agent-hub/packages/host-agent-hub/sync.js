@@ -8,9 +8,12 @@
  *     (prompts, answers, tool calls) and the final result. So a task started
  *     here is visible to every other DSH and to the cloud 作战室: no task is
  *     isolated on one machine.
- *  2. Stream: the hub's event stream (`/v1/ctl/events`, long poll) is turned
- *     into short 【进度提醒】 lines in this DSH's 作战室 (through
- *     `hostRouter.notice`), for tasks this DSH did not run itself.
+ *  2. Stream: this DSH's mail on the hub's event stream (`/v1/ctl/events?inbox=mine`,
+ *     long poll: the tasks it published, from this profile) is turned into
+ *     【进度提醒】 lines in its 作战室 (through `hostRouter.notice`). Another DSH's tasks
+ *     never show here (`watchAll: true` for an observer that wants the whole hub).
+ *     The end of a run (completed / failed / a question) goes out whole, once per
+ *     task and attempt; a task nobody took comes back here to decide (fallback_due).
  *
  * Offline: the mirror compares the router's board with what the hub last
  * accepted (kept in <DSH home>/agent-hub/sync-<profile>.json). Whatever could
@@ -176,8 +179,53 @@ export function noticeOf(event) {
     case 'cancelled': return `${title} 已取消`
     case 'needs_input': return `${title} 需要回答${msg}`
     case 'requeued': return `${title} 退回队列${msg}`
+    // Nobody took it: it is back with the DSH that published it (this one).
+    case 'fallback_due': return `${title} 没人接（${/no worker/.test(String(event.message)) ? '能接的 worker 都不在线' : '能接的 worker 都忙'}），需要你决定：自己做（fallback_take）、改派（task_dispatch 带 replaces）还是取消`
     default: return undefined
   }
+}
+
+/** Kinds that end a run: the publisher gets the whole result once per (task, attempt). */
+const FINAL_KINDS = new Set(['completed', 'failed', 'needs_input'])
+
+/** Text flattened to one line (a 作战室 notice is one line per item), at most `max` characters. */
+function flat(text, max) {
+  const line = String(text ?? '').replace(/\s*\r?\n\s*/g, ' / ').replace(/\s+/g, ' ').trim()
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+/**
+ * The full result of one run, as the one line the publisher's 作战室 gets: what came out
+ * (summary, or the question, or why it failed), the files, which attempt it was and
+ * where to read the rest. `task` is the hub's task (`getTask`).
+ */
+export function resultLineOf(task, event = {}) {
+  const who = task.agent && task.agent !== 'dsh-self' ? `（${task.result?.agent ?? task.assigned_to ?? task.agent}）` : ''
+  const title = `「${oneLine(task.title ?? task.task_id, 60)}」${who}`
+  const r = { ...(task.result ?? {}) }
+  // The worker's closing block (--- report --- summary / touched / left) is part of the result: keep it, drop the marker.
+  if (typeof r.summary === 'string') r.summary = r.summary.replace(/^--- report ---$/m, '')
+  const attempt = event.attempt ?? task.attempts
+  const tail = `（${attempt > 1 ? `第 ${attempt} 次；` : ''}全文：task_get ${task.task_id}）`
+  const files = (r.outputs ?? []).map(o => o?.name).filter(Boolean)
+  const out = files.length > 0 ? `；产出 ${files.slice(0, 5).join('、')}${files.length > 5 ? ` 等 ${files.length} 个` : ''}` : ''
+  if (r.needs_input !== undefined && r.needs_input !== null) return `${title} 需要回答：${flat(r.needs_input, 600)}${tail}`
+  // A summary that ends a sentence (。) and then "；产出" reads twice-stopped; drop the full stop.
+  const said = text => (out === '' ? text : text.replace(/[。．.]$/, ''))
+  if (task.status === 'completed') return `${title} 完成：${said(flat(r.summary, 800)) || '（没写总结）'}${out}${tail}`
+  const why = r.error?.message || r.summary || event.message || ''
+  return `${title} 失败：${said(flat(why, 600)) || '（没写原因）'}${out}${tail}`
+}
+
+/**
+ * Whether a hub event / task is this DSH's mail: it published the task (its controller,
+ * and its profile when the task says one), or it runs the task for its publisher and the
+ * task was cancelled. A hub that already filters by inbox sends nothing else; an older
+ * hub sends everything, so this check stays.
+ */
+export function isMine(item, controllerId, profile) {
+  if (item.created_by === controllerId && (item.reply_to === undefined || item.reply_to === null || item.reply_to === profile)) return true
+  return item.held_by === controllerId && item.kind === 'cancelled'
 }
 
 /**
@@ -188,14 +236,14 @@ export function noticeOf(event) {
  * @param {string} deps.profile              this DSH's profile name
  * @param {string} deps.stateFile            where the sync state is kept
  * @param {object} deps.logger
- * @param {object} [deps.options]            { mirror, notices, intervalMs, stepEveryMs, backfillHours, waitSeconds, stallMinutes, stallCheckMs }
+ * @param {object} [deps.options]            { mirror, notices, watchAll, intervalMs, stepEveryMs, backfillHours, waitSeconds, stallMinutes, stallCheckMs }
  */
 export function createSync(deps) {
   const { client, logger } = deps
-  const opts = { mirror: true, notices: true, intervalMs: 10_000, stepEveryMs: 30_000, backfillHours: 12, waitSeconds: 20, stallMinutes: 20, stallCheckMs: 120_000, ...deps.options }
+  const opts = { mirror: true, notices: true, watchAll: false, intervalMs: 10_000, stepEveryMs: 30_000, backfillHours: 12, waitSeconds: 20, stallMinutes: 20, stallCheckMs: 120_000, ...deps.options }
   const now = deps.now ?? (() => Date.now())
   const profile = PROFILE_RE.test(deps.profile ?? '') ? deps.profile : 'default'
-  let state = { tasks: {}, cursor: undefined, startedAt: undefined, said: {}, stalled: {} }
+  let state = { tasks: {}, cursor: undefined, startedAt: undefined, said: {}, stalled: {}, delivered: {} }
   let loaded = false
   let stopped = false
   let mirrorBusy = false
@@ -207,7 +255,7 @@ export function createSync(deps) {
     loaded = true
     try {
       const raw = JSON.parse(await readFile(deps.stateFile, 'utf8'))
-      if (raw && typeof raw === 'object') state = { tasks: raw.tasks ?? {}, cursor: raw.cursor, startedAt: raw.startedAt, said: raw.said ?? {}, stalled: raw.stalled ?? {} }
+      if (raw && typeof raw === 'object') state = { tasks: raw.tasks ?? {}, cursor: raw.cursor, startedAt: raw.startedAt, said: raw.said ?? {}, stalled: raw.stalled ?? {}, delivered: raw.delivered ?? {} }
     } catch { /* first run */ }
     state.startedAt ??= new Date(now()).toISOString()
   }
@@ -265,7 +313,7 @@ export function createSync(deps) {
       const parent = row.parentId === undefined ? undefined : state.tasks[row.parentId]?.hubId
       await client.registerLocal({
         task_id: id, title: String(row.subject ?? row.id).slice(0, 200) || row.id, instruction: String(row.subject ?? row.id),
-        executor: `dsh-self/${profile}/${row.partition}`.slice(0, 120), dsh_profile: profile, parent_task_id: parent,
+        executor: `dsh-self/${profile}/${row.partition}`.slice(0, 120), dsh_profile: profile, reply_to: profile, parent_task_id: parent,
         context: { router_task: row.id, partition: row.partition, level: row.level },
       })
       rec = state.tasks[row.id] = { hubId: id, sent: 'registered', session: 0 }
@@ -350,6 +398,11 @@ export function createSync(deps) {
   }
 
   /** One read of the event stream; turns new events into 作战室 lines. */
+  /** This DSH's mail only, unless it watches the whole hub (`watchAll`, an observer). */
+  const controllerId = () => client.config?.controllerId
+  const mine = item => opts.watchAll === true || isMine(item, controllerId(), profile)
+  const inbox = () => (opts.watchAll === true ? {} : { inbox: 'mine', profile })
+
   async function streamOnce(wait = opts.waitSeconds) {
     await load()
     if (state.cursor === undefined) {
@@ -358,7 +411,7 @@ export function createSync(deps) {
       await save()
       return { lines: [] }
     }
-    const out = await client.events({ after: state.cursor, wait })
+    const out = await client.events({ after: state.cursor, wait, ...inbox() })
     backOnline()
     if (out.reset) {
       state.cursor = out.latest ?? 0
@@ -368,8 +421,10 @@ export function createSync(deps) {
     // One line per task per read: its latest news. A line the 作战室 already got for
     // that task (the same words) is not sent again, also across a restart.
     const latest = new Map()
+    const finals = new Map() // task id -> the event that ended its run
     for (const event of out.events ?? []) {
       if (isOwnMirror(event, client.config?.controllerId, profile)) continue // our own mirror
+      if (!mine(event)) continue // another DSH's mail
       if (event.kind === 'progress' && (event.stage === 'step' || event.stage === undefined)) {
         const last = lastStep.get(`stream:${event.task_id}`) ?? 0
         if (now() - last < opts.stepEveryMs) continue
@@ -379,6 +434,26 @@ export function createSync(deps) {
       if (event.kind === 'progress' && (event.stage === 'step' || event.stage === undefined)) lastStep.set(`stream:${event.task_id}`, now())
       latest.delete(event.task_id) // keep the map in event order
       latest.set(event.task_id, line)
+      if (FINAL_KINDS.has(event.kind)) finals.set(event.task_id, event)
+      else finals.delete(event.task_id)
+    }
+    // The end of a run goes out whole (summary / question / reason, files), once per
+    // task and attempt, so the 作战室 never has to go and look, and never hears it twice.
+    for (const [taskId, event] of finals) {
+      const key = `${taskId}#${event.attempt ?? 0}`
+      if (state.delivered[key] !== undefined) { latest.delete(taskId); continue }
+      try {
+        const task = await client.getTask(taskId)
+        latest.set(taskId, resultLineOf(task, event))
+      } catch (error) {
+        if (isOffline(error)) throw error // the cursor stays: read again once the hub is back
+      }
+      state.delivered[key] = new Date(now()).toISOString()
+    }
+    const keys = Object.keys(state.delivered)
+    if (keys.length > SAID_MAX) {
+      keys.sort((a, b) => String(state.delivered[a]).localeCompare(String(state.delivered[b])))
+      for (const key of keys.slice(0, keys.length - SAID_MAX)) delete state.delivered[key]
     }
     const lines = []
     for (const [taskId, line] of latest) {
@@ -420,6 +495,7 @@ export function createSync(deps) {
       if (row?.status !== 'accepted' && row?.status !== 'running') continue
       const kind = typeof row.origin === 'string' ? row.origin : row.origin?.kind
       if (kind === 'local') continue
+      if (!mine(row)) continue // someone else's task: their DSH tells them
       active.add(row.task_id)
       if (row.stage === 'blocked' || row.stage === 'needs_input') continue // already a question
       const last = [row.updated_at, row.session_updated_at].map(at => Date.parse(at ?? '')).filter(Number.isFinite)

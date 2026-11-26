@@ -157,8 +157,9 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 | `POST /v1/ctl/reject?id=` | `{request_id, reason?}` | `{request_id, status}` |
 | `POST /v1/ctl/revoke?id=` | `{agent_id}`，被吊销 worker 正在执行的任务会回到队列 | worker 对象 |
 | `POST /v1/ctl/provision?id=` | `{agent_id, platform, mode, node, workspaces, capabilities, max_concurrency, description}` | `{agent, token, note}`，令牌只返回这一次 |
-| `GET /v1/ctl/fallback?id=[&workspaces=a,b]` | 等待兜底的任务（见第 6.2 节）；传了 `workspaces` 时只列 DSH 自己有这些工作区的代码任务 | `{generated_at, tasks[{…任务, waited_seconds, fallback_reason}]}`，`fallback_reason` 是 `no-online-worker` 或 `workers-busy` |
-| `POST /v1/ctl/fallback/take?id=` | `{task_id?, workspaces?}`；不传 `task_id` 就取最急的一个。任务没到时间或不该兜底返回 409 `not-fallback` | `{task}`（含 instruction 和 inputs[{name, from_task}]）；没有可兜底的任务时 `{task:null}` |
+| `GET /v1/ctl/events?id=&after=&wait=&limit=[&inbox=mine&profile=]` | 事件流，长轮询（`wait` 秒）。`inbox=mine` 只给本控制方发布的任务（带 `profile` 再按任务的 `reply_to` 筛）；不带是整个 hub | `{events[{seq, task_id, kind, message, created_by, reply_to, attempt, …}], next, latest}`；`kind=fallback_due` 是任务没人接、退回发布方，只发一次 |
+| `GET /v1/ctl/fallback?id=[&workspaces=a,b][&profile=]` | 等待兜底的任务（见第 6.2 节），只列本控制方（和 `profile`）发布的；传了 `workspaces` 时只列 DSH 自己有这些工作区的代码任务 | `{generated_at, tasks[{…任务, waited_seconds, fallback_reason}]}`，`fallback_reason` 是 `no-online-worker` 或 `workers-busy` |
+| `POST /v1/ctl/fallback/take?id=` | `{task_id?, workspaces?, profile?}`；不传 `task_id` 就取最急的一个。任务没到时间或不该兜底返回 409 `not-fallback`；不是本控制方发布的返回 403 `not-publisher` | `{task}`（含 instruction 和 inputs[{name, from_task}]）；没有可兜底的任务时 `{task:null}` |
 | `POST /v1/ctl/fallback/event?id=` | `{task_id, progress?, message?}`，同时续租 | `{ok, lease_until}` |
 | `POST /v1/ctl/fallback/result?id=` | 和 `/v1/result` 相同的结构 | `{ok, task_status}` |
 | `GET /v1/ctl/fallback/input?id=&task_id=&name=[&from_task=]` | 读兜底任务的输入或上游产出 | 文件字节 |

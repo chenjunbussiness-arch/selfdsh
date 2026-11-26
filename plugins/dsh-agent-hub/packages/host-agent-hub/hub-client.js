@@ -662,8 +662,9 @@ export function createHubClient(options = {}) {
     /**
      * `GET /v1/ctl/events?after=&wait=` → `{ events, next, latest, reset }` (long poll up to `wait` s).
      * `reset` means the cursor fell out of the hub's window: start again from `latest`.
+     * `inbox: 'mine'` (+ `profile`): only this DSH's mail, the events of tasks it published.
      */
-    events: async ({ after, wait = 0, limit } = {}) => asObject(await call('GET', 'ctl/events', { query: { after, wait, limit }, timeoutMs: (Math.min(25, Math.max(0, wait)) + 10) * 1000 })),
+    events: async ({ after, wait = 0, limit, inbox, profile } = {}) => asObject(await call('GET', 'ctl/events', { query: { after, wait, limit, inbox, profile }, timeoutMs: (Math.min(25, Math.max(0, wait)) + 10) * 1000 })),
     /** Append entries ({ role, text, name?, at? }) to the session log of a task this DSH holds. */
     appendSession: async (taskId, entries) => asObject(await ctlPost('session', { task_id: taskId, entries })),
     /** `GET /v1/ctl/session/read?task_id=&after=&limit=` → `{ task_id, total, entries }`. */
@@ -685,8 +686,9 @@ export function createHubClient(options = {}) {
     provision: async body => asObject(await ctlPost('provision', body)),
 
     // --- DSH fallback (this DSH acts as the built-in dsh-self) -------------------
-    fallbackList: async workspaces => asList(await ctlGet('fallback', { workspaces: Array.isArray(workspaces) ? workspaces.join(',') : undefined }), 'tasks'),
-    fallbackTake: async ({ task_id, workspaces }) => asObject(await ctlPost('fallback/take', { task_id, workspaces })),
+    /** Tasks handed back to this DSH (`profile`: the ones it published from that profile). */
+    fallbackList: async (workspaces, profile) => asList(await ctlGet('fallback', { workspaces: Array.isArray(workspaces) ? workspaces.join(',') : undefined, profile }), 'tasks'),
+    fallbackTake: async ({ task_id, workspaces, profile }) => asObject(await ctlPost('fallback/take', { task_id, workspaces, profile })),
     fallbackEvent: async body => asObject(await ctlPost('fallback/event', body)),
     fallbackResult: async body => asObject(await ctlPost('fallback/result', body)),
     fallbackInput: (taskId, name, fromTask) => ctlGet('fallback/input', { task_id: taskId, name, from_task: fromTask }, { raw: true }),
