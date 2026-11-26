@@ -96,6 +96,9 @@ const MAX_STICKY_KEYS = 2000
 export const STICKY_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,127}$/
 /** Capabilities DSH never takes over by default (only that agent may touch the data). */
 export const DEFAULT_NO_FALLBACK = ['quick']
+
+/** The role an agent of a known platform gets when it does not name one. */
+export const PLATFORM_ROLES = Object.freeze({ 'aws-quick': 'coder' })
 export const MAX_WAIT_SECONDS = 55
 const PRIORITY = { high: 0, normal: 1, low: 2 }
 const MAX_WORKSPACES = 64
@@ -251,10 +254,31 @@ const isPlainObject = v => v !== null && typeof v === 'object' && !Array.isArray
  * `pull_every_seconds`: how often a scheduled worker (AWS Quick, cron `bridge --once`)
  * comes back to pull. undefined = not declared, null = clear (heartbeat only).
  */
+/**
+ * Whether a stream event belongs in one DSH's inbox (`{ controller, profile }`): a task
+ * that DSH published (created by its controller, answers to its profile, or to no
+ * profile at all for tasks from before reply_to), or a cancellation of a task it runs
+ * for someone else (the DSH fallback). Everything else is another DSH's mail.
+ */
+export function isForInbox(event, inbox) {
+  if (event.created_by === inbox.controller && (event.reply_to === undefined || inbox.profile === undefined || event.reply_to === inbox.profile)) return true
+  return event.held_by === inbox.controller && event.kind === 'cancelled'
+}
+
+/**
+ * Whether a controller (with its profile, when it says one) published a task, so the
+ * task is its to take back. Tasks a dispatcher agent published belong to no DSH: any may.
+ */
+export function publishedBy(task, controllerId, profile) {
+  if (String(task.created_by ?? '').startsWith('agent:')) return true
+  if (task.created_by !== controllerId) return false
+  return profile === undefined || task.reply_to === undefined || task.reply_to === profile
+}
+
 /** A DSH profile name or undefined; anything else is a 400 with `code`. */
 export function validProfile(value, code = 'bad-task') {
   if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string' || !PROFILE_RE.test(value)) throw new HubError(400, code, 'dsh_profile must be a DSH profile name (letters, digits, _ . -)')
+  if (typeof value !== 'string' || !PROFILE_RE.test(value)) throw new HubError(400, code, `${code === 'bad-reply-to' ? 'reply_to' : 'dsh_profile'} must be a DSH profile name (letters, digits, _ . -)`)
   return value
 }
 
@@ -637,7 +661,8 @@ export class AgentHub {
     const node = input.node ?? undefined
     if (node !== undefined && (typeof node !== 'string' || !NODE_RE.test(node))) throw new HubError(400, 'bad-node', 'node must match /^[a-z][a-z0-9-]{0,47}$/')
     const workspaces = nameList(input.workspaces, WORKSPACE_RE, 'bad-workspaces', `workspaces must be a list of at most ${MAX_WORKSPACES} workspace names`, MAX_WORKSPACES)
-    const role = roleOf(input.role)
+    // A platform that is known to have no shell (AWS Quick) is a coder unless it says otherwise.
+    const role = roleOf(input.role ?? PLATFORM_ROLES[String(input.platform ?? '')])
     if (role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')} (default ${DEFAULT_ROLE})`)
     const pullEverySeconds = validatePullEvery(input.pull_every_seconds)
     const dshProfile = validProfile(input.dsh_profile, 'bad-profile')
@@ -877,6 +902,9 @@ export class AgentHub {
       status, online: status === 'online', last_seen: agent.lastSeen, left_at: agent.leftAt, version: agent.clientVersion,
       reported_status: agent.reportedStatus, running_tasks: running, created_at: agent.createdAt,
       role: agentRole(agent), duties: roleDuties(agentRole(agent)), pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
+      // How a task reaches it: `online` (stays connected, takes a task within seconds) or
+      // `scheduled` (comes back every pull_every_seconds: a task may wait that long).
+      reach: agent.pullEverySeconds === undefined ? 'online' : 'scheduled',
       dormant: this.dormant(agent, status),
     }
   }
@@ -1083,11 +1111,14 @@ export class AgentHub {
     let capability = t.capability ?? undefined
     if (capability !== undefined && (typeof capability !== 'string' || !CAP_RE.test(capability))) throw new HubError(400, 'bad-task', 'capability must be a capability name')
     const dshProfile = validProfile(t.dsh_profile)
+    // Whose inbox the answers go to: the profile of the DSH that published the task
+    // (several DSHs may share one controller id). Its events reach that DSH only.
+    const replyTo = validProfile(t.reply_to, 'bad-reply-to')
     if (t.run_here !== undefined && typeof t.run_here !== 'boolean') throw new HubError(400, 'bad-task', 'run_here must be true or false')
     const runHere = t.run_here === true
     const executor = t.executor ?? undefined
     if (executor !== undefined && (typeof executor !== 'string' || !EXECUTOR_RE.test(executor))) throw new HubError(400, 'bad-task', 'executor must be a short label such as dsh-self/web')
-    if (runHere) return this.registerLocal(controllerId, t, { type, priority, leaseSeconds, workspace, node, ref, capability, dshProfile, executor, effort, asAgent })
+    if (runHere) return this.registerLocal(controllerId, t, { type, priority, leaseSeconds, workspace, node, ref, capability, dshProfile, replyTo, executor, effort, asAgent })
     if (POOL_RE.test(target)) {
       if (capability !== undefined && capability !== target.slice(5)) throw new HubError(400, 'bad-task', `capability ${capability} does not match ${target}`)
       capability = target.slice(5)
@@ -1154,7 +1185,7 @@ export class AgentHub {
       }
       const task = {
         protocol: PROTOCOL, task_id: id, agent: target, type, title: t.title.trim(), instruction: t.instruction,
-        workspace, node, ref, effort, capability, dsh_profile: dshProfile, needs,
+        workspace, node, ref, effort, capability, dsh_profile: dshProfile, needs, reply_to: replyTo,
         origin: { kind: asAgent === undefined ? 'controller' : 'agent', by: creator },
         inputs: inputNames, output: t.output ?? {}, priority, deadline: t.deadline, lease_seconds: leaseSeconds,
         parent_task_id: t.parent_task_id, depends_on: deps, context: t.context ?? {},
@@ -1206,6 +1237,7 @@ export class AgentHub {
       const task = {
         protocol: PROTOCOL, task_id: id, agent: FALLBACK_AGENT, type: v.type, title: t.title.trim(), instruction: t.instruction,
         workspace: v.workspace, node: v.node, ref: v.ref, effort: v.effort, capability: v.capability, dsh_profile: v.dshProfile,
+        reply_to: v.replyTo ?? v.dshProfile,
         origin: { kind: 'local', by: controllerId, executor: v.executor },
         inputs: [], output: t.output ?? {}, priority: v.priority, deadline: t.deadline, lease_seconds: v.leaseSeconds,
         parent_task_id: parent, depends_on: [], context: t.context ?? {},
@@ -1326,7 +1358,7 @@ export class AgentHub {
       created_at: task.created_at, lease_until: task.leaseUntil, depends_on: task.depends_on,
       fallback: task.fallback ?? 'dsh', fallback_after_seconds: task.fallback_after_seconds, fallback_by: task.fallbackBy,
       sticky_key: task.sticky_key, sticky: task.sticky, preferred_agent: task.preferred,
-      dsh_profile: task.dsh_profile, origin: task.origin ?? { kind: 'controller', by: task.created_by }, stage: task.stage,
+      dsh_profile: task.dsh_profile, reply_to: task.reply_to, origin: task.origin ?? { kind: 'controller', by: task.created_by }, stage: task.stage,
       updated_at: task.history.at(-1)?.at ?? task.created_at, finished_at: task.result?.finished_at,
       acknowledged: task.acknowledged === true ? true : undefined, in_history: this.inHistory(task),
       session_entries: task.sessionEntries ?? 0, session_updated_at: task.sessionUpdatedAt,
@@ -1342,12 +1374,13 @@ export class AgentHub {
    * controllers' event stream (`feed`, read with /v1/ctl/events). Text is
    * redacted before it is stored anywhere.
    */
-  event(task, kind, message, { stage } = {}) {
+  event(task, kind, message, { stage, feedOnly = false } = {}) {
     const at = nowIso(this.clock())
     const text = message === undefined || message === null ? undefined : redact(message)
     const entry = { at, event: kind, message: text }
     if (stage !== undefined) entry.stage = stage
-    task.history.push(entry)
+    // feedOnly: a notice to the publisher that changes nothing on the task (no history entry).
+    if (!feedOnly) task.history.push(entry)
     if (task.history.length > 200) task.history.splice(0, task.history.length - 200)
     const state = this.state
     if (state === undefined) return
@@ -1356,7 +1389,8 @@ export class AgentHub {
       seq: state.feedSeq, at, task_id: task.task_id, kind, stage, message: text,
       title: task.title, status: task.status, progress: task.progress,
       agent: task.assignedTo ?? task.agent, created_by: task.created_by, origin: task.origin?.kind ?? 'controller',
-      dsh_profile: task.dsh_profile,
+      dsh_profile: task.dsh_profile, reply_to: task.reply_to, attempt: task.attempts,
+      held_by: task.fallbackBy,
     })
     if (state.feed.length > FEED_MAX) state.feed.splice(0, state.feed.length - FEED_MAX)
     this.feedDirty = true
@@ -1399,39 +1433,50 @@ export class AgentHub {
    * (the cursor is older than the oldest kept event, or the hub was reset):
    * the reader should re-read the task list.
    */
-  async feed({ after = 0, wait = 0, limit = 200, signal } = {}) {
-    const cursor = Number.isInteger(after) && after >= 0 ? after : 0
+  async feed({ after = 0, wait = 0, limit = 200, signal, inbox } = {}) {
+    const start = Number.isInteger(after) && after >= 0 ? after : 0
     const max = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 1000) : 200
-    const pick = (state) => {
+    const mine = inbox === undefined ? () => true : e => isForInbox(e, inbox)
+    const pick = cursor => (state) => {
       if (cursor > state.feedSeq) return { events: [], next: state.feedSeq, latest: state.feedSeq, reset: true }
       const oldest = state.feed[0]?.seq ?? state.feedSeq + 1
-      const events = state.feed.filter(e => e.seq > cursor).slice(0, max)
-      return { events, next: events.at(-1)?.seq ?? cursor, latest: state.feedSeq, reset: cursor > 0 && cursor < oldest - 1 }
+      const later = state.feed.filter(e => e.seq > cursor)
+      const events = later.filter(mine).slice(0, max)
+      // The cursor moves past events for other inboxes too, so the reader is not handed them again.
+      const next = events.length === max ? events.at(-1).seq : later.at(-1)?.seq ?? cursor
+      return { events, next, latest: state.feedSeq, reset: cursor > 0 && cursor < oldest - 1 }
     }
-    const first = await this.read(pick)
+    let out = await this.read(pick(start))
     const seconds = typeof wait === 'number' && Number.isFinite(wait) && wait > 0 ? Math.min(wait, this.maxWaitSeconds) : 0
-    if (first.events.length > 0 || first.reset || seconds === 0 || this.closed) return first
+    if (out.events.length > 0 || out.reset || seconds === 0 || this.closed) return out
     if (this.feedWaiters >= MAX_FEED_WAITERS) throw new HubError(429, 'too-many-waiters', 'too many readers of the event stream')
+    const deadline = Date.now() + seconds * 1000
     this.feedWaiters += 1
     try {
-      await new Promise((resolve) => {
-        const done = () => {
-          clearTimeout(timer)
-          this.events.off('feed', done)
-          this.events.off('shutdown', done)
-          signal?.removeEventListener?.('abort', done)
-          resolve()
-        }
-        const timer = setTimeout(done, seconds * 1000)
-        this.events.on('feed', done)
-        this.events.on('shutdown', done)
-        signal?.addEventListener?.('abort', done)
-        if (signal?.aborted) done()
-      })
+      // Events for other inboxes wake the wait too; keep waiting until one is for this reader.
+      while (out.events.length === 0 && !out.reset && !this.closed && !signal?.aborted) {
+        const left = deadline - Date.now()
+        if (left <= 0) break
+        await new Promise((resolve) => {
+          const done = () => {
+            clearTimeout(timer)
+            this.events.off('feed', done)
+            this.events.off('shutdown', done)
+            signal?.removeEventListener?.('abort', done)
+            resolve()
+          }
+          const timer = setTimeout(done, left)
+          this.events.on('feed', done)
+          this.events.on('shutdown', done)
+          signal?.addEventListener?.('abort', done)
+          if (signal?.aborted) done()
+        })
+        out = await this.read(pick(out.next))
+      }
     } finally {
       this.feedWaiters -= 1
     }
-    return this.read(pick)
+    return out
   }
 
   requeue(state, task, why) {
@@ -1723,13 +1768,20 @@ export class AgentHub {
     })
   }
 
-  /** The task must be leased by this very worker. */
-  owned(state, agentId, taskId, { reclaim = false } = {}) {
+  /**
+   * The task must be leased by this very worker. `attempt` (optional: the `attempt` the
+   * poll handed out) must be the current one, so a result or report from an earlier
+   * lease of the same task, arriving late, is never taken for the current run's.
+   */
+  owned(state, agentId, taskId, { reclaim = false, attempt } = {}) {
     this.seen(this.liveAgent(state, agentId))
     const task = own(state.tasks, taskId)
     if (reclaim && this.reclaimable(task, agentId)) this.reclaim(state, task, agentId) // late progress or result after a requeue (mutations only)
     if (task === undefined || task.assignedTo !== agentId) throw new HubError(404, 'task-not-found', 'no such task leased by this agent')
     if (!isActive(task)) throw new HubError(409, 'task-not-active', `task is ${task.status}`)
+    if (attempt !== undefined && attempt !== null && attempt !== task.attempts) {
+      throw new HubError(409, 'stale-attempt', `attempt ${attempt} of ${task.task_id} is over (now attempt ${task.attempts})`)
+    }
     return task
   }
 
@@ -1737,7 +1789,7 @@ export class AgentHub {
     const b = body ?? {}
     const stage = validStage(b.stage)
     return this.mutate((state) => {
-      const task = this.owned(state, agentId, b.task_id, { reclaim: true })
+      const task = this.owned(state, agentId, b.task_id, { reclaim: true, attempt: b.attempt })
       task.status = 'running'
       return this.applyProgress(task, b, stage)
     })
@@ -1773,7 +1825,7 @@ export class AgentHub {
     const b = body ?? {}
     const names = checkResult(b)
     return this.mutate(async (state) => {
-      const task = this.owned(state, agentId, b.task_id, { reclaim: true })
+      const task = this.owned(state, agentId, b.task_id, { reclaim: true, attempt: b.attempt })
       return this.finish(state, task, b, names, agentId)
     })
   }
@@ -1843,13 +1895,13 @@ export class AgentHub {
   }
 
   /** Tasks DSH may take over now (optionally only those whose workspace DSH has). */
-  listFallback(controllerId, { workspaces } = {}) {
+  listFallback(controllerId, { workspaces, profile } = {}) {
     return this.mutate(async (state) => {
       await this.liveController(controllerId)
       const now = this.clock()
       return Object.values(state.tasks)
         .map(task => ({ task, due: this.fallbackDueAt(state, task) }))
-        .filter(({ task, due }) => due !== undefined && due <= now && fallbackWorkspaceOk(task, workspaces))
+        .filter(({ task, due }) => due !== undefined && due <= now && fallbackWorkspaceOk(task, workspaces) && publishedBy(task, controllerId, profile))
         .sort((a, b) => PRIORITY[a.task.priority] - PRIORITY[b.task.priority] || a.task.created_at.localeCompare(b.task.created_at))
         .map(({ task }) => ({
           ...this.publicTask(task),
@@ -1864,14 +1916,15 @@ export class AgentHub {
    * by dsh-self: the original worker gets `abort` if it still reports it and
    * can no longer submit. One attempt: a failure or an expired lease fails it.
    */
-  takeFallback(controllerId, { task_id: taskId, workspaces } = {}) {
+  takeFallback(controllerId, { task_id: taskId, workspaces, profile } = {}) {
     return this.mutate(async (state) => {
       await this.liveController(controllerId)
       const now = this.clock()
-      const due = task => { const at = this.fallbackDueAt(state, task); return at !== undefined && at <= now && fallbackWorkspaceOk(task, workspaces) }
+      const due = task => { const at = this.fallbackDueAt(state, task); return at !== undefined && at <= now && fallbackWorkspaceOk(task, workspaces) && publishedBy(task, controllerId, profile) }
       let task
       if (taskId !== undefined) {
         task = this.mustTask(state, taskId)
+        if (!publishedBy(task, controllerId, profile)) throw new HubError(403, 'not-publisher', `${task.task_id} goes back to the DSH that published it (${task.created_by}${task.reply_to ? `/${task.reply_to}` : ''})`)
         if (!due(task)) {
           const at = this.fallbackDueAt(state, task)
           const why = at === undefined ? 'it is not a pending task DSH may take over'
@@ -2062,6 +2115,18 @@ export class AgentHub {
           this.event(task, 'failed', 'upstream failed')
           changed++
         }
+      }
+      // Nobody took it in time (or nobody who could is online): hand it back to whoever
+      // published it, once per wait, instead of leaving it for someone to find in a list.
+      // (An announcement, not a change of the task: not counted.)
+      for (const task of Object.values(state.tasks)) {
+        const at = this.fallbackDueAt(state, task)
+        if (at === undefined || at > now) continue
+        const mark = task.pendingSince ?? task.created_at
+        if (task.fallbackAnnounced === mark) continue
+        task.fallbackAnnounced = mark
+        const why = this.anyOnlineFor(state, task) ? 'workers-busy' : 'no-online-worker'
+        this.event(task, 'fallback_due', why === 'workers-busy' ? 'nobody took it in time' : 'no worker that can take it is online', { feedOnly: true })
       }
       for (const request of Object.values(state.requests)) {
         if (request.status === 'pending' && now - Date.parse(request.requested_at) > this.requestTtlMs) {

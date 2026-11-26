@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { HubError } from '../hub-client.js'
-import { createSync, hubTaskId, isOffline, lineOf, noticeOf, sessionEntriesOf, stageOf } from '../sync.js'
+import { createSync, hubTaskId, isMine, isOffline, lineOf, noticeOf, resultLineOf, sessionEntriesOf, stageOf } from '../sync.js'
 import { fakeLogger } from './helpers.mjs'
 
 const offline = () => new HubError(503, 'hub-unreachable', 'hub unreachable')
@@ -32,15 +32,25 @@ function fakeClient() {
     async appendSession(id, entries) { c.guard(id); calls.push(['session', id, entries.map(e => `${e.role}:${e.text}`)]); return { ok: true } },
     list: [],
     async listTasks() { if (c.down) throw offline(); calls.push(['list']); return c.list },
-    async events({ after, wait }) {
+    async events({ after, wait, inbox, profile }) {
       if (c.down) throw offline()
-      calls.push(['events', after, wait])
+      calls.push(['events', after, wait, inbox, profile])
       return c.feed
+    },
+    tasks: {},
+    async getTask(id) {
+      if (c.down) throw offline()
+      calls.push(['get', id])
+      if (c.tasks[id] === undefined) throw new HubError(404, 'task-not-found', 'no', { fromHub: true })
+      return c.tasks[id]
     },
     of(kind) { return calls.filter(x => x[0] === kind) },
   }
   return c
 }
+
+/** An event of a task this DSH (dsh-home, profile web) published. */
+const mail = e => ({ created_by: 'dsh-home', reply_to: 'web', ...e })
 
 function row(id, state, extra = {}) {
   return { id, partition: 'web', subject: `做 ${id}`, state, level: 'worker', progress: 0.3, todos: { ratio: '0/0' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...extra }
@@ -198,28 +208,62 @@ test('a row the hub refuses is dropped from the mirror; the others go on', async
   assert.ok(s.logger.lines.some(l => l.includes('bad not mirrored')))
 })
 
-test('stream: starts at the head, then other DSHs\' and workers\' events become 作战室 lines; our own mirror does not', async (t) => {
+test('stream: starts at the head; only this DSH\'s mail becomes 作战室 lines, the end of a run in full', async (t) => {
   const s = await setup(t)
   s.client.feed = { events: [], next: 7, latest: 7, reset: false }
   await s.sync.streamOnce(0)
   assert.equal(s.sync.state.cursor, 7, 'no replay of old history')
+  s.client.tasks.task_1 = {
+    task_id: 'task_1', title: '查日志', agent: 'code-desk', status: 'completed', attempts: 1,
+    result: { status: 'completed', summary: '找到了：\n超时出在网关', outputs: [{ name: 'log.md' }], agent: 'code-desk' },
+  }
   s.client.feed = {
-    next: 12, latest: 12, reset: false, events: [
-      { seq: 8, kind: 'registered', task_id: 'local_ops_a', title: '备份', origin: { kind: 'local', by: 'dsh-office' } },
+    next: 14, latest: 14, reset: false, events: [
+      { seq: 8, kind: 'registered', task_id: 'local_ops_a', title: '备份', origin: { kind: 'local', by: 'dsh-office' }, created_by: 'dsh-office' },
       { seq: 9, kind: 'progress', stage: 'step', task_id: 'local_web_t1', title: '自己的', origin: { kind: 'local', by: 'dsh-home' } },
-      { seq: 10, kind: 'leased', task_id: 'task_1', title: '查日志', agent: 'code-desk', origin: { kind: 'controller', by: 'dsh-home' } },
-      { seq: 11, kind: 'progress', stage: 'step', message: '跑测试', task_id: 'task_1', title: '查日志', agent: 'code-desk' },
-      { seq: 12, kind: 'completed', message: '找到了', task_id: 'task_1', title: '查日志', agent: 'code-desk' },
+      mail({ seq: 10, kind: 'leased', task_id: 'task_1', title: '查日志', agent: 'code-desk' }),
+      mail({ seq: 11, kind: 'progress', stage: 'step', message: '跑测试', task_id: 'task_1', title: '查日志', agent: 'code-desk' }),
+      mail({ seq: 12, kind: 'completed', message: '找到了', task_id: 'task_1', title: '查日志', agent: 'code-desk', attempt: 1 }),
+      { seq: 13, kind: 'completed', message: '云端发的', task_id: 'task_2', title: '别的', created_by: 'dsh-home', reply_to: 'cloud' },
+      { seq: 14, kind: 'completed', message: '别人的', task_id: 'task_3', title: '别的', created_by: 'dsh-office' },
     ],
   }
   await s.sync.streamOnce(0)
-  // One line per task per read: its latest state.
-  assert.deepEqual(s.notices, [
-    'dsh-office 在本地开始 「备份」',
-    '「查日志」（code-desk） 完成：找到了',
-  ])
-  assert.deepEqual(s.client.of('events').at(-1), ['events', 7, 0])
-  assert.equal(s.sync.state.cursor, 12)
+  assert.deepEqual(s.notices, ['「查日志」（code-desk） 完成：找到了： / 超时出在网关；产出 log.md（全文：task_get task_1）'])
+  assert.deepEqual(s.client.of('events').at(-1), ['events', 7, 0, 'mine', 'web'])
+  assert.equal(s.sync.state.cursor, 14)
+  // The same end again (a replay): not told twice. A new run (attempt 2) is.
+  s.client.feed = { next: 15, latest: 15, reset: false, events: [mail({ seq: 15, kind: 'completed', task_id: 'task_1', title: '查日志', attempt: 1 })] }
+  await s.sync.streamOnce(0)
+  assert.equal(s.notices.length, 1)
+  s.client.tasks.task_1 = { ...s.client.tasks.task_1, attempts: 2, result: { status: 'completed', summary: '重做好了', agent: 'code-desk' } }
+  s.client.feed = { next: 16, latest: 16, reset: false, events: [mail({ seq: 16, kind: 'completed', task_id: 'task_1', title: '查日志', attempt: 2 })] }
+  await s.sync.streamOnce(0)
+  assert.deepEqual(s.notices.slice(1), ['「查日志」（code-desk） 完成：重做好了（第 2 次；全文：task_get task_1）'])
+})
+
+test('stream: watchAll (an observer) gets the whole hub again', async (t) => {
+  const s = await setup(t, { options: { watchAll: true } })
+  s.sync.state.cursor = 0
+  s.client.feed = { next: 1, latest: 1, reset: false, events: [{ seq: 1, kind: 'created', task_id: 'task_3', title: '别人的', created_by: 'dsh-office' }] }
+  await s.sync.streamOnce(0)
+  assert.deepEqual(s.notices, ['云端新任务 「别人的」'])
+  assert.deepEqual(s.client.of('events').at(-1), ['events', 0, 0, undefined, undefined])
+})
+
+test('isMine and resultLineOf', () => {
+  assert.equal(isMine({ created_by: 'a' }, 'a', 'web'), true)
+  assert.equal(isMine({ created_by: 'a', reply_to: 'ops' }, 'a', 'web'), false)
+  assert.equal(isMine({ created_by: 'b', held_by: 'a', kind: 'cancelled' }, 'a', 'web'), true)
+  assert.equal(isMine({ created_by: 'b', held_by: 'a', kind: 'progress' }, 'a', 'web'), false)
+  assert.equal(resultLineOf({ task_id: 't', title: '问', agent: 'quick', status: 'failed', attempts: 1, result: { needs_input: '用 v1\n还是 v2？' } }),
+    '「问」（quick） 需要回答：用 v1 / 还是 v2？（全文：task_get t）')
+  assert.equal(resultLineOf({ task_id: 't', title: '编', status: 'failed', attempts: 3, result: { error: { message: '编译失败' } } }),
+    '「编」 失败：编译失败（第 3 次；全文：task_get t）')
+  assert.equal(resultLineOf({ task_id: 't', title: '文案', agent: 'w', status: 'completed', attempts: 1, result: { summary: '首页文案已更新。', outputs: [{ name: 'copy.md' }] } }),
+    '「文案」（w） 完成：首页文案已更新；产出 copy.md（全文：task_get t）', 'no full stop right before the outputs')
+  assert.equal(noticeOf({ kind: 'fallback_due', task_id: 't', title: '周报', agent: 'pool:report', message: 'no worker that can take it is online' }),
+    '「周报」（pool:report） 没人接（能接的 worker 都不在线），需要你决定：自己做（fallback_take）、改派（task_dispatch 带 replaces）还是取消')
 })
 
 test('stream: the hub feed shape (origin as a kind string, created_by, dsh_profile) is filtered right', async (t) => {
@@ -232,17 +276,21 @@ test('stream: the hub feed shape (origin as a kind string, created_by, dsh_profi
       { seq: 3, kind: 'registered', task_id: 'local_ops_t1', title: '备份', origin: 'local', created_by: 'dsh-home', dsh_profile: 'ops' },
       { seq: 4, kind: 'completed', task_id: 'task_9', title: '写周报', agent: 'quick-mydesk', origin: 'controller', created_by: 'dsh-home',
         message: '周报写好了。\n--- report ---\nsummary: x\ntouched: none\nleft: none' },
+      { seq: 5, kind: 'registered', task_id: 'local_ops_t2', title: '新的', origin: 'local', created_by: 'dsh-home', dsh_profile: 'ops', reply_to: 'ops' },
     ],
   }
+  s.client.tasks.task_9 = { task_id: 'task_9', title: '写周报', agent: 'quick-mydesk', status: 'completed', attempts: 1,
+    result: { status: 'completed', summary: '周报写好了。\n--- report ---\nsummary: x\ntouched: none\nleft: none', agent: 'quick-mydesk' } }
   await s.sync.streamOnce(0)
-  assert.deepEqual(s.notices, ['dsh-home（ops） 在本地开始 「备份」', '「写周报」（quick-mydesk） 完成：周报写好了。'])
+  // ops' old task (no reply_to: from before the mailbox) still shows; its new one goes to ops only.
+  assert.deepEqual(s.notices, ['dsh-home（ops） 在本地开始 「备份」', '「写周报」（quick-mydesk） 完成：周报写好了。 / summary: x / touched: none / left: none（全文：task_get task_9）'])
 })
 
 test('stream: the same news for a task is told once, also after a restart; an old client\'s "working" is not news', async (t) => {
   const s = await setup(t)
   s.sync.state.cursor = 0
-  const step = (seq, m) => ({ seq, kind: 'progress', stage: 'step', message: m, task_id: 'task_7', title: 'P7 收口', agent: 'quick-ws' })
-  const keepAlive = seq => ({ seq, kind: 'progress', message: 'working', task_id: 'task_8', title: '另一件', agent: 'quick-ws' })
+  const step = (seq, m) => mail({ seq, kind: 'progress', stage: 'step', message: m, task_id: 'task_7', title: 'P7 收口', agent: 'quick-ws' })
+  const keepAlive = seq => mail({ seq, kind: 'progress', message: 'working', task_id: 'task_8', title: '另一件', agent: 'quick-ws' })
   s.client.feed = { events: [step(1, '测试已 7/7 通过'), keepAlive(2)], next: 2, latest: 2, reset: false }
   await s.sync.streamOnce(0)
   for (let i = 0; i < 50; i++) {
@@ -257,15 +305,16 @@ test('stream: the same news for a task is told once, also after a restart; an ol
   s.client.feed = { events: [step(200, '测试已 7/7 通过')], next: 200, latest: 200, reset: false }
   await again.streamOnce(0)
   assert.equal(s.notices.length, 1)
-  s.client.feed = { events: [{ ...step(201, ''), kind: 'completed', message: '好了' }], next: 201, latest: 201, reset: false }
+  s.client.tasks.task_7 = { task_id: 'task_7', title: 'P7 收口', agent: 'quick-ws', status: 'completed', attempts: 1, result: { status: 'completed', summary: '好了', agent: 'quick-ws' } }
+  s.client.feed = { events: [{ ...step(201, ''), kind: 'completed', message: '好了', attempt: 1 }], next: 201, latest: 201, reset: false }
   await again.streamOnce(0)
-  assert.deepEqual(s.notices.slice(1), ['「P7 收口」（quick-ws） 完成：好了'])
+  assert.deepEqual(s.notices.slice(1), ['「P7 收口」（quick-ws） 完成：好了（全文：task_get task_7）'])
 })
 
 test('stream: step lines of one task at most every 30 s; a reset jumps to the head', async (t) => {
   const s = await setup(t)
   s.sync.state.cursor = 1
-  const step = (seq, m) => ({ seq, kind: 'progress', stage: 'step', message: m, task_id: 'task_1', title: 'x' })
+  const step = (seq, m) => mail({ seq, kind: 'progress', stage: 'step', message: m, task_id: 'task_1', title: 'x' })
   s.client.feed = { events: [step(2, 'a'), step(3, 'b')], next: 3, latest: 3, reset: false }
   await s.sync.streamOnce(0)
   assert.deepEqual(s.notices, ['「x」 进度：a'])
@@ -277,8 +326,9 @@ test('stream: step lines of one task at most every 30 s; a reset jumps to the he
 test('stream without a router notice hook only logs', async (t) => {
   const s = await setup(t, { notice: false })
   s.sync.state.cursor = 0
-  s.client.feed = { events: [{ seq: 1, kind: 'failed', message: 'boom', task_id: 't', title: 'y' }], next: 1, latest: 1, reset: false }
+  s.client.feed = { events: [mail({ seq: 1, kind: 'failed', message: 'boom', task_id: 't', title: 'y' })], next: 1, latest: 1, reset: false }
   await s.sync.streamOnce(0)
+  // The task could not be read (gone): the event's own line goes out instead.
   assert.ok(s.logger.lines.includes('info agent-hub: 「y」 失败：boom'))
 })
 
@@ -296,8 +346,10 @@ test('stall: a cloud task with no news for stallMinutes gets one 没有动静 li
   const s = await setup(t, { options: { stallMinutes: 20 } })
   const at = new Date(Date.parse('2026-11-24T10:00:00Z') - 5 * 60_000).toISOString()
   s.client.list = [
-    { task_id: 'c1', title: '改接口', agent: 'quick', status: 'running', updated_at: at, origin: { kind: 'controller' } },
-    { task_id: 'c2', title: '问过了', agent: 'quick', status: 'running', stage: 'needs_input', updated_at: at, origin: { kind: 'controller' } },
+    { task_id: 'c1', title: '改接口', agent: 'quick', status: 'running', updated_at: at, origin: { kind: 'controller' }, created_by: 'dsh-home', reply_to: 'web' },
+    { task_id: 'c2', title: '问过了', agent: 'quick', status: 'running', stage: 'needs_input', updated_at: at, origin: { kind: 'controller' }, created_by: 'dsh-home' },
+    { task_id: 'c3', title: '云端发的', agent: 'quick', status: 'running', updated_at: at, origin: { kind: 'controller' }, created_by: 'dsh-home', reply_to: 'cloud' },
+    { task_id: 'c4', title: '别人的', agent: 'quick', status: 'running', updated_at: at, origin: { kind: 'controller' }, created_by: 'dsh-office' },
     { task_id: 'l1', title: '本机的', status: 'running', updated_at: at, origin: { kind: 'local' } },
     { task_id: 'd1', title: '早做完', status: 'completed', updated_at: at, origin: { kind: 'controller' } },
   ]

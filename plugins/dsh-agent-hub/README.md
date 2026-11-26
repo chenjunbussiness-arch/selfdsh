@@ -84,7 +84,7 @@ v1 时 hub 运行在 DSH web server 里；v2 把 hub 拆成**独立服务 dsh-hu
 | `envFile` | `<DSH home>/agent-hub/controller.env` | 换配置文件位置；**绝不能**指向 `<DSH home>/.env` |
 | `hubUrl` / `controllerId` / `proxy` / `caFile` | 不写 | 写了就覆盖 `controller.env` 里对应的项（日志会提醒）；bundle 自带的配置故意不写 |
 | `dshProfile` | DSH 启动时的 profile 名 | 这台 DSH 在 hub 上的名字：本机任务的 id（`local_<profile>_<编号>`）、执行者（`dsh-self/<profile>/<工作区>`）和调度台分组都用它 |
-| `sync` | 开 | 本机任务上云和【进度提醒】。`false` 全关；也可以写对象 `{ mirror, notices, intervalMs, stepEveryMs, backfillHours, waitSeconds, stallMinutes, stallCheckMs }`，默认 `true / true / 10000 / 30000 / 12 / 20 / 20 / 120000`。`stallMinutes`：云端任务多久没有新进展（进度、阶段或会话上传都算）就在作战室提醒一次「没有动静」，`0` 关掉 |
+| `sync` | 开 | 本机任务上云和【进度提醒】。`false` 全关；也可以写对象 `{ mirror, notices, intervalMs, stepEveryMs, backfillHours, waitSeconds, stallMinutes, stallCheckMs, watchAll }`，默认 `true / true / 10000 / 30000 / 12 / 20 / 20 / 120000 / false`。`watchAll`：收整个 hub 的事件（观察用），默认只收本机发布的任务。`stallMinutes`：本机发布的云端任务多久没有新进展（进度、阶段或会话上传都算）就在作战室提醒一次「没有动静」，`0` 关掉 |
 
 worker 端其余可选项（`DSH_MAX_CONCURRENCY`、`DSH_HEARTBEAT_SECONDS`、`DSH_AGENT_TOKEN_FILE`、`profile.json` 的 `dshProfile`）见 `python agent_client.py --help` 和第 8 节。
 
@@ -301,8 +301,8 @@ v1 的 11 个工具名称不变，另加 3 个兜底工具。每个工具对应�
 hub 是唯一的任务账本，本机 DSH 只是其中一个执行者：
 
 1. **上传**：路由器（dsh-router-b）每个任务登记成 hub 上「由本机自己做」的任务（`run_here`，来源 `local`），id 固定为 `local_<profile>_<编号>`，重启不会重复登记。阶段、当前一步、worker 会话记录（提示、回答、工具调用，已脱敏）和最终结果都会上传。本机任务不会因为一段时间没进度被判失败，只标「安静」。
-2. **提醒**：hub 的事件流（`/v1/ctl/events` 长轮询）里不是本机做的任务，变成一句【进度提醒】发到本机作战室（路由器的 `hostRouter.notice`）。
-3. **提问优先**：worker 交回问题（`needs_input`）读作「需要回答」而不是「失败」；云端任务超过 `stallMinutes` 没有新进展，提醒一次「没有动静」。这几类条目作战室会直接问你（路由器规则 8），不会被后面的进度冲掉。
+2. **信箱**：本机只收自己的信。派活时任务记下发布方（本机的控制方 id 和 profile，字段 `reply_to`），事件流用 `/v1/ctl/events?inbox=mine&profile=<profile>` 长轮询，hub 只给发布方这台 DSH 发它的任务的事件；别的 DSH 发布的任务、本机替别人兜底的任务（取消除外）都不会出现在本机作战室。一轮执行结束（完成 / 失败 / 提问）时，把完整结果（总结或问题或原因、产出文件、第几次执行）作为一条【进度提醒】发给作战室，同一个任务的同一次执行只发一次；`task_get` 能看全文。没人接的任务（没人在线或没人及时领）退回发布方一次：「没人接，需要你决定：自己做、改派还是取消」；`fallback_list` / `fallback_take` 也只列、只接本机发布的任务。想看整个 hub 的观察用 DSH 可以设 `sync.watchAll: true`（默认关）。旧版 hub 不认 `inbox` 参数时，插件在本地按同样规则过滤。
+3. **提问优先**：worker 交回问题（`needs_input`）读作「需要回答」而不是「失败」；本机发布的云端任务超过 `stallMinutes` 没有新进展，提醒一次「没有动静」。这几类条目作战室会直接问你（路由器规则 8），不会被后面的进度冲掉。
 4. **清理**：本机任务在路由器看板上不见了（看板重置、换了 profile）而 hub 上还开着，10 分钟后在 hub 上取消，不再一直挂着。
 5. **离线**：已被 hub 接受的进度记在 `<DSH home>/agent-hub/sync-<profile>.json`；没发出去的下次连上时补发（最新阶段、未上传的会话条目、结果），DSH 重启也不丢。
 

@@ -75,8 +75,8 @@ Content-Type 一律 `application/json`（下载产物除外）。错误统一 `{
 | `POST /v1/enroll/status?id=` | 无令牌。body `{request_id, poll_secret}` → 状态；批准后**首次**返回 `token` |
 | `POST /v1/heartbeat?id=` | body `{status, workspaces[], running?[task_id], client_version?}`，`workspaces` 超出批准范围的部分被截断 → `{ok, status, server_time, workspaces, ignored_workspaces, abort[], requeued[]}`（对账规则见第 9 节） |
 | `GET /v1/poll?id=&max=1&wait=25` | 领任务；`wait` 秒内没有任务就长轮询等待（上限 55），有新任务立刻返回 |
-| `POST /v1/event?id=` | `{task_id, progress, message}`，续租 |
-| `POST /v1/result?id=` | `{task_id, status, summary, files[{name,base64}], error, needs_input}` |
+| `POST /v1/event?id=` | `{task_id, attempt?, progress, message}`，续租 |
+| `POST /v1/result?id=` | `{task_id, attempt?, status, summary, files[{name,base64}], error, needs_input}`。`attempt` 是领任务时拿到的第几次执行；和任务当前的不一样（租约过期后已重排）回 409 `stale-attempt`，旧的结果不会盖掉新的 |
 | `GET /v1/artifact?id=&task_id=&name=[&from_task=]` | 下载本任务输入或上游产出 |
 | `GET /v1/me?id=` | hub 眼里的自己：`status`、`last_seen`、`version`、授予的 `workspaces` / `capabilities`、`reported_workspaces`、`ignored_workspaces`、`running_tasks`、`offline_after_ms`、`client_ip` |
 | `POST /v1/leave?id=` | 主动下线：标为 `left`，它持有的任务立即重排 → `{ok, status:"left", requeued[]}` |
@@ -84,7 +84,9 @@ Content-Type 一律 `application/json`（下载产物除外）。错误统一 `{
 ### 5.2 控制方
 | 方法 路径 | 说明 |
 |---|---|
-| `POST /v1/ctl/dispatch?id=` | 派任务（字段见第 4 节，另有 `require_online`）；返回任务对象，可能带 `warnings`（第 9 节） |
+| `POST /v1/ctl/dispatch?id=` | 派任务（字段见第 4 节，另有 `require_online` 和 `reply_to`：回信投给本控制方的哪个 profile，DSH 插件自动填自己的 profile）；返回任务对象，可能带 `warnings`（第 9 节） |
+| `GET /v1/ctl/events?id=&after=&wait=&inbox=mine&profile=` | 事件流（长轮询）。`inbox=mine` 只给本控制方发布的任务的事件，带 `profile` 再只给 `reply_to` 是这个 profile 的（老任务没有 `reply_to`，本控制方的每个 profile 都收）；本控制方兜底的别人的任务只收「取消」。不带 `inbox` 是整个 hub（观察用）。每条事件带 `reply_to`、`attempt`；`fallback_due` 表示任务没人接、退回发布方 |
+| `GET /v1/ctl/fallback?id=&profile=`、`POST /v1/ctl/fallback/take?id=` | 列出 / 接手等兜底的任务，只限发布方（`profile` 同上；`agent:` 派的任务谁都能接）；接别人的任务回 403 `not-publisher` |
 | `GET /v1/ctl/tasks?id=&status=&agent=&workspace=&limit=` | 任务列表 |
 | `GET /v1/ctl/task?id=&task_id=` | 详情 + 历史 + 结果 |
 | `GET /v1/ctl/output?id=&task_id=&name=` | 下载产出文件 |
@@ -256,7 +258,7 @@ worker 客户端在 `task.json` 里写 `effort_resolved`：任务自己的 effor
 
 **做不了就交还**：`/v1/release`（MCP 里是 `release_task`）把任务放回队列，不计尝试次数，这个 agent 不会再领到它。
 
-**DSH 兜底**：没有 worker 能接、或者能接的都忙着，DSH 自己做（hub 记为保留 id `dsh-self`）。
+**DSH 兜底**：没有 worker 能接、或者能接的都忙着，任务退回发布它的那台 DSH（`created_by` + `reply_to`），由它决定自己做（hub 记为保留 id `dsh-self`）、改派还是取消。到了兜底时间 hub 只给发布方的信箱发一次 `fallback_due`（作战室读作「没人接，需要你决定」），别的 DSH 看不到也接不了。
 
 - 没有能接的 worker 在线：立即兜底，不等（派活返回 `fallback_in_seconds: 0`，DSH 直接 `fallback_take`）。
 - 有能接的 worker 在线但一直没领（都在忙）：等任务的 `fallback_after_seconds`，否则 600 秒；派给定时拉取的 agent 时取 600 秒和两倍周期中较大者。等待中这些 worker 都下线了，立即兜底。依赖没完成不计时。

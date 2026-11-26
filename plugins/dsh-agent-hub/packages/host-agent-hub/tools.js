@@ -91,7 +91,7 @@ async function run(client, fn) {
 /**
  * @param {{ client: ReturnType<typeof import('./hub-client.js').createHubClient> }} deps
  */
-export function createTools({ client }) {
+export function createTools({ client, profile }) {
   const tools = []
   const define = def => tools.push({
     isConcurrencySafe: () => false,
@@ -238,6 +238,8 @@ export function createTools({ client }) {
       // test tasks, a pool only the tasks one of its worker / tester members accepts.
       const refusal = await dispatchRoleRefusal(client, task)
       if (refusal !== undefined) throw new HubError(400, refusal.code, refusal.message)
+      // Answers come back to this DSH (this profile), not to every DSH on the hub.
+      if (profile !== undefined && task.reply_to === undefined) task.reply_to = profile
       const created = await client.dispatch(task)
       if (typeof replaces !== 'string' || replaces.trim() === '') return created
       // The task it replaces leaves 等你回复 now, not when its expiry comes round.
@@ -312,18 +314,18 @@ export function createTools({ client }) {
 
   define({
     name: 'fallback_list',
-    description: 'Tasks for DSH to do itself: no worker for them is online, or all were busy too long. workspaces: skip code tasks you lack.',
+    description: 'Tasks you published that came back to you: no worker for them is online, or all were busy too long. Do one yourself (fallback_take), send it elsewhere (task_dispatch with replaces), or ask the human. workspaces: skip code tasks you lack.',
     parameters: { properties: { workspaces: strList } },
     isConcurrencySafe: () => true,
-    execute: async raw => ({ tasks: await client.fallbackList(raw.workspaces) }),
+    execute: async raw => ({ tasks: await client.fallbackList(raw.workspaces, profile) }),
   })
 
   define({
     name: 'fallback_take',
-    description: 'Take one fallback task (or the most urgent). Do it, then fallback_submit. One try only.',
+    description: 'Take one task that came back to you (or the most urgent). Do it, then fallback_submit. One try only.',
     parameters: { properties: { task_id: str, workspaces: strList } },
     async execute(raw) {
-      const out = await client.fallbackTake({ task_id: raw.task_id, workspaces: raw.workspaces })
+      const out = await client.fallbackTake({ task_id: raw.task_id, workspaces: raw.workspaces, profile })
       const task = out.task
       if (task === null || task === undefined) return { task: null }
       const inputs = []

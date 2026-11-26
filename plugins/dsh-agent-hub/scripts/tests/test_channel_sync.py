@@ -48,7 +48,7 @@ class Hub:
     def poll(self, max_tasks=1, wait=25):
         return []
 
-    def progress(self, task_id, progress=None, message=None, stage=None, renew=False):
+    def progress(self, task_id, progress=None, message=None, stage=None, renew=False, attempt=None):
         self._check(task_id)
         self.calls.append(("renew", task_id) if renew and stage is None and message is None and progress is None
                           else ("progress", task_id, stage, message, progress))
@@ -59,7 +59,7 @@ class Hub:
         self.calls.append(("session", task_id, [(e["role"], e["text"]) for e in entries]))
         return {"ok": True}
 
-    def result(self, task_id, status, summary="", files=(), error=None, needs_input=None):
+    def result(self, task_id, status, summary="", files=(), error=None, needs_input=None, attempt=None):
         self._check(task_id)
         self.calls.append(("result", task_id, status, [f["name"] for f in files]))
         return {"ok": True}

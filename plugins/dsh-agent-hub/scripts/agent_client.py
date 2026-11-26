@@ -202,10 +202,13 @@ EXCHANGE_DIRS = ("inbox", "working", "outbox", "failed", "archive")
 TASK_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,96}")
 ABORT_MARK = "ABORTED.json"
 DEFAULT_HEARTBEAT = 30
+BUSY_WAIT = 5  # `run`: longest poll while a task is being worked on here (its result goes up within this)
 # Keys worker/.env carries (what `init` writes). The older agent keys (DSH_AGENT_ID, DSH_NODE, ...) are
 # still read from the environment / .env for one release; `doctor` says where they belong now.
 ENV_KEYS = ("DSH_HUB_URL", "DSH_HUB_PROXY", "DSH_HUB_CAFILE", "DSH_AGENT")
 ROLES = ("worker", "coder", "tester", "dispatcher", "observer")
+# The role a known platform gets when nothing names one (matches the hub's PLATFORM_ROLES).
+PLATFORM_ROLES = {"aws-quick": "coder"}
 PROXY_OFF = ("off", "direct", "none", "false", "no")
 EFFORT_MODES = ("fast", "balanced", "smart")
 EFFORT_THINKING = ("off", "low", "medium", "high")
@@ -440,9 +443,12 @@ class HubClient:
         res = self._req("GET", "poll", query={"max": max_tasks, "wait": wait}, timeout=max(self.timeout, wait + POLL_SLACK))
         return res.get("tasks", [])
 
-    def progress(self, task_id, progress=None, message=None, stage=None, renew=False):
-        """POST /v1/event. `renew=True` with nothing else only keeps the lease (no event on the hub)."""
+    def progress(self, task_id, progress=None, message=None, stage=None, renew=False, attempt=None):
+        """POST /v1/event. `renew=True` with nothing else only keeps the lease (no event on the hub).
+        `attempt` (from task.json): the hub refuses it (409 stale-attempt) once that run is over."""
         body = {"task_id": task_id}
+        if attempt is not None:
+            body["attempt"] = attempt
         if progress is not None:
             body["progress"] = progress
         if message is not None:
@@ -463,8 +469,10 @@ class HubClient:
             q["from_task"] = from_task
         return self._req("GET", "artifact", query=q, raw=True)
 
-    def result(self, task_id, status, summary="", files=(), error=None, needs_input=None):
+    def result(self, task_id, status, summary="", files=(), error=None, needs_input=None, attempt=None):
         body = {"task_id": task_id, "status": status, "summary": summary, "files": list(files)}
+        if attempt is not None:
+            body["attempt"] = attempt  # a result from an earlier run of the task is refused, not taken for this one
         if error:
             body["error"] = error
         if needs_input:
@@ -1298,7 +1306,8 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
     st["runtime"] = check_runtime(wm.runtime, f"{wm.config_path}: runtime") if wm.has_runtime else platform_runtime(st["platform"])
     st["heartbeat_seconds"] = _int_setting(pick("heartbeat_seconds", "DSH_HEARTBEAT_SECONDS", cli.get("heartbeat_seconds"), m.get("heartbeatSeconds"),
                                                 DEFAULT_HEARTBEAT), "DSH_HEARTBEAT_SECONDS", 5, 3600)
-    role = pick("role", "DSH_ROLE", cli.get("role"), m.get("role"), "worker")
+    # AWS Quick has no shell: it only edits code (coder) unless its profile says otherwise.
+    role = pick("role", "DSH_ROLE", cli.get("role"), m.get("role"), PLATFORM_ROLES.get(st["platform"], "worker"))
     if role not in ROLES:
         raise ConfigError(f"DSH_ROLE / --role must be one of {', '.join(ROLES)} (from {sources['role']})")
     st["role"] = role
@@ -1560,6 +1569,18 @@ class Bridge:
         p = self.workspaces.get(name)
         return p if p and os.path.isdir(p) else None
 
+    def working(self):
+        """True while a task sits in working/ (an agent is on it) or a result waits in outbox / failed."""
+        for box in ("working", "outbox", "failed"):
+            base = os.path.join(self.root, box)
+            try:
+                names = os.listdir(base)
+            except OSError:
+                continue
+            if any(not n.startswith(".") and TASK_ID_RE.fullmatch(n) for n in names):
+                return True
+        return False
+
     def running_ids(self):
         """Tasks this machine still holds: in inbox / working / outbox / failed, not marked aborted."""
         ids = set()
@@ -1726,7 +1747,7 @@ class Bridge:
                 files = [file_entry(p) for p in paths]
                 self.sync(tid, d)  # the last progress lines and the session go out before the result
                 try:
-                    self.c.result(tid, status, summary, files, r.get("error"), r.get("needs_input"))
+                    self.c.result(tid, status, summary, files, r.get("error"), r.get("needs_input"), attempt=self._attempt(tid, d))
                     self.log(f"uploaded {tid}: {status} ({len(files)} file(s))")
                 except HubError as e:
                     if e.status not in (404, 409):
@@ -1743,6 +1764,19 @@ class Bridge:
                 self._drop_sync(tid)
                 sent += 1
         return sent
+
+    def _attempt(self, tid, d=None):
+        """The run (`attempt`) the hub handed this task out as, from its task.json; None if unknown."""
+        places = ([d] if d else []) + [os.path.join(self.root, box, tid) for box in ("working", "inbox", "outbox", "failed")]
+        for place in places:
+            try:
+                with open(os.path.join(place, "task.json"), encoding="utf-8-sig") as f:
+                    n = json.load(f).get("attempt")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                return n
+        return None
 
     # --- progress.jsonl / session.jsonl -> hub ---------------------------------
     def _sync_path(self, tid):
@@ -1778,8 +1812,9 @@ class Bridge:
         sent = False
         try:
             items, n = read_new_lines(os.path.join(d, PROGRESS_FILE), st["progress"])
+            attempt = self._attempt(tid, d)
             for upd in progress_updates(items):
-                self.c.progress(tid, upd["progress"], upd["message"], stage=upd["stage"])
+                self.c.progress(tid, upd["progress"], upd["message"], stage=upd["stage"], attempt=attempt)
                 sent = True
             if n != st["progress"]:
                 st["progress"] = n
@@ -1810,7 +1845,7 @@ class Bridge:
                 continue
             try:
                 if not self.sync(tid, d):
-                    self.c.progress(tid, renew=True)
+                    self.c.progress(tid, renew=True, attempt=self._attempt(tid, d))
             except HubError as e:
                 if e.status in (404, 409):
                     self.log(f"{tid} no longer leased ({e.code})")
@@ -1876,7 +1911,10 @@ class Runner:
         self.b.push()
         self.b.renew()
         left = max(0.0, self.next_heartbeat - self.clock())
-        self.b.wait = int(max(0, min(self.wait, left)))
+        # While a task is being worked on here, keep the long poll short so its result
+        # (written to outbox any moment) goes up within a few seconds, not after a full wait.
+        cap = BUSY_WAIT if self.b.working() else self.wait
+        self.b.wait = int(max(0, min(self.wait, cap, left)))
         pulled = self.b.pull()
         if pulled == 0 and (self.b.full or self.b.wait < 1):
             self.sleep(max(1.0, min(5.0, left)))  # nothing to wait on at the hub: do not spin

@@ -645,7 +645,8 @@ class FakeHub:
 
     session_error = None
 
-    def progress(self, task_id, progress=None, message=None, stage=None, renew=False):
+    def progress(self, task_id, progress=None, message=None, stage=None, renew=False, attempt=None):
+        self.attempts = getattr(self, "attempts", []) + [("progress", task_id, attempt)]
         if renew and progress is None and message is None and stage is None:
             self.calls.append(("renew", task_id))
         else:
@@ -663,7 +664,8 @@ class FakeHub:
         self.calls.append(("artifact", task_id, name, from_task))
         return self.artifacts[(from_task or task_id, name)]
 
-    def result(self, task_id, status, summary="", files=(), error=None, needs_input=None):
+    def result(self, task_id, status, summary="", files=(), error=None, needs_input=None, attempt=None):
+        self.attempts = getattr(self, "attempts", []) + [("result", task_id, attempt)]
         self.calls.append(("result", task_id, status, summary, list(files), error, needs_input))
         if self.result_error:
             raise self.result_error
@@ -799,6 +801,21 @@ class TestBridge(TempCase):
         call = hub.of("result")[0]
         self.assertEqual(call[1:4], ("t9", "failed", "short"))
         self.assertEqual(call[5]["code"], "TESTS_FAILED")
+        self.assertEqual(hub.attempts[-1], ("result", "t9", None), "no task.json: no attempt sent")
+
+    def test_progress_and_result_name_the_run_they_belong_to(self):
+        hub = FakeHub()
+        br = self.bridge(hub)
+        w = self.path("exchange", "working", "t5", make=True)
+        with open(os.path.join(w, "task.json"), "w", encoding="utf-8") as f:
+            json.dump(task("t5", attempt=2), f)
+        br.renew()
+        self.assertEqual(hub.attempts[-1], ("progress", "t5", 2))
+        o = self.path("exchange", "outbox", "t5", make=True)
+        with open(os.path.join(o, "result.json"), "w", encoding="utf-8") as f:
+            json.dump({"status": "completed", "summary": "ok"}, f)
+        self.assertEqual(br.push(), 1)
+        self.assertEqual(hub.attempts[-1], ("result", "t5", 2))
 
 # --- worker dir: .env, profile.json, priorities ---------------------------------------------
 
@@ -1414,6 +1431,22 @@ class TestRun(TempCase):
         self.assertEqual(polls, [25, 5, 25, 5])
         self.assertEqual(runner.heartbeats, 2)
         self.assertEqual(len(hub.of("heartbeat")), 2)
+
+    def test_a_task_being_worked_on_keeps_the_long_poll_short(self):
+        clock = FakeClock()
+        hub = FakeHub()
+        br = self.bridge(hub, max_tasks=2)
+        os.makedirs(os.path.join(self.ex, "working", "t0"))
+        polls = []
+        orig = br.pull
+
+        def pull():
+            polls.append(br.wait)
+            clock.now += br.wait
+            return orig()
+        br.pull = pull
+        ac.Runner(br, 30, 25, log=self.logs, sleep=clock.sleep, clock=clock).run(cycles=3)
+        self.assertEqual(polls, [5, 5, 5], "a result written to outbox goes up within 5 s")
 
     def test_full_exchange_sleeps_instead_of_spinning(self):
         clock = FakeClock()

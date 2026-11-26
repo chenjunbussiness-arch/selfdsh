@@ -455,9 +455,9 @@ export const ROUTES = {
   // DSH fallback: the controller acts as the built-in dsh-self
   '/v1/ctl/fallback': {
     method: 'GET', auth: 'controller',
-    run: async ({ hub, id, query }) => ({ generated_at: now(), tasks: await hub.listFallback(id, { workspaces: workspaceQuery(query) }) }),
+    run: async ({ hub, id, query }) => ({ generated_at: now(), tasks: await hub.listFallback(id, { workspaces: workspaceQuery(query), profile: profileQuery(query) }) }),
   },
-  '/v1/ctl/fallback/take': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.takeFallback(id, { task_id: body.task_id, workspaces: body.workspaces }) },
+  '/v1/ctl/fallback/take': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.takeFallback(id, { task_id: body.task_id, workspaces: body.workspaces, profile: profileValue(body.profile) }) },
   '/v1/ctl/fallback/event': { method: 'POST', auth: 'controller', body: 'event', run: ({ hub, id, body }) => hub.fallbackProgress(id, body) },
   '/v1/ctl/fallback/result': { method: 'POST', auth: 'controller', body: 'result', run: ({ hub, id, body }) => hub.fallbackResult(id, body) },
   '/v1/ctl/fallback/input': {
@@ -488,12 +488,29 @@ function intQuery(query, key, min, max, fallback) {
   return n
 }
 
-/** `?after=<seq>&wait=<s>&limit=` on the controllers' event stream. */
-async function runEvents({ hub, query, res }) {
+/** `?profile=<DSH profile>` (optional). */
+function profileQuery(query) {
+  return profileValue(queryOne(query, 'profile') ?? '')
+}
+
+/** A DSH profile name, '' / undefined = none; anything else is a 400. */
+function profileValue(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value !== 'string' || !PROFILE_RE.test(value)) throw new HubError(400, 'bad-profile', 'profile must be a DSH profile name')
+  return value
+}
+
+/** `?after=<seq>&wait=<s>&limit=&inbox=mine&profile=` on the controllers' event stream. */
+async function runEvents({ hub, id, query, res }) {
   const after = intQuery(query, 'after', 0, Number.MAX_SAFE_INTEGER, 0)
   const wait = intQuery(query, 'wait', 0, MAX_WAIT_SECONDS, 0)
   const limit = intQuery(query, 'limit', 1, 1000, 200)
-  const out = await hub.feed({ after, wait, limit, signal: closeSignal(res) })
+  // `inbox=mine`: only this controller's mail (tasks it published, for `profile` when given).
+  // Without it the whole stream (an observer, or an older DSH).
+  const scope = queryOne(query, 'inbox') ?? ''
+  if (scope !== '' && scope !== 'mine' && scope !== 'all') throw new HubError(400, 'bad-query', 'inbox must be mine or all')
+  const inbox = scope === 'mine' ? { controller: id, profile: profileQuery(query) } : undefined
+  const out = await hub.feed({ after, wait, limit, inbox, signal: closeSignal(res) })
   return res.destroyed ? undefined : { generated_at: now(), ...out }
 }
 
