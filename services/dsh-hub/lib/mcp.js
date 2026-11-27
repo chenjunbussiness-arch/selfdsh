@@ -57,7 +57,7 @@ export const TOOLS = [
   },
   {
     name: 'submit_result',
-    description: 'Finish your task. status completed, failed or partial (asks a human: needs_input; the task comes back to you with the answer in answers); files are optional.',
+    description: 'Finish your task. status completed, failed or partial (asks a human: needs_input; the task comes back to you with the answer in answers). files are optional, except for a pipeline stage: hand in the files task.pipeline.required names, and for a test or review stage start the summary (or review.md) with the verdict.',
     inputSchema: {
       type: 'object', required: ['task_id', 'status', 'summary'], additionalProperties: false,
       properties: {
@@ -69,6 +69,11 @@ export const TOOLS = [
           items: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, text: { type: 'string' }, base64: { type: 'string' } } },
         },
         needs_input: { type: 'string', description: 'for partial: what a human must answer' },
+        usage: {
+          type: 'object',
+          description: 'optional: what this task cost you, if you know it (counts toward your daily quota)',
+          properties: { input_tokens: { type: 'integer' }, output_tokens: { type: 'integer' }, total_tokens: { type: 'integer' }, cost_usd: { type: 'number' }, model: { type: 'string' } },
+        },
       },
     },
   },
@@ -179,7 +184,7 @@ export class McpGateway {
           const files = Array.isArray(a.files)
             ? a.files.map(f => ({ name: f?.name, base64: typeof f?.base64 === 'string' ? f.base64 : Buffer.from(String(f?.text ?? ''), 'utf8').toString('base64') }))
             : []
-          return ok(await this.hub.submitResult(agentId, { task_id: a.task_id, status: a.status, summary: a.summary, files, needs_input: a.needs_input }))
+          return ok(await this.hub.submitResult(agentId, { task_id: a.task_id, status: a.status, summary: a.summary, files, needs_input: a.needs_input, usage: a.usage }))
         }
         case 'release_task': return ok(await this.hub.release(agentId, { task_id: a.task_id, reason: a.reason }))
         default: return fail(`unknown tool: ${name}`)

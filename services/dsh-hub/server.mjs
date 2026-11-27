@@ -54,7 +54,7 @@ async function start() {
     }
   }
 
-  const hub = new AgentHub({ dataDir: dir, maxRetries: config.maxRetries, offlineAfterMs: config.offlineAfterMs, fallback: config.fallback, sticky: config.sticky, expiry: config.expiry, due: config.due, autoApprove: config.autoApprove, logger })
+  const hub = new AgentHub({ dataDir: dir, maxRetries: config.maxRetries, offlineAfterMs: config.offlineAfterMs, fallback: config.fallback, sticky: config.sticky, expiry: config.expiry, due: config.due, pipelines: config.pipelines, quota: config.quota, autoApprove: config.autoApprove, logger })
   await hub.load() // fail fast on a corrupt state.json
   const active = (await hub.listControllers()).filter(c => !c.revoked)
   if (active.length === 0) logger.warn('dsh-hub: no active controller yet; run: node server.mjs controller add <id>')

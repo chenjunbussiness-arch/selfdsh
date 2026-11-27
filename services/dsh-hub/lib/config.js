@@ -26,9 +26,11 @@ import { isAbsolute, join, resolve } from 'node:path'
 
 import { compileAllow, DEFAULT_MAX_RESULT_BYTES, resolveListenHost } from './http.js'
 import { MAX_DUE_MINUTES, OVERDUE_ACTIONS } from './hub.js'
+import { pipelinesOf } from './pipeline.js'
+import { quotaOf } from './quota.js'
 
 export const DEFAULT_PORT = 7891
-export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'sticky', 'mcp', 'autoApprove', 'expiry', 'due']
+export const CONFIG_KEYS = ['port', 'host', 'tls', 'allow', 'trustProxy', 'maxRetries', 'offlineAfterMs', 'sweepIntervalMs', 'maxResultBytes', 'fallback', 'sticky', 'mcp', 'autoApprove', 'expiry', 'due', 'pipelines', 'quota']
 
 /** A configuration problem: the service must not start (exit code 78, EX_CONFIG). */
 export class ConfigError extends Error {}
@@ -120,7 +122,15 @@ export function resolveConfig(raw = {}, { env = {}, dir = '.' } = {}) {
   }
   if (due.onOverdue !== undefined && !OVERDUE_ACTIONS.includes(due.onOverdue)) throw new ConfigError(`hub.json: due.onOverdue must be one of ${OVERDUE_ACTIONS.join(', ')}`)
 
+  // pipelines: templates (plan -> code -> test -> commit -> review) over the built-in ones;
+  // quota: daily limits per agent (tokens, cost, tasks, minutes). Checked here, used by the hub.
+  const checked = (fn, value) => { try { return fn(value) } catch (error) { throw new ConfigError(error.message) } }
+  checked(pipelinesOf, raw.pipelines)
+  checked(quotaOf, raw.quota)
+
   const config = {
+    pipelines: raw.pipelines,
+    quota: raw.quota,
     due: { minutes: { ...dueMinutes }, onOverdue: due.onOverdue ?? 'notify' },
     fallback: { enabled: fb.enabled !== false, noFallbackCapabilities: fb.noFallbackCapabilities ?? ['quick'] },
     sticky: {
