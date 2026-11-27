@@ -261,6 +261,8 @@ worker 客户端在 `task.json` 里写 `effort_resolved`：任务自己的 effor
 
 **不开 MCP 的 agent（AWS Quick）**：hub 自己当 MCP 服务器（`/mcp`，Streamable HTTP，只回 JSON）。agent 用 `client_id` = agent id、`client_secret` = worker 令牌在 `/oauth/token` 换 15 分钟的 Bearer，然后用 `next_task` / `get_input` / `report_progress` / `submit_result` / `release_task` 五个工具。按自己的计划定时跑，周期写在 `pull_every_seconds`。
 
+**带 MCP 的编程 agent（Antigravity、Claude Code、Codex、opencode……）**：不直连 `/mcp`，在本机跑 `plugins/dsh-agent-hub/scripts/mcp_bridge.py`（stdio）。桥用本机 worker 目录的连接设置和令牌换 bearer、转发同样的五个工具；领到任务后替它续租约直到交结果，交结果时给 coder 附上只读 `git diff` 生成的 `changes.patch`。每家各注册一个身份。见插件 README 第 8.1 节。
+
 **做不了就交还**：`/v1/release`（MCP 里是 `release_task`）把任务放回队列，不计尝试次数，这个 agent 不会再领到它。
 
 **DSH 兜底**：没有 worker 能接、或者能接的都忙着，任务退回发布它的那台 DSH（`created_by` + `reply_to`），由它决定自己做（hub 记为保留 id `dsh-self`）、改派还是取消。到了兜底时间 hub 只给发布方的信箱发一次 `fallback_due`（作战室读作「没人接，需要你决定」），别的 DSH 看不到也接不了。

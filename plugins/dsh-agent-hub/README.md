@@ -380,3 +380,29 @@ worker 目录固定是 `<DSH home>/worker/`（DSH home = `$DSH_HOME` 或 `~/.dsh
    `browser: 1` 表示浏览器任务一次只跑一个。每台机器各写各的 `profile.json`，工作区路径也写在这里，不入库。
 
    **AWS Quick 这类只能当 MCP 客户端的 agent**：不用跑 `agent_client.py`。先用 `agent_provision`（或注册后 `agent_approve`）拿到 `dsha_` 令牌，然后在 Quick 里加一个 MCP 服务器：地址 `https://<hub-host>:7891/mcp`，认证选 OAuth client credentials，令牌地址 `https://<hub-host>:7891/oauth/token`，`client_id` 填 agent id，`client_secret` 填令牌。Quick 按计划定时调 `next_task`，做完调 `submit_result`。细节见 `services/dsh-hub/README.md` 第 5.4 节。
+
+### 8.1 带 MCP 的编程 agent（Antigravity / Gemini、Claude Code、Codex、opencode……）：本机 MCP 桥
+
+这类 agent 都能当 MCP 客户端，但 IDE 里的 MCP 客户端一般处理不了自签证书、本机代理和 OAuth 续期。`scripts/mcp_bridge.py` 是一个本机 stdio MCP 服务器，各家都指向它，不用每家单独写：
+
+- **连接**：读 `<DSH home>/worker/` 里的 `.env`（`DSH_HUB_URL`、`DSH_HUB_PROXY`、`DSH_HUB_CAFILE`）、`agents/<id>.json` 和 `tokens/<id>.token`，和 `agent_client.py` 同一套配置（两个脚本放在同一个文件夹）。
+- **令牌**：自己找 hub 的 `/oauth/token` 换 15 分钟的 bearer，快到期或 hub 重启后自动重换；agent 看不到 worker 令牌。
+- **工具**：原样转发 hub 的 5 个工具（`next_task`、`get_input`、`report_progress`、`submit_result`、`release_task`），并在说明里加上这个角色的规矩（coder：不跑测试、不执行命令、不碰 git）。
+- **保活**：领到任务后每 30 秒替它续一次租约，直到它交结果或退回；模型埋头改 20 分钟也不会被判离线、任务被收回。手上没任务时什么都不发，IDE 开着但没人叫它干活时，不会假装在线。
+- **本机信息**：`next_task` 前先报一次心跳（工作区名、角色、DSH profile），绑定本机工作区的任务才派得到它；任务里多一个 `local`：要改的文件夹 `workspace_path`、这个角色的规矩。
+- **coder 交 patch**：角色是 coder、任务有本机工作区、交 `completed` 时没带 `changes.patch`，桥用只读的 `git diff`（含未跟踪的新文件）生成一份附上，后面跑测试和提交的 worker 会收到它当输入。桥不碰 git 索引、不提交。`--no-patch` 关掉。
+
+接入一个新 agent（以 Antigravity 为例，身份 `agy-mydesk`）：
+
+1. 把 `mcp_bridge.py` 和 `agent_client.py` 放到同一个文件夹，例如 `C:/Users/<you>/.dsh/worker/bin/`。
+2. 写 `<DSH home>/worker/agents/agy-mydesk.json`（样例 `scripts/agent.mcp-coder.example.json`）：`dshProfile` 填本机 DSH profile，`role: "coder"`，`capabilities: ["code"]`。
+3. `python agent_client.py register --agent agy-mydesk`，在 DSH 里 `agent_approve`，令牌自动写进 `tokens/agy-mydesk.token`。**不要**对它跑 `agent_client.py run`：它的活由 agent 通过桥来领。
+4. `python mcp_bridge.py --agent agy-mydesk --check`：应打印 5 个工具名和本机工作区。
+5. 在 agent 的 MCP 配置里加桥（样例 `scripts/mcp_config.example.json`）。Antigravity：`~/.gemini/config/mcp_config.json`（全局）或 `<工作区>/.agents/mcp_config.json`；Claude Code：`claude mcp add dsh-hub -- python <路径>/mcp_bridge.py --agent <id>`；其他家照各自的 stdio MCP 配置写同样的 command / args。
+6. 在 agent 里说"调用 dsh-hub 的 next_task 领活，做完 submit_result"。
+
+每家 agent 各注册一个身份，不共用令牌，信箱投递、指标和审计才分得清是谁干的。
+
+**无人值守**：桥只在 agent 调用时才去 hub 领活，没人叫 agent，它就不会领；这期间派给它的任务会照常提示「没人接」。Antigravity CLI 有无界面模式（`agy -p "<提示>" --output-format json`，用交互登录后缓存的凭据），可以由定时任务叫醒；headless 下没放行的 MCP 工具调用会被拒，要在它的权限设置里放行 `mcp(dsh-hub/*)`。这部分还没做，见 `docs/AGENT-PIPELINE.md`。
+
+测试：`python -m unittest plugins/dsh-agent-hub/scripts/tests/test_mcp_bridge.py`（假 hub，不联网；patch 部分要装 git）。
