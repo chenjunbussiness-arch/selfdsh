@@ -230,6 +230,32 @@ class PatchTests(BridgeTests):
         self.assertIn("+new file", patch)
         sub = subprocess.run(["git", "-C", self.ws, "status", "--porcelain"], capture_output=True, text=True).stdout
         self.assertIn("?? new.txt", sub)  # the bridge never touched the index
+        self.assertTrue(patch.startswith("# base: "), "the patch says which commit it is against")
+        # git apply skips the header line
+        self.git("stash", "-u")
+        with open(os.path.join(self.base, "p.patch"), "w") as f:
+            f.write(patch)
+        self.git("apply", os.path.join(self.base, "p.patch"))
+
+    def test_test_or_review_stage_gets_no_patch(self):
+        """A task that does not edit (needs test / review) leaves the workspace as it was: no patch."""
+        self.hub.task = {**self.hub.task, "needs": ["test"], "boundary": "你能做的是：改代码、跑测试；不能git。"}
+        self.br.can = ["code", "test"]
+        task = self.br.handle(call("next_task"))["result"]["structuredContent"]["task"]
+        self.assertIn("你能做的是", task["local"]["rules"])
+        self.assertEqual(task["local"]["can"], ["code", "test"])
+        with open(os.path.join(self.ws, "calc.py"), "a") as f:
+            f.write("# applied for the test\n")
+        self.br.handle(call("submit_result", {"task_id": "T1", "status": "completed", "summary": "通过", "files": [{"name": "test.log", "text": "ok"}]}))
+        self.assertEqual([f["name"] for f in self.hub.files], ["test.log"])
+
+    def test_can_rules_and_tasklog(self):
+        log = os.path.join(self.base, "tasks.log")
+        self.br.can, self.br.tasklog = ["code", "test"], log
+        self.assertIn("提交和推送（git）", self.br.instructions("Call next_task."))
+        self.br.handle(call("next_task"))
+        with open(log) as f:
+            self.assertEqual(f.read(), "T1\n")
 
     def test_agent_patch_and_failed_results_are_left_alone(self):
         self.br.handle(call("next_task"))

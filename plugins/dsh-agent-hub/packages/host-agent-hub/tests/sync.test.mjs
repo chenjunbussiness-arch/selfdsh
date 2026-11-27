@@ -454,3 +454,16 @@ test('stream: a decision line is not hidden by later news in the same read; an a
   assert.equal(s.notices[3], '「迁移」 已把回答交回 worker')
   assert.deepEqual(s.client.of('delivered'), [['delivered', ['o1'], 'web']])
 })
+
+test('pipeline notices: a stage done is one line, the pipeline says when it starts, bounces and stops', () => {
+  const stage = { task_id: 'p1.code', title: 'x · 干活', agent: 'agy', message: '改了 settings.tsx', pipeline: { parent: 'p1', stage: 'code', label: '干活', round: 2 } }
+  assert.equal(noticeOf({ ...stage, kind: 'completed' }), '流水线 p1 的「干活」段（第 2 轮）完成（agy）：改了 settings.tsx')
+  assert.equal(noticeOf({ ...stage, kind: 'created' }), undefined)
+  assert.equal(noticeOf({ ...stage, kind: 'failed' }), undefined, 'the pipeline asks instead')
+  const parent = { task_id: 'p1', title: '加开关', agent: 'pipeline', pipeline: { name: 'feature', round: 1 } }
+  assert.match(noticeOf({ ...parent, kind: 'created', message: 'dsh-cloud -> 流水线 feature' }), /^流水线「加开关」开始/)
+  assert.match(noticeOf({ ...parent, kind: 'bounced', message: '「测试」段测试不通过' }), /退回重做/)
+  assert.match(noticeOf({ kind: 'quota', task_id: 't', message: 'agy 今天的token额度用完了' }), /^额度提醒/)
+  const line = resultLineOf({ task_id: 'p1', title: '加开关', agent: 'pipeline', status: 'completed', pipeline: '方案 ✓ → 干活 ✓', attempts: 0, result: { summary: '流水线 feature 跑完。\n- 方案（cc）：好', outputs: [{ name: 'plan.md' }] } })
+  assert.match(line, /^流水线「加开关」 完成：流水线 feature 跑完。 \/ - 方案（cc）：好；产出 plan\.md/)
+})
