@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { roleDuties } from '../roles.js'
+import { agentDuties } from '../roles.js'
 import test from 'node:test'
 import { HubError } from '../hub-client.js'
 import { TOOL_NAMES, createTools } from '../tools.js'
@@ -69,7 +69,9 @@ test('parameters: v1 arguments kept, v2 workspace / node / ref / workspaces adde
   assert.deepEqual(required('agent_revoke'), ['agent_id'])
   assert.deepEqual(required('agent_approve'), ['request_id'])
   assert.deepEqual(required('agent_reject'), ['request_id'])
-  assert.deepEqual(required('task_dispatch'), ['agent', 'title', 'instruction'])
+  assert.deepEqual(required('task_dispatch'), ['title', 'instruction'], 'agent or pipeline')
+  assert.ok(props('task_dispatch').pipeline && props('task_dispatch').verify && props('task_dispatch').max_bounces)
+  assert.ok(props('agent_approve').can)
   assert.deepEqual(required('task_get'), ['task_id'])
   assert.deepEqual(required('task_cancel'), ['task_id'])
   assert.deepEqual(required('task_retry'), ['task_id'])
@@ -128,7 +130,7 @@ test('each tool is one /v1/ctl call with the right method, query and body', asyn
   await call('task_retry', { task_id: 't1', agent: 'quick-mydesk' })
   assert.deepEqual([last().path, last().json], ['/v1/ctl/retry', { task_id: 't1', agent: 'quick-mydesk' }])
 
-  assert.deepEqual(await call('agent_list'), { agents: [{ agent_id: 'quick-mydesk', role: 'worker', duties: roleDuties('worker') }] }, 'role and duties are always reported (worker when the hub sends none)')
+  assert.deepEqual(await call('agent_list'), { agents: [{ agent_id: 'quick-mydesk', role: 'worker', duties: agentDuties({ role: 'worker' }) }] }, 'role and duties are always reported (worker when the hub sends none)')
   assert.deepEqual(await call('agent_requests'), { requests: [{ request_id: 'req_1' }] })
   assert.deepEqual(q(), { id: CONTROLLER, status: 'pending' }, 'agent_requests defaults to pending')
   await call('agent_requests', { status: 'all' })
@@ -241,7 +243,7 @@ test('agent_list passes status / last_seen / version through (and adds the role,
   const agent = { agent_id: 'quick-mydesk', status: 'left', online: false, last_seen: '2026-11-22T10:00:00.000Z', left_at: '2026-11-22T10:01:00.000Z', version: 'agent_client/2.1.0' }
   const { call } = setup(() => ({ body: { agents: [agent, { agent_id: 'quick-2', role: 'coder', duties: { role: 'coder', can: ['x'], cannot: ['y'] } }] } }))
   const out = await call('agent_list')
-  assert.deepEqual(out.agents[0], { ...agent, role: 'worker', duties: roleDuties('worker') })
+  assert.deepEqual(out.agents[0], { ...agent, role: 'worker', duties: agentDuties({ role: 'worker' }) })
   assert.deepEqual(out.agents[1].duties, { role: 'coder', can: ['x'], cannot: ['y'] }, 'the hub\'s own duties win')
 })
 

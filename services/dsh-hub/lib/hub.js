@@ -56,12 +56,14 @@
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { appendFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { appendFile, copyFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
 
 import { metricsOf, phaseOf, timelineOf } from './lifecycle.js'
-import { DEFAULT_ROLE, ROLES, agentRole, needsOf, needsProblem, roleAccepts, roleBoundary, roleDuties, roleOf, roleRefusal, roleTakesWork, roleWidening } from './roles.js'
+import { ANY_TARGET, DEFAULT_MAX_BOUNCES, PIPELINE_AGENT, PIPELINE_NAME_RE, branchOf, finalSummary, gist, pipelineView, pipelinesOf, stageInstruction, verdictHint, verdictOf } from './pipeline.js'
+import { USAGE_DAYS, quotaOf, quotaState, usageDay, usageOf } from './quota.js'
+import { DEFAULT_ROLE, ROLES, agentAccepts, agentBoundary, agentDuties, agentRefusal, agentRole, canList, canOf, canProblem, canWidening, declaresCan, needsOf, needsProblem, roleOf, roleRefusal, roleTakesWork, roleWidening } from './roles.js'
 
 export const PROTOCOL = 'dsh-agent/2.0'
 export const VERSION = '2.0.0'
@@ -224,6 +226,10 @@ function inputPath(artifactDir, state, task, fromTask, safe) {
   if (from === task.task_id) {
     if (!task.inputs.includes(safe)) throw new HubError(404, 'artifact-not-found', 'not an input of this task')
     return join(artifactDir, task.task_id, 'inputs', safe)
+  }
+  if (from === task.inherit_inputs_from) {
+    if (!(own(state.tasks, from)?.inputs ?? []).includes(safe)) throw new HubError(404, 'artifact-not-found', 'not an input of the pipeline')
+    return join(artifactDir, from, 'inputs', safe)
   }
   if (!task.depends_on.includes(from)) throw new HubError(403, 'forbidden', 'from_task is not an upstream of this task')
   if (!(own(state.tasks, from)?.result?.outputs ?? []).some(o => o.name === safe)) throw new HubError(404, 'artifact-not-found', 'not an output of the upstream task')
@@ -498,6 +504,9 @@ export class AgentHub {
     /** History entries not written to the audit log yet (flushed with every save). */
     this.audit = []
     this.due = dueConfig(options.due)
+    // Pipeline templates (pipeline.js; hub.json `pipelines` over the built-in ones) and daily quotas.
+    this.pipelines = pipelinesOf(options.pipelines)
+    this.quota = quotaOf(options.quota)
     this.feedWaiters = 0
     this.feedDirty = false
     this.logger = options.logger
@@ -534,7 +543,7 @@ export class AgentHub {
   upgrade(state) {
     if (state === null || typeof state !== 'object' || Array.isArray(state)) throw new HubError(500, 'bad-state', 'state.json is not an object')
     state.protocol = PROTOCOL
-    for (const key of ['agents', 'tasks', 'requests', 'sticky']) if (state[key] === null || typeof state[key] !== 'object' || Array.isArray(state[key])) state[key] = {}
+    for (const key of ['agents', 'tasks', 'requests', 'sticky', 'usage']) if (state[key] === null || typeof state[key] !== 'object' || Array.isArray(state[key])) state[key] = {}
     state.seq = Number.isInteger(state.seq) ? state.seq : 0
     if (!Array.isArray(state.feed)) state.feed = []
     state.feedSeq = Number.isInteger(state.feedSeq) ? state.feedSeq : (state.feed.at(-1)?.seq ?? 0)
@@ -709,6 +718,7 @@ export class AgentHub {
     const id = input?.agent_id
     if (typeof id !== 'string' || !AGENT_ID_RE.test(id)) throw new HubError(400, 'bad-agent-id', 'agent_id must match /^[a-z][a-z0-9-]{1,47}$/')
     if (id === FALLBACK_AGENT) throw new HubError(400, 'bad-agent-id', `${FALLBACK_AGENT} is reserved for DSH itself`)
+    if (id === PIPELINE_AGENT) throw new HubError(400, 'bad-agent-id', `${PIPELINE_AGENT} is reserved for pipelines`)
     const caps = parseCapabilities(input.capabilities)
     const mode = input.mode ?? 'poll'
     if (mode !== 'poll' && mode !== 'push') throw new HubError(400, 'bad-mode', 'mode must be poll or push')
@@ -722,8 +732,12 @@ export class AgentHub {
     if (role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')} (default ${DEFAULT_ROLE})`)
     const pullEverySeconds = validatePullEvery(input.pull_every_seconds)
     const dshProfile = validProfile(input.dsh_profile, 'bad-profile')
+    // What it may do, exactly (roles.js CAN); without it the role decides, as before.
+    const badCan = canProblem(input.can, role)
+    if (badCan !== undefined) throw new HubError(400, badCan.code, badCan.message)
+    const can = canList(input.can)
     return {
-      id, mode, maxConcurrency, capabilities: caps.names, capabilityLimits: caps.limits, node, workspaces, role, pullEverySeconds, dshProfile,
+      id, mode, maxConcurrency, capabilities: caps.names, capabilityLimits: caps.limits, node, workspaces, role, can, pullEverySeconds, dshProfile,
       platform: String(input.platform ?? 'custom').slice(0, 64),
       description: String(input.description ?? '').slice(0, 500),
       runtime: validateRuntime(input.runtime),
@@ -738,7 +752,7 @@ export class AgentHub {
       id: v.id, platform: v.platform, mode: v.mode, node: v.node, capabilities: v.capabilities,
       capabilityLimits: v.capabilityLimits ?? {}, workspaces: v.workspaces, reportedWorkspaces: reported.filter(w => v.workspaces.includes(w)),
       maxConcurrency: v.maxConcurrency, description: v.description, runtime: v.runtime, tokenHash,
-      role: v.role ?? DEFAULT_ROLE, pullEverySeconds: v.pullEverySeconds, dshProfile: v.dshProfile,
+      role: v.role ?? DEFAULT_ROLE, can: v.can, pullEverySeconds: v.pullEverySeconds, dshProfile: v.dshProfile,
       createdAt: previous?.createdAt ?? nowIso(this.clock()),
       rekeyedAt: previous === undefined ? undefined : nowIso(this.clock()),
       lastSeen: undefined, reportedStatus: undefined, revoked: false,
@@ -831,7 +845,9 @@ export class AgentHub {
       .map(r => ({
         request_id: r.request_id, status: r.status, agent_id: r.agent.id, platform: r.agent.platform, mode: r.agent.mode,
         node: r.agent.node, dsh_profile: r.agent.dshProfile, workspaces: r.agent.workspaces ?? [], capabilities: r.agent.capabilities, capability_limits: r.agent.capabilityLimits ?? {}, max_concurrency: r.agent.maxConcurrency,
-        description: r.agent.description, runtime: r.agent.runtime, role: agentRole(r.agent), pull_every_seconds: r.agent.pullEverySeconds, auto_approved: r.auto_approved === true, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
+        description: r.agent.description, runtime: r.agent.runtime, role: agentRole(r.agent), can: canOf(r.agent), can_declared: declaresCan(r.agent) || undefined,
+        kind: r.kind ?? 'enroll', current: r.kind === 'change' ? r.current : undefined,
+        pull_every_seconds: r.agent.pullEverySeconds, auto_approved: r.auto_approved === true, from: r.from, requested_at: r.requested_at, decided_at: r.decided_at, decided_by: r.decided_by, reason: r.reason,
       })))
   }
 
@@ -858,6 +874,7 @@ export class AgentHub {
       const request = own(state.requests, requestId)
       if (request === undefined) throw new HubError(404, 'request-not-found', `request not found: ${requestId}`)
       if (request.status !== 'pending') throw new HubError(409, 'request-decided', `request is ${request.status}`)
+      if (request.kind === 'change') return this.approveChange(state, controllerId, request, overrides ?? {})
       const asked = request.agent
       const o = overrides ?? {}
       const askedRole = agentRole(asked)
@@ -868,11 +885,14 @@ export class AgentHub {
         workspaces: o.workspaces ?? asked.workspaces,
         max_concurrency: o.max_concurrency ?? asked.maxConcurrency,
         role: o.role ?? askedRole,
+        can: o.can ?? asked.can,
         // Descriptive (how often it comes back), not a grant: the controller may set it.
         pull_every_seconds: o.pull_every_seconds ?? asked.pullEverySeconds,
       })
       const widened = roleWidening(askedRole, v.role)
       if (widened !== undefined) throw new HubError(400, widened.code, widened.message)
+      const canWide = canWidening(asked, v)
+      if (canWide !== undefined) throw new HubError(400, canWide.code, canWide.message)
       if (v.capabilities.some(c => !asked.capabilities.includes(c))) throw new HubError(400, 'grant-widened', 'capabilities can only be narrowed at approval')
       const askedLimit = c => asked.capabilityLimits?.[c] ?? asked.maxConcurrency
       if (v.capabilities.some(c => (v.capabilityLimits[c] ?? v.maxConcurrency) > askedLimit(c))) throw new HubError(400, 'grant-widened', 'a capability limit can only be lowered at approval')
@@ -957,7 +977,9 @@ export class AgentHub {
       max_concurrency: agent.maxConcurrency, description: agent.description, runtime: agent.runtime, revoked: agent.revoked,
       status, online: status === 'online', last_seen: agent.lastSeen, left_at: agent.leftAt, version: agent.clientVersion,
       reported_status: agent.reportedStatus, running_tasks: running, created_at: agent.createdAt,
-      role: agentRole(agent), duties: roleDuties(agentRole(agent)), pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
+      role: agentRole(agent), can: canOf(agent), can_declared: declaresCan(agent) || undefined, duties: agentDuties(agent),
+      usage_today: this.usageToday(state, agent.id), quota: this.quotaFor(agent.id),
+      pull_every_seconds: agent.pullEverySeconds, offline_after_ms: this.offlineWindow(agent),
       // How a task reaches it: `online` (stays connected, takes a task within seconds) or
       // `scheduled` (comes back every pull_every_seconds: a task may wait that long).
       reach: agent.pullEverySeconds === undefined ? 'online' : 'scheduled',
@@ -1017,15 +1039,18 @@ export class AgentHub {
 
   /** Condition 1: the task targets this worker (by id or pool capability). */
   targets(task, agent) {
+    // A pipeline stage goes to anyone who CAN do it (agentAccepts), not to one pool.
+    if (task.agent === ANY_TARGET) return true
     return task.agent === agent.id || (task.agent.startsWith('pool:') && agent.capabilities.includes(task.agent.slice(5)))
   }
 
-  /** Conditions 1-3 (4 = depends_on and room, checked when leasing). */
-  routable(task, agent) {
+  /** Conditions 1-3 (4 = depends_on and room, checked when leasing). Over its daily quota it takes nothing new. */
+  routable(task, agent, { ignoreQuota = false } = {}) {
     if (!this.targets(task, agent)) return false
     if (!hasCapability(agent, task.capability)) return false
-    if ((task.declined ?? []).includes(agent.id)) return false // it gave this one back (release)
-    if (!roleAccepts(agentRole(agent), task)) return false // dispatcher / observer never, tester only tests
+    if ((task.declined ?? []).includes(agent.id)) return false // it gave this one back (release), or wrote the code under review
+    if (!agentAccepts(agent, task)) return false // dispatcher / observer never, tester only tests, `can` covers every need
+    if (!ignoreQuota && this.overQuota(this.state, agent.id)) return false
     if (task.workspace !== undefined && !(agent.workspaces.includes(task.workspace) && agent.reportedWorkspaces.includes(task.workspace))) return false
     if (task.node !== undefined && task.node !== agent.node) return false
     if (task.dsh_profile !== undefined && task.dsh_profile !== agent.dshProfile) return false
@@ -1124,6 +1149,8 @@ export class AgentHub {
     for (const key of ['title', 'instruction']) {
       if (typeof t[key] !== 'string' || t[key].trim() === '') throw new HubError(400, 'bad-task', `${key} is required`)
     }
+    // A pipeline: one parent task, then one task per stage (plan -> code -> test -> commit -> review).
+    if (t.pipeline !== undefined && t.pipeline !== null) return this.startPipeline(controllerId, t, { asAgent })
     const type = t.type ?? 'custom'
     if (!TASK_TYPES.includes(type)) throw new HubError(400, 'bad-task', `type must be one of ${TASK_TYPES.join(', ')}`)
     const target = t.run_here === true ? (t.agent ?? FALLBACK_AGENT) : t.agent
@@ -1197,7 +1224,7 @@ export class AgentHub {
         }
         if (agent.revoked) throw new HubError(409, 'agent-revoked', `${target} is revoked`)
         if (!hasCapability(agent, capability)) throw new HubError(409, 'unroutable', `${target} does not offer capability ${capability} (it offers ${agent.capabilities.join(', ')})`)
-        const refused = roleRefusal({ type, title: t.title, instruction: t.instruction, needs }, agentRole(agent), target)
+        const refused = agentRefusal({ type, title: t.title, instruction: t.instruction, needs }, agent, target)
         if (refused !== undefined) throw new HubError(400, refused.code, refused.message)
         // Fail fast instead of leaving a task no one can ever lease.
         if (workspace !== undefined && !agent.workspaces.includes(workspace)) throw new HubError(409, 'unroutable', `${target} was not granted workspace ${workspace}`)
@@ -1214,11 +1241,11 @@ export class AgentHub {
       } else {
         const probe = { agent: target, workspace, node, type, title: t.title, instruction: t.instruction, needs }
         const members = Object.values(state.agents).filter(a => !a.revoked && this.targets(probe, a))
-        if (members.length > 0 && members.every(a => !roleAccepts(agentRole(a), probe))) {
-          const refused = roleRefusal(probe, agentRole(members[0]), members[0].id)
+        if (members.length > 0 && members.every(a => !agentAccepts(a, probe))) {
+          const refused = agentRefusal(probe, members[0], members[0].id)
           throw new HubError(400, refused?.code ?? 'role-not-dispatchable', `no agent in ${target} may take this task by its role: ${refused?.message ?? ''}`)
         }
-        const ready = members.some(a => this.agentStatus(a) === 'online' && roleAccepts(agentRole(a), probe)
+        const ready = members.some(a => this.agentStatus(a) === 'online' && agentAccepts(a, probe)
           && (workspace === undefined || (a.workspaces.includes(workspace) && a.reportedWorkspaces.includes(workspace)))
           && (node === undefined || a.node === node)
           && (dshProfile === undefined || a.dshProfile === dshProfile)
@@ -1359,6 +1386,8 @@ export class AgentHub {
       task.leaseUntil = undefined
       this.event(task, 'cancelled', reason === undefined || reason === null || reason === '' ? `cancelled by ${controllerId}` : String(reason).slice(0, 500), { by: controllerId })
       if (holder !== undefined) this.wakes.add(holder) // a slot was freed
+      this.cancelStages(state, task, controllerId)
+      await this.settlePipelines(state)
       return this.publicTask(task)
     })
   }
@@ -1375,7 +1404,7 @@ export class AgentHub {
         if (target && task.node !== undefined && target.node !== task.node) throw new HubError(409, 'unroutable', `${agent} is not on node ${task.node}`)
         const why = target ? effortProblem(target.runtime, task.effort) : null
         if (why !== null) throw new HubError(409, 'unsupported-effort', `${agent} ${why}`)
-        const refused = target ? roleRefusal(task, agentRole(target), agent) : undefined
+        const refused = target ? agentRefusal(task, target, agent) : undefined
         if (refused !== undefined) throw new HubError(400, refused.code, refused.message)
         if (target && !hasCapability(target, task.capability)) throw new HubError(409, 'unroutable', `${agent} does not offer capability ${task.capability}`)
         // A pool target names the capability; moving to another pool moves the lane too.
@@ -1433,6 +1462,9 @@ export class AgentHub {
       due_at: dueAtOf(task), overdue: task.overdueAt !== undefined ? true : undefined,
       delivered_at: task.deliveredAt, delivered_to: task.deliveredTo,
       acknowledged_at: task.acknowledgedAt, acknowledged_by: task.acknowledgedBy,
+      usage: task.result?.usage, verdict: task.result?.verdict,
+      pipeline: task.pipeline === undefined ? undefined : pipelineView(task),
+      pipeline_stage: task.pipe === undefined ? undefined : { parent: task.pipe.parent, stage: task.pipe.stage, label: task.pipe.label, round: task.pipe.round, branch: task.pipe.branch },
     }
     if (full) { out.instruction = task.instruction; out.inputs = task.inputs; out.output = task.output; out.history = task.history; out.context = task.context; out.answers = task.answers?.map(a => ({ question: a.question, answer: a.answer, at: a.at, by: a.by })) }
     return out
@@ -1467,6 +1499,8 @@ export class AgentHub {
       agent: task.assignedTo ?? task.agent, created_by: task.created_by, origin: task.origin?.kind ?? 'controller',
       dsh_profile: task.dsh_profile, reply_to: task.reply_to, attempt: task.attempts,
       held_by: task.fallbackBy, by, phase: entry.phase,
+      pipeline: task.pipe !== undefined ? { parent: task.pipe.parent, stage: task.pipe.stage, label: task.pipe.label, round: task.pipe.round }
+        : task.pipeline !== undefined ? { name: task.pipeline.name, round: task.pipeline.round, at: task.pipeline.stages[task.pipeline.at]?.label } : undefined,
     })
     if (state.feed.length > FEED_MAX) state.feed.splice(0, state.feed.length - FEED_MAX)
     this.feedDirty = true
@@ -1503,6 +1537,8 @@ export class AgentHub {
         task.question = undefined
         task.leaseUntil = undefined
         this.event(task, 'cancelled', `put away by ${controllerId} without an answer`, { by: controllerId })
+        this.cancelStages(state, task, controllerId)
+        await this.settlePipelines(state)
       }
       if (!TERMINAL.has(task.status)) throw new HubError(409, 'task-active', `task is ${task.status}`)
       if (task.acknowledged !== true) {
@@ -1536,6 +1572,11 @@ export class AgentHub {
       const entry = { question: task.question?.text ?? task.result?.needs_input ?? '', answer: redact(answer.trim().slice(0, 4000)), at: nowIso(this.clock()), by }
       task.answers = [...(task.answers ?? []), entry]
       task.question = undefined
+      if (task.pipeline !== undefined) {
+        await this.answerPipeline(state, task, entry, by)
+        await this.settlePipelines(state)
+        return this.publicTask(task)
+      }
       if (task.status === 'waiting_input') {
         const holder = task.lastHolder
         task.status = 'pending'
@@ -1646,8 +1687,15 @@ export class AgentHub {
     const span = Number.isFinite(hours) && hours > 0 ? Math.min(hours, 24 * 90) : 168
     return this.read((state) => {
       const now = this.clock()
-      const out = metricsOf(Object.values(state.tasks), { since: now - span * 3600_000, now })
-      return { ...out, hours: span, archived_after_hours: this.expiry.archiveHours }
+      const out = metricsOf(Object.values(state.tasks).filter(t => t.pipeline === undefined), { since: now - span * 3600_000, now })
+      const usage = {}
+      for (const id of Object.keys(state.agents)) {
+        const today = this.usageToday(state, id)
+        const limits = this.quotaFor(id)
+        if (today === undefined && limits === undefined) continue
+        usage[id] = { ...(today ?? { tokens: 0, cost: 0, tasks: 0, minutes: 0, usage_reported: false }), limits, over_quota: this.overQuota(state, id) || undefined }
+      }
+      return { ...out, usage_today: usage, hours: span, archived_after_hours: this.expiry.archiveHours }
     })
   }
 
@@ -1904,32 +1952,62 @@ export class AgentHub {
     }
   }
 
+  /**
+   * The tasks this agent would lease now, in order (all four conditions, room and lanes).
+   * Shared by lease() and peek(), so a look never disagrees with a take.
+   */
+  leasable(state, agent, max = 1) {
+    const agentId = agent.id
+    const held = Object.values(state.tasks).filter(t => t.assignedTo === agentId && isActive(t))
+    const room = Math.max(0, Math.min(Number.isInteger(max) ? max : 1, agent.maxConcurrency - held.length))
+    // Per-capability lanes: `browser:1` keeps a second browser task pending while one runs.
+    const inLane = {}
+    for (const t of held) if (t.capability !== undefined) inLane[t.capability] = (inLane[t.capability] ?? 0) + 1
+    const limits = agent.capabilityLimits ?? {}
+    const candidates = []
+    for (const t of Object.values(state.tasks)
+      .filter(t => t.status === 'pending')
+      .filter(t => this.routable(t, agent))
+      .filter(t => t.depends_on.every(d => own(state.tasks, d)?.status === 'completed'))
+      .filter(t => !this.stickyHolds(state, t, agentId))
+      .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority]
+        || Number(b.preferred === agentId) - Number(a.preferred === agentId)
+        || a.created_at.localeCompare(b.created_at))) {
+      if (candidates.length >= room) break
+      const lane = t.capability
+      if (lane !== undefined && limits[lane] !== undefined && (inLane[lane] ?? 0) >= limits[lane]) continue
+      if (lane !== undefined) inLane[lane] = (inLane[lane] ?? 0) + 1
+      candidates.push(t)
+    }
+    return candidates
+  }
+
+  /**
+   * GET /v1/peek: how many tasks this agent would get from next_task now, without taking
+   * any. A headless runner asks this first and starts its model only when there is work.
+   */
+  peek(agentId) {
+    return this.mutate((state) => {
+      const agent = this.liveAgent(state, agentId)
+      this.seen(agent)
+      const tasks = this.leasable(state, agent, agent.maxConcurrency)
+      const quota = this.quotaFor(agentId)
+      return {
+        ok: true, agent_id: agentId, available: tasks.length,
+        tasks: tasks.slice(0, 10).map(t => ({ task_id: t.task_id, title: t.title, needs: t.needs, workspace: t.workspace, stage: t.pipe?.stage })),
+        over_quota: this.overQuota(state, agentId) || undefined,
+        ...(quota === undefined ? {} : { quota: quotaState(quota, this.usageRow(state, agentId)) }),
+        server_time: nowIso(this.clock()),
+      }
+    })
+  }
+
   /** One leasing pass (contract section 4, all four conditions). */
   lease(agentId, max = 1) {
     return this.mutate((state) => {
       const agent = this.liveAgent(state, agentId)
       this.seen(agent)
-      const held = Object.values(state.tasks).filter(t => t.assignedTo === agentId && isActive(t))
-      const room = Math.max(0, Math.min(Number.isInteger(max) ? max : 1, agent.maxConcurrency - held.length))
-      // Per-capability lanes: `browser:1` keeps a second browser task pending while one runs.
-      const inLane = {}
-      for (const t of held) if (t.capability !== undefined) inLane[t.capability] = (inLane[t.capability] ?? 0) + 1
-      const limits = agent.capabilityLimits ?? {}
-      const candidates = []
-      for (const t of Object.values(state.tasks)
-        .filter(t => t.status === 'pending')
-        .filter(t => this.routable(t, agent))
-        .filter(t => t.depends_on.every(d => own(state.tasks, d)?.status === 'completed'))
-        .filter(t => !this.stickyHolds(state, t, agentId))
-        .sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority]
-          || Number(b.preferred === agentId) - Number(a.preferred === agentId)
-          || a.created_at.localeCompare(b.created_at))) {
-        if (candidates.length >= room) break
-        const lane = t.capability
-        if (lane !== undefined && limits[lane] !== undefined && (inLane[lane] ?? 0) >= limits[lane]) continue
-        if (lane !== undefined) inLane[lane] = (inLane[lane] ?? 0) + 1
-        candidates.push(t)
-      }
+      const candidates = this.leasable(state, agent, max)
       const leased = []
       for (const task of candidates) {
         task.status = 'accepted'
@@ -1938,8 +2016,8 @@ export class AgentHub {
         task.leaseUntil = nowIso(this.clock() + task.lease_seconds * 1000)
         task.leasedAt = nowIso(this.clock())
         this.event(task, 'accepted', `leased by ${agentId} (attempt ${task.attempts})`, { by: agentId })
-        // Upstream outputs become downloadable inputs.
-        const upstream = task.depends_on.flatMap(d => (own(state.tasks, d).result?.outputs ?? []).map(o => ({ from_task: d, name: o.name })))
+        // Upstream outputs become downloadable inputs (and a pipeline stage gets the files the work came with).
+        const upstream = this.upstreamInputs(state, task)
         for (const a of task.answers ?? []) a.delivered = true
         leased.push({
           protocol: PROTOCOL, task_id: task.task_id, type: task.type, title: task.title, instruction: task.instruction,
@@ -1950,7 +2028,9 @@ export class AgentHub {
           // Questions this task asked earlier and the human's answers, oldest first: carry on from them.
           answers: (task.answers ?? []).length > 0 ? task.answers.map(a => ({ question: a.question, answer: a.answer, at: a.at })) : undefined,
           // What this worker may do here, so its agent reads the boundary before the instruction.
-          needs: task.needs, duties: roleDuties(agentRole(agent)), boundary: roleBoundary(agentRole(agent)),
+          needs: task.needs, can: canOf(agent), duties: agentDuties(agent), boundary: agentBoundary(agent),
+          // A pipeline stage: which one, what it must hand in, how to give its verdict.
+          ...(task.pipe === undefined ? {} : { pipeline: this.stageBrief(state, task) }),
         })
       }
       return { tasks: leased }
@@ -2083,6 +2163,9 @@ export class AgentHub {
 
   /** Store a result (shared by workers and the DSH fallback; the fallback never retries). */
   async finish(state, task, b, names, agentId, { retry = true } = {}) {
+      const verdict = this.checkStageResult(task, b, names)
+      const usage = usageOf(b.usage)
+      const started = Date.parse(task.leasedAt ?? '')
       const status = b.status
       const files = b.files ?? []
       const dir = join(this.artifactDir, task.task_id, 'outputs')
@@ -2102,6 +2185,9 @@ export class AgentHub {
         needs_input: b.needs_input === undefined || b.needs_input === null ? undefined : redact(String(b.needs_input).slice(0, 2000)),
         finished_at: nowIso(this.clock()), agent: agentId,
       }
+      if (usage !== undefined) task.result.usage = usage
+      if (verdict !== undefined) task.result.verdict = verdict
+      this.addUsage(state, agentId, { tokens: usage?.tokens, cost: usage?.cost, tasks: 1, ms: Number.isFinite(started) ? this.clock() - started : 0, reports: usage === undefined ? 0 : 1 }, task)
       task.leaseUntil = undefined
       if (status === 'completed') { task.status = 'completed'; task.progress = 1; this.rememberSticky(state, task, agentId) }
       else if (status === 'partial' && agentId !== FALLBACK_AGENT && task.result.needs_input !== undefined) {
@@ -2124,7 +2210,8 @@ export class AgentHub {
         for (const other of Object.values(state.tasks)) if (other.status === 'pending' && other.depends_on.includes(task.task_id)) this.wakeFor(state, other)
       }
       this.log(`dsh-hub: ${agentId} finished ${task.task_id}: ${task.status}`)
-      return { ok: true, task_status: task.status }
+      if (task.pipe !== undefined) await this.settlePipelines(state)
+      return verdict === undefined ? { ok: true, task_status: task.status } : { ok: true, task_status: task.status, verdict }
   }
 
   // --- DSH fallback (controllers act as the built-in dsh-self) ------------------
@@ -2415,6 +2502,7 @@ export class AgentHub {
           changed++
         }
       }
+      await this.settlePipelines(state)
       changed += await this.archive(state, now)
       return changed
     })
@@ -2458,6 +2546,499 @@ export class AgentHub {
     state.feed = state.feed.filter(e => Date.parse(e.at) >= cutoff)
     if (state.feed.length !== before) changed++
     return changed
+  }
+
+  // --- usage and daily quotas (quota.js) ---------------------------------------------
+
+  /** Today's usage row of one agent ({ tokens, cost, tasks, ms, reports }), or undefined. */
+  usageRow(state, agentId, now = this.clock()) {
+    return own(own(state?.usage, agentId), usageDay(now, this.quota.utcOffsetMinutes))
+  }
+
+  /** Today's usage of one agent, as shown to controllers. */
+  usageToday(state, agentId) {
+    const r = this.usageRow(state, agentId)
+    if (r === undefined) return undefined
+    return { tokens: r.tokens, cost: r.cost, tasks: r.tasks, minutes: Math.round(r.ms / 60_000), usage_reported: r.reports > 0 }
+  }
+
+  /** This agent's daily limits from hub.json quota, or undefined. */
+  quotaFor(agentId) { return own(this.quota.agents, agentId) }
+
+  /** Over any of its daily limits: it takes no new task today. */
+  overQuota(state, agentId) {
+    const limits = this.quotaFor(agentId)
+    return limits !== undefined && quotaState(limits, this.usageRow(state, agentId)).over
+  }
+
+  /**
+   * Add to today's usage of one agent. When a limit gets near (quota.warnAt) or full,
+   * the DSH that published `task` hears it once (a `quota` notice).
+   */
+  addUsage(state, agentId, add, task) {
+    if (agentId === FALLBACK_AGENT || own(state.agents, agentId) === undefined) return
+    if (state.usage === null || typeof state.usage !== 'object' || Array.isArray(state.usage)) state.usage = {}
+    const day = usageDay(this.clock(), this.quota.utcOffsetMinutes)
+    const days = own(state.usage, agentId) ?? (state.usage[agentId] = {})
+    const limits = this.quotaFor(agentId)
+    const before = limits === undefined ? undefined : quotaState(limits, own(days, day))
+    const row = own(days, day) ?? (days[day] = { tokens: 0, cost: 0, tasks: 0, ms: 0, reports: 0 })
+    row.tokens += Math.max(0, Math.round(add.tokens ?? 0))
+    row.cost = Math.round((row.cost + Math.max(0, add.cost ?? 0)) * 1e6) / 1e6
+    row.tasks += add.tasks ?? 0
+    row.ms += Math.max(0, Math.round(add.ms ?? 0))
+    row.reports += add.reports ?? 0
+    for (const old of Object.keys(days).sort().slice(0, Math.max(0, Object.keys(days).length - USAGE_DAYS))) delete days[old]
+    if (limits === undefined || task === undefined) return
+    const after = quotaState(limits, row)
+    const words = { tokens: 'token', cost: '花费', tasks: '任务数', minutes: '时长' }
+    const show = (key, v) => (key === 'cost' ? `$${v.toFixed(2)}` : key === 'minutes' ? `${Math.round(v)} 分钟` : String(Math.round(v)))
+    for (const key of Object.keys(limits)) {
+      const was = before.fraction[key] ?? 0
+      const now = after.fraction[key] ?? 0
+      const amount = `${show(key, after.used[key])} / ${show(key, limits[key])}`
+      if (was < 1 && now >= 1) {
+        this.event(task, 'quota', `${agentId} 今天的${words[key]}额度用完了（${amount}），今天不再派新活给它；它能做的段换别的 agent，没人能做就回到你这里`, { feedOnly: true })
+        this.log(`dsh-hub: ${agentId} reached its daily ${key} quota (${amount})`)
+      } else if (was < this.quota.warnAt && now >= this.quota.warnAt && now < 1) {
+        this.event(task, 'quota', `${agentId} 今天的${words[key]}已用 ${Math.round(now * 100)}%（${amount}）`, { feedOnly: true })
+      }
+    }
+  }
+
+  /**
+   * POST /v1/usage: what a run cost, reported after the fact (the headless runner reads it
+   * from the CLI's JSON output once the run is over). `task_ids` (optional): the tasks of
+   * that run, finished by this agent; the usage is split evenly over them.
+   */
+  reportUsage(agentId, body = {}) {
+    const b = body ?? {}
+    const usage = usageOf(b.usage)
+    if (usage === undefined) throw new HubError(400, 'bad-usage', 'usage needs token counts (input_tokens / output_tokens / total_tokens) or cost_usd')
+    const ids = b.task_ids ?? []
+    if (!Array.isArray(ids) || ids.length > 20 || ids.some(id => typeof id !== 'string' || !TASK_ID_RE.test(id))) throw new HubError(400, 'bad-usage', 'task_ids must be at most 20 task ids')
+    return this.mutate((state) => {
+      const agent = this.liveAgent(state, agentId)
+      this.seen(agent)
+      const tasks = ids.map(id => own(state.tasks, id)).filter(t => t !== undefined && (t.result?.agent === agentId || t.assignedTo === agentId || t.lastHolder === agentId))
+      for (const task of tasks) {
+        const share = { tokens: Math.round(usage.tokens / tasks.length), cost: usage.cost / tasks.length }
+        if (task.result !== undefined) {
+          const was = task.result.usage ?? { tokens: 0, cost: 0 }
+          task.result.usage = { ...was, tokens: (was.tokens ?? 0) + share.tokens, cost: Math.round(((was.cost ?? 0) + share.cost) * 1e6) / 1e6, ...(usage.model ? { model: usage.model } : {}) }
+        }
+      }
+      this.addUsage(state, agentId, { tokens: usage.tokens, cost: usage.cost, reports: 1 }, tasks[0])
+      return { ok: true, agent_id: agentId, tasks: tasks.map(t => t.task_id), today: this.usageToday(state, agentId), over_quota: this.overQuota(state, agentId) || undefined }
+    })
+  }
+
+  // --- changing what an agent may do (POST /v1/regrant) ------------------------------------
+
+  /**
+   * An approved agent asks for another `can` / role with its own token. Narrowing takes
+   * effect at once; anything wider waits for a controller (agent_requests / agent_approve),
+   * like an enrollment. The token stays the same either way.
+   */
+  requestChange(agentId, body = {}) {
+    const b = body ?? {}
+    return this.mutate((state) => {
+      const agent = this.liveAgent(state, agentId)
+      this.seen(agent)
+      const role = b.role === undefined || b.role === null ? agentRole(agent) : roleOf(b.role)
+      if (role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')}`)
+      const bad = canProblem(b.can, role)
+      if (bad !== undefined) throw new HubError(400, bad.code, bad.message)
+      const want = { role, can: b.can === undefined || b.can === null ? agent.can : canList(b.can) }
+      const sameCan = JSON.stringify(canOf(want)) === JSON.stringify(canOf(agent)) && declaresCan(want) === declaresCan(agent)
+      if (sameCan && role === agentRole(agent)) return { ok: true, status: 'unchanged', role, can: canOf(agent) }
+      const widens = roleWidening(agentRole(agent), role) !== undefined || canWidening(agent, want) !== undefined
+      if (!widens) {
+        agent.role = role
+        agent.can = want.can
+        this.wakes.add(agentId)
+        this.log(`dsh-hub: ${agentId} narrowed itself to role ${role}, can ${canOf(agent).join(',')}`)
+        return { ok: true, status: 'applied', role, can: canOf(agent) }
+      }
+      const pending = Object.values(state.requests).find(r => r.status === 'pending' && r.agent?.id === agentId)
+      if (pending !== undefined) throw new HubError(409, 'request-pending', `a request for ${agentId} is already pending (${pending.request_id})`)
+      const requestId = `req_${randomBytes(9).toString('base64url')}`
+      state.requests[requestId] = {
+        request_id: requestId, kind: 'change', status: 'pending', requested_at: nowIso(this.clock()), from: 'regrant',
+        agent: {
+          id: agent.id, platform: agent.platform, mode: agent.mode, node: agent.node, dshProfile: agent.dshProfile, workspaces: agent.workspaces,
+          capabilities: agent.capabilities, capabilityLimits: agent.capabilityLimits, maxConcurrency: agent.maxConcurrency,
+          description: String(b.reason ?? agent.description ?? '').slice(0, 500), runtime: agent.runtime, role, can: want.can, pullEverySeconds: agent.pullEverySeconds,
+        },
+        current: { role: agentRole(agent), can: canOf(agent) },
+        decided_at: undefined, decided_by: undefined, reason: undefined, tokenIssued: true, auto_approved: false,
+      }
+      this.log(`dsh-hub: ${agentId} asks to change its grant to role ${role}, can ${canOf(want).join(',')} (${requestId}) awaiting approval`)
+      return { ok: true, status: 'pending', request_id: requestId, role, can: canOf(want) }
+    })
+  }
+
+  /** A controller approves a change request; it may narrow what was asked, never widen it. */
+  approveChange(state, controllerId, request, o) {
+    const agent = own(state.agents, request.agent.id)
+    if (agent === undefined || agent.revoked) throw new HubError(409, 'agent-revoked', `${request.agent.id} is no longer registered`)
+    const role = o.role === undefined ? agentRole(request.agent) : roleOf(o.role)
+    if (role === undefined) throw new HubError(400, 'bad-role', `role must be one of ${ROLES.join(', ')}`)
+    const bad = canProblem(o.can, role)
+    if (bad !== undefined) throw new HubError(400, bad.code, bad.message)
+    const granted = { role, can: o.can === undefined ? request.agent.can : canList(o.can) }
+    const wider = roleWidening(agentRole(request.agent), role) ?? canWidening(request.agent, granted)
+    if (wider !== undefined) throw new HubError(400, wider.code, `${wider.message} (more than the request asked)`)
+    agent.role = role
+    agent.can = granted.can
+    request.status = 'approved'
+    request.decided_at = nowIso(this.clock())
+    request.decided_by = controllerId
+    this.wakes.add(agent.id)
+    this.log(`dsh-hub: ${controllerId} approved ${request.request_id}: ${agent.id} is now role ${role}, can ${canOf(agent).join(',')}`)
+    return { request_id: request.request_id, status: 'approved', kind: 'change', agent: this.publicAgent(agent, state) }
+  }
+
+  // --- pipelines (pipeline.js) -----------------------------------------------------------
+
+  /** A controller (or dispatcher agent) starts a pipeline: a parent task, then its first stage. */
+  startPipeline(controllerId, t, { asAgent } = {}) {
+    const name = t.pipeline
+    const stages = typeof name === 'string' && PIPELINE_NAME_RE.test(name) ? own(this.pipelines, name) : undefined
+    if (stages === undefined) throw new HubError(400, 'bad-pipeline', `pipeline must be one of ${Object.keys(this.pipelines).join(', ')}`)
+    const type = t.type ?? (stages.some(s => s.needs.includes('code')) ? 'code' : 'custom')
+    if (!TASK_TYPES.includes(type)) throw new HubError(400, 'bad-task', `type must be one of ${TASK_TYPES.join(', ')}`)
+    const priority = t.priority ?? 'normal'
+    if (typeof priority !== 'string' || !Object.hasOwn(PRIORITY, priority)) throw new HubError(400, 'bad-task', 'priority must be low, normal or high')
+    const workspace = t.workspace ?? undefined
+    if (workspace !== undefined && (typeof workspace !== 'string' || !WORKSPACE_RE.test(workspace))) throw new HubError(400, 'bad-task', 'workspace must be a workspace name')
+    if (workspace === undefined && stages.some(s => s.needs.some(n => ['code', 'test', 'git'].includes(n)))) throw new HubError(400, 'bad-task', `workspace is required: pipeline ${name} edits, tests or commits code`)
+    const ref = t.ref ?? undefined
+    if (ref !== undefined && !validRef(ref)) throw new HubError(400, 'bad-task', 'ref must be a git branch, tag or commit')
+    const inputs = t.inputs ?? []
+    if (!Array.isArray(inputs)) throw new HubError(400, 'bad-task', 'inputs must be a list')
+    const names = inputs.map(file => safeFileName(file?.name))
+    if (new Set(names).size !== names.length) throw new HubError(400, 'bad-task', 'duplicate input file name')
+    if (t.task_id !== undefined && (typeof t.task_id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(t.task_id))) throw new HubError(400, 'bad-task', 'task_id of a pipeline: 1..64 letters, digits, _ or -')
+    const verify = t.verify ?? undefined
+    if (verify !== undefined && (typeof verify !== 'string' || verify.length > 500)) throw new HubError(400, 'bad-task', 'verify must be the test commands, at most 500 characters')
+    const maxBounces = t.max_bounces ?? DEFAULT_MAX_BOUNCES
+    if (!Number.isInteger(maxBounces) || maxBounces < 0 || maxBounces > 10) throw new HubError(400, 'bad-task', 'max_bounces must be 0..10')
+    const dueMinutes = t.due_minutes ?? undefined
+    if (dueMinutes !== undefined && (!Number.isInteger(dueMinutes) || dueMinutes < 1 || dueMinutes > MAX_DUE_MINUTES)) throw new HubError(400, 'bad-task', `due_minutes must be 1..${MAX_DUE_MINUTES}`)
+    const dshProfile = validProfile(t.dsh_profile)
+    const replyTo = validProfile(t.reply_to, 'bad-reply-to')
+    return this.mutate(async (state) => {
+      const creator = await this.creator(state, controllerId, asAgent)
+      const day = nowIso(this.clock()).slice(0, 10).replace(/-/g, '')
+      const id = t.task_id ?? `pipe_${day}_${String(state.seq + 1).padStart(4, '0')}`
+      if (own(state.tasks, id) !== undefined) throw new HubError(409, 'task-exists', `task already exists: ${id}`)
+      if (t.task_id === undefined) state.seq += 1
+      const dir = join(this.artifactDir, id, 'inputs')
+      await mkdir(dir, { recursive: true })
+      for (const [index, file] of inputs.entries()) {
+        const body = typeof file.base64 === 'string' ? Buffer.from(file.base64, 'base64') : Buffer.from(String(file.text ?? ''), 'utf8')
+        await writeFile(join(dir, names[index]), body)
+      }
+      const now = nowIso(this.clock())
+      const parent = {
+        protocol: PROTOCOL, task_id: id, agent: PIPELINE_AGENT, type, title: t.title.trim(), instruction: t.instruction,
+        workspace, node: undefined, ref, effort: undefined, capability: undefined, dsh_profile: dshProfile, needs: undefined, reply_to: replyTo,
+        origin: { kind: 'pipeline', by: creator },
+        inputs: names, output: t.output ?? {}, priority, deadline: t.deadline, lease_seconds: 3600,
+        parent_task_id: undefined, depends_on: [], context: t.context ?? {},
+        created_by: creator, created_at: now, pendingSince: undefined,
+        fallback: 'none', fallback_after_seconds: undefined, sticky: false,
+        due_minutes: dueMinutes ?? this.due.minutes.pipeline, on_overdue: undefined,
+        status: 'running', attempts: 0, assignedTo: undefined, leaseUntil: undefined,
+        progress: 0, message: undefined, stage: undefined, result: undefined, history: [],
+        pipeline: { name, stages: structuredClone(stages), at: 0, round: 1, bounces: 0, max_bounces: maxBounces, verify, children: [], authors: [] },
+      }
+      state.tasks[id] = parent
+      this.event(parent, 'created', `${creator} -> 流水线 ${name}：${stages.map(s => s.label).join(' → ')}${workspace ? ` [${workspace}]` : ''}`, { by: creator })
+      const warnings = this.openStage(state, parent)
+      this.log(`dsh-hub: ${creator} started pipeline ${id} (${name})`)
+      const out = this.publicTask(parent)
+      if (warnings.length > 0) out.warnings = warnings
+      return out
+    })
+  }
+
+  /** A pipeline parent ended: its stages still open end with it. */
+  cancelStages(state, parent, by) {
+    if (parent.pipeline === undefined) return
+    for (const c of parent.pipeline.children) {
+      const child = own(state.tasks, c.task_id)
+      if (child === undefined || TERMINAL.has(child.status)) continue
+      const holder = isActive(child) ? child.assignedTo : undefined
+      child.status = 'cancelled'
+      child.leaseUntil = undefined
+      child.question = undefined
+      c.status = 'cancelled'
+      c.settled = true
+      this.event(child, 'cancelled', `流水线 ${parent.task_id} 停了`, { by, historyOnly: true })
+      if (holder !== undefined) this.wakes.add(holder)
+    }
+  }
+
+  /** The child task id of one stage and round. */
+  stageTaskId(parent, stage, round, redo) {
+    return `${parent.task_id}.${stage.stage}${round > 1 ? `-r${round}` : ''}${redo > 0 ? `-${redo + 1}` : ''}`
+  }
+
+  /**
+   * Create the child task of the stage the pipeline is at. Its inputs: the latest finished
+   * child of every stage so far (their files), and the files the work came with.
+   * `exclude`: agents that may not take it (on top of the code authors a review excludes).
+   */
+  openStage(state, parent, { feedback, exclude = [] } = {}) {
+    const p = parent.pipeline
+    const stage = p.stages[p.at]
+    const latest = new Map()
+    for (const c of p.children) if (c.status === 'completed') latest.set(c.stage, c)
+    const deps = p.stages.filter(s => latest.has(s.stage)).map(s => latest.get(s.stage).task_id)
+    const redo = p.children.filter(c => c.stage === stage.stage && c.round === p.round).length
+    const childId = this.stageTaskId(parent, stage, p.round, redo)
+    const branch = stage.needs.includes('git') ? branchOf(parent, p.round) : (p.children.findLast(c => c.branch !== undefined)?.branch)
+    const declined = [...new Set([...(stage.excludeAuthors ? p.authors : []), ...exclude])]
+    const inputs = [
+      ...parent.inputs.map(name => ({ name, from_task: parent.task_id, from_label: '任务附件' })),
+      ...deps.flatMap(d => (own(state.tasks, d)?.result?.outputs ?? []).map(o => ({ name: o.name, from_task: d, from_label: own(state.tasks, d)?.pipe?.label ?? d }))),
+    ]
+    const now = nowIso(this.clock())
+    const child = {
+      protocol: PROTOCOL, task_id: childId, agent: ANY_TARGET,
+      type: stage.needs.includes('review') ? 'review' : stage.needs.includes('code') ? 'code' : 'custom',
+      title: `${parent.title} · ${stage.label}`, instruction: stageInstruction(parent, stage, { round: p.round, branch, feedback, inputs, bounce: p.round > 1 }),
+      workspace: parent.workspace, node: undefined, ref: parent.ref, effort: undefined, capability: undefined,
+      dsh_profile: parent.dsh_profile, needs: [...stage.needs], reply_to: parent.reply_to,
+      origin: { kind: 'controller', by: parent.created_by },
+      inputs: [], inherit_inputs_from: parent.task_id, output: {}, priority: parent.priority, deadline: parent.deadline, lease_seconds: 3600,
+      parent_task_id: parent.task_id, depends_on: deps, context: parent.context,
+      created_by: parent.created_by, created_at: now, pendingSince: now,
+      // A review may not fall back to DSH when DSH wrote the code itself.
+      fallback: stage.excludeAuthors && declined.includes(FALLBACK_AGENT) ? 'none' : 'dsh', fallback_after_seconds: undefined,
+      sticky_key: undefined, sticky: false,
+      due_minutes: this.due.minutes[`stage-${stage.stage}`] ?? this.due.minutes.default,
+      on_overdue: undefined,
+      status: 'pending', attempts: 0, assignedTo: undefined, leaseUntil: undefined,
+      progress: undefined, message: undefined, stage: undefined, result: undefined, history: [],
+      declined: declined.length > 0 ? declined : undefined,
+      pipe: { parent: parent.task_id, stage: stage.stage, label: stage.label, round: p.round, required: [...stage.required], verdict: stage.verdict, branch },
+    }
+    state.tasks[childId] = child
+    p.children.push({ stage: stage.stage, label: stage.label, task_id: childId, round: p.round, status: 'pending', branch: stage.needs.includes('git') ? branch : undefined })
+    parent.message = `「${stage.label}」段排队中${p.round > 1 ? `（第 ${p.round} 轮）` : ''}`
+    parent.progress = Math.round((p.at / p.stages.length) * 100) / 100
+    this.event(child, 'created', `流水线 ${parent.task_id} 的「${stage.label}」段${declined.length > 0 ? `；不给 ${declined.join('、')}` : ''}`, { by: 'hub' })
+    this.event(parent, 'stage', `进入「${stage.label}」段（${childId}）`, { by: 'hub', historyOnly: true })
+    child.preferred = this.preferFor(state, child, stage.prefer)
+    if (child.preferred !== undefined) this.event(child, 'sticky', `prefers ${child.preferred}`, { historyOnly: true })
+    this.wakeFor(state, child)
+    const warnings = []
+    const anyone = Object.values(state.agents).some(a => !a.revoked && this.routable(child, a, { ignoreQuota: true }))
+    if (!anyone && (child.fallback === 'none' || !this.fallback.enabled)) {
+      this.askPipeline(state, parent, 'stuck', `「${stage.label}」段没有能做的 agent${declined.length > 0 ? `（${declined.join('、')} 写了这段代码，不能审自己的代码）` : ''}。回答：跳过这一段 / 到此为止，或者先注册一个能做的 agent 再回答“重做这一段”。`)
+      warnings.push('no-agent-for-stage')
+    } else if (!Object.values(state.agents).some(a => !a.revoked && this.online(a) && this.routable(child, a))) {
+      warnings.push('no-online-worker')
+    }
+    return warnings
+  }
+
+  /** The first agent of `prefer` (agent ids, `online` = no preference) that can take this task. */
+  preferFor(state, task, prefer) {
+    for (const id of prefer ?? []) {
+      if (id === 'online') return undefined
+      const agent = own(state.agents, id)
+      if (agent !== undefined && !agent.revoked && this.routable(task, agent)) return id
+    }
+    return undefined
+  }
+
+  /** What a stage's worker reads about the stage (in its lease). */
+  stageBrief(state, task) {
+    const parent = own(state.tasks, task.pipe.parent)
+    return {
+      parent: task.pipe.parent, name: parent?.pipeline?.name, stage: task.pipe.stage, label: task.pipe.label, round: task.pipe.round,
+      required: task.pipe.required, verdict: task.pipe.verdict, verdict_hint: task.pipe.verdict === undefined ? undefined : verdictHint(task.pipe.verdict),
+      branch: task.pipe.branch, verify: parent?.pipeline?.verify,
+    }
+  }
+
+  /**
+   * A stage's result before it is stored: the files the stage must hand in are there, and a
+   * test or review stage says pass or fail. Returns the verdict ('pass' / 'fail' / undefined).
+   */
+  checkStageResult(task, b, names) {
+    if (task.pipe === undefined || b.status !== 'completed') return undefined
+    const missing = task.pipe.required.filter(n => !names.includes(n))
+    if (missing.length > 0) throw new HubError(400, 'missing-output', `「${task.pipe.label}」段必须交 ${missing.join('、')}（submit_result 的 files）；补上再交`)
+    const kind = task.pipe.verdict
+    if (kind === undefined) return undefined
+    let verdict
+    if (kind === 'review') {
+      const i = names.indexOf('review.md')
+      const file = i < 0 ? undefined : b.files[i]
+      const text = file === undefined ? '' : typeof file.base64 === 'string' ? Buffer.from(file.base64, 'base64').toString('utf8') : String(file.text ?? '')
+      verdict = verdictOf('review', text)
+    }
+    verdict ??= verdictOf(kind, b.summary)
+    if (verdict === undefined) throw new HubError(400, 'missing-verdict', `「${task.pipe.label}」段要给结论：${verdictHint(kind)}`)
+    return verdict
+  }
+
+  /** Bytes-free list of a task's upstream inputs: depends_on outputs, plus the files a pipeline stage inherits. */
+  upstreamInputs(state, task) {
+    const inherited = task.inherit_inputs_from === undefined ? [] : (own(state.tasks, task.inherit_inputs_from)?.inputs ?? []).map(name => ({ from_task: task.inherit_inputs_from, name }))
+    return inherited.concat(task.depends_on.flatMap(d => (own(state.tasks, d)?.result?.outputs ?? []).map(o => ({ from_task: d, name: o.name }))))
+  }
+
+  /** The pipeline waits on the human: `why` (stuck / failed / bounce) says what an answer does. */
+  askPipeline(state, parent, why, text) {
+    const p = parent.pipeline
+    p.waiting = why
+    parent.status = 'waiting_input'
+    parent.question = { text, at: nowIso(this.clock()), by: 'hub', attempt: 0 }
+    parent.message = text.slice(0, 200)
+    parent.result = {
+      status: 'partial', summary: finalSummary(parent, p.children, 'stopped'), outputs: [], needs_input: text,
+      finished_at: nowIso(this.clock()), agent: PIPELINE_AGENT,
+    }
+    this.event(parent, 'waiting_input', text.slice(0, 300), { stage: 'needs_input', by: 'hub' })
+  }
+
+  /**
+   * Move every running pipeline on: a finished stage opens the next one (or a new round
+   * when a test failed or a review sent it back); a failed or cancelled stage asks the
+   * human. Idempotent: called after every result, cancel, answer and sweep.
+   */
+  async settlePipelines(state) {
+    for (const parent of Object.values(state.tasks)) {
+      if (parent.pipeline === undefined || parent.status !== 'running') continue
+      const p = parent.pipeline
+      const entry = p.children.at(-1)
+      if (entry === undefined || entry.settled === true) continue
+      const child = own(state.tasks, entry.task_id)
+      if (child === undefined) { entry.settled = true; this.askPipeline(state, parent, 'failed', `「${entry.label}」段的任务不见了。回答：重做这一段 / 到此为止`); continue }
+      entry.status = child.status
+      const stage = p.stages[p.at]
+      if (child.status === 'waiting_input') { parent.message = `「${stage.label}」段在等你回答（${child.task_id}）`; continue }
+      if (isActive(child)) { parent.message = `「${stage.label}」段：${child.assignedTo} 在做`; continue }
+      if (!TERMINAL.has(child.status)) continue
+      entry.settled = true
+      entry.by = child.result?.agent ?? child.assignedTo
+      entry.summary = String(child.result?.summary ?? '').slice(0, 1000)
+      if (child.status !== 'completed') {
+        const why = child.result?.error?.message || child.result?.summary || child.status
+        this.askPipeline(state, parent, 'failed', `「${stage.label}」段${child.status === 'cancelled' ? '被取消了' : '没做成'}：${String(why).slice(0, 300)}。回答：重做这一段 / 换人 / 跳过这一段 / 到此为止`)
+        continue
+      }
+      entry.verdict = child.result?.verdict
+      if (stage.needs.includes('code') && entry.by !== undefined && !p.authors.includes(entry.by)) p.authors.push(entry.by)
+      this.event(parent, 'stage_done', `「${stage.label}」段完成（${entry.by}）${entry.verdict === 'fail' ? '：不通过' : entry.verdict === 'pass' ? '：通过' : ''}`, { by: 'hub', historyOnly: true })
+      if (entry.verdict === 'fail') { this.bounce(state, parent, stage, entry); continue }
+      p.at += 1
+      if (p.at < p.stages.length) this.openStage(state, parent)
+      else await this.completePipeline(state, parent)
+    }
+  }
+
+  /** A failing test or a review that sends the work back: a new round from the code stage, or ask once the limit is used. */
+  bounce(state, parent, stage, entry) {
+    const p = parent.pipeline
+    const limit = stage.maxBounces ?? p.max_bounces
+    const what = stage.verdict === 'test' ? '测试不通过' : '验收退回'
+    const first = gist(entry.summary, 300)
+    if (stage.bounceTo === undefined) {
+      this.askPipeline(state, parent, 'bounce', `「${stage.label}」段${what}，这条流水线没有可以退回的“干活”段。回答：到此为止，或者写清要怎么改。${first ? `\n${first}` : ''}`)
+      return
+    }
+    if (p.bounces >= limit) {
+      this.askPipeline(state, parent, 'bounce', `「${stage.label}」段${what}，已经退回 ${p.bounces} 次（上限 ${limit}）。回答：再来一轮 / 换人 / 到此为止；也可以直接写要怎么改，会带给下一轮干活的人。${first ? `\n${first}` : ''}`)
+      return
+    }
+    p.bounces += 1
+    p.round += 1
+    p.at = p.stages.findIndex(s => s.stage === stage.bounceTo)
+    this.event(parent, 'bounced', `「${stage.label}」段${what}，退回「${p.stages[p.at].label}」段，第 ${p.round} 轮（已退回 ${p.bounces}/${limit} 次）：${first.slice(0, 200)}`, { by: 'hub' })
+    this.openStage(state, parent)
+  }
+
+  /** The last stage passed: the parent is done; the key files of the last round become its outputs. */
+  async completePipeline(state, parent) {
+    const p = parent.pipeline
+    const dir = join(this.artifactDir, parent.task_id, 'outputs')
+    await mkdir(dir, { recursive: true })
+    const outputs = []
+    const latest = new Map()
+    for (const c of p.children) if (c.status === 'completed') latest.set(c.stage, c)
+    for (const entry of latest.values()) {
+      for (const o of own(state.tasks, entry.task_id)?.result?.outputs ?? []) {
+        if (outputs.some(x => x.name === o.name)) continue
+        try {
+          await copyFile(join(this.artifactDir, entry.task_id, 'outputs', o.name), join(dir, o.name))
+          outputs.push({ ...o, description: `${entry.label}段（${entry.by ?? '?'}）` })
+        } catch (error) { this.warn(`dsh-hub: could not copy ${o.name} of ${entry.task_id}: ${error?.message ?? error}`) }
+      }
+    }
+    const branch = p.children.findLast(c => c.branch !== undefined && c.status === 'completed')?.branch
+    parent.status = 'completed'
+    parent.progress = 1
+    parent.message = undefined
+    parent.question = undefined
+    parent.result = {
+      status: 'completed', summary: `${finalSummary(parent, p.children, 'completed')}${branch ? `\n分支：${branch}（没有合并，等你合）` : ''}`,
+      outputs, finished_at: nowIso(this.clock()), agent: PIPELINE_AGENT,
+    }
+    this.event(parent, 'completed', parent.result.summary.split('\n')[0], { by: 'hub' })
+    this.log(`dsh-hub: pipeline ${parent.task_id} completed in round ${p.round}`)
+  }
+
+  /** The human answered a pipeline's question (task_answer on the parent). */
+  async answerPipeline(state, parent, entry, by) {
+    const p = parent.pipeline
+    const text = entry.answer.trim()
+    const why = p.waiting
+    parent.question = undefined
+    parent.result = undefined
+    parent.status = 'running'
+    p.waiting = undefined
+    this.event(parent, 'answered', text.slice(0, 200), { by })
+    const stage = p.stages[p.at]
+    if (/^(到此为止|停止|停|取消|算了|不做了|stop|cancel)/i.test(text)) {
+      parent.status = 'cancelled'
+      this.cancelStages(state, parent, by)
+      parent.result = { status: 'cancelled', summary: finalSummary(parent, p.children, 'stopped'), outputs: [], finished_at: nowIso(this.clock()), agent: PIPELINE_AGENT }
+      this.event(parent, 'cancelled', `${by} 让流水线到此为止`, { by })
+      return
+    }
+    if (/^(跳过这一段|跳过|skip)/i.test(text)) {
+      this.event(parent, 'stage_skipped', `跳过「${stage.label}」段`, { by, historyOnly: true })
+      p.at += 1
+      if (p.at < p.stages.length) this.openStage(state, parent)
+      else await this.completePipeline(state, parent)
+      return
+    }
+    const swap = /^(换人|换个人|换一个|reassign)/i.test(text)
+    const redoWords = /^(重做这一段|重做|再试一次|retry)/i.test(text)
+    const again = /^(再来一轮|再给一轮|再来|继续|again)/i.test(text)
+    const feedback = swap || redoWords || again ? text.replace(/^\S+\s*/, '').trim() || undefined : text
+    if (why === 'bounce' && !redoWords) {
+      // Another round from the stage the failing verdict sends the work back to.
+      const back = p.stages.findIndex(s => s.stage === (stage.bounceTo ?? stage.stage))
+      const authors = p.children.filter(c => c.stage === p.stages[back].stage && c.by !== undefined).map(c => c.by)
+      p.max_bounces += 1
+      p.bounces += 1
+      p.round += 1
+      p.at = back
+      this.event(parent, 'bounced', `${by} 让它再来一轮（第 ${p.round} 轮）${swap ? `，换掉 ${[...new Set(authors)].join('、')}` : ''}`, { by })
+      this.openStage(state, parent, { feedback, exclude: swap ? authors : [] })
+      return
+    }
+    // A failed / stuck stage: do the same stage again (with someone else on 换人).
+    const before = p.children.filter(c => c.stage === stage.stage && c.round === p.round && c.by !== undefined).map(c => c.by)
+    this.openStage(state, parent, { feedback, exclude: swap ? before : [] })
   }
 
   overview() {

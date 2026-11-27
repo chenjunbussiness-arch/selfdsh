@@ -134,9 +134,14 @@ export function isOffline(error) {
   return error?.status === undefined || error.status >= 500 || ['hub-unreachable', 'hub-timeout'].includes(error.code)
 }
 
-/** First non-empty line of a text, at most `max` characters. */
+/**
+ * First non-empty line of a text, at most `max` characters. A line that only leads into
+ * a list ("改了两个文件：") takes the lines after it too, so the gist is not cut off.
+ */
 function oneLine(text, max) {
-  const line = String(text ?? '').split(/\r?\n/).map(part => part.trim()).find(part => part !== '') ?? ''
+  const lines = String(text ?? '').split(/\r?\n/).map(part => part.trim()).filter(part => part !== '')
+  let line = lines[0] ?? ''
+  if (/[:：]$/.test(line)) for (let i = 1; i < lines.length && line.length < max; i++) line = `${line} ${lines[i]}`
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
@@ -160,6 +165,19 @@ export function noticeOf(event) {
   const said = oneLine(String(event.message ?? '').split(/^--- report ---$/m)[0], 120)
   const msg = said ? `：${said}` : ''
   const where = event.dsh_profile ? `${event.created_by ?? 'DSH'}（${event.dsh_profile}）` : event.created_by ?? event.origin?.by ?? '另一台 DSH'
+  if (event.kind === 'quota') return `额度提醒${msg}`
+  const pipe = event.pipeline
+  // One stage of a pipeline: one line when it is done; the pipeline itself asks when one fails.
+  if (pipe?.parent !== undefined) {
+    const stage = `流水线 ${pipe.parent} 的「${oneLine(pipe.label ?? pipe.stage, 20)}」段${pipe.round > 1 ? `（第 ${pipe.round} 轮）` : ''}`
+    if (event.kind === 'completed') return `${stage}完成${who}${msg}`
+    if (event.kind === 'created' || event.kind === 'failed' || event.kind === 'cancelled') return undefined
+  } else if (pipe?.name !== undefined) {
+    const ptitle = `流水线「${oneLine(event.title ?? event.task_id, 60)}」`
+    if (event.kind === 'created') return `${ptitle}开始${msg}`
+    if (event.kind === 'bounced') return `${ptitle}退回重做${msg}`
+    if (event.kind === 'cancelled') return `${ptitle}已停止`
+  }
   switch (event.kind) {
     case 'created': return `云端新任务 ${title}`
     case 'registered': return `${where} 在本地开始 ${title}`
@@ -219,8 +237,9 @@ function flat(text, max) {
  * where to read the rest. `task` is the hub's task (`getTask`).
  */
 export function resultLineOf(task, event = {}) {
-  const who = task.agent && task.agent !== 'dsh-self' ? `（${task.result?.agent ?? task.assigned_to ?? task.agent}）` : ''
-  const title = `「${oneLine(task.title ?? task.task_id, 60)}」${who}`
+  const pipeline = task.pipeline !== undefined && task.pipeline !== null
+  const who = !pipeline && task.agent && task.agent !== 'dsh-self' ? `（${task.result?.agent ?? task.assigned_to ?? task.agent}）` : ''
+  const title = `${pipeline ? '流水线' : ''}「${oneLine(task.title ?? task.task_id, 60)}」${who}`
   const r = { ...(task.result ?? {}) }
   // The worker's closing block (--- report --- summary / touched / left) is part of the result: keep it, drop the marker.
   if (typeof r.summary === 'string') r.summary = r.summary.replace(/^--- report ---$/m, '')
@@ -456,11 +475,19 @@ export function createSync(deps) {
       const line = noticeOf(event)
       if (line === undefined) continue
       if (event.kind === 'progress' && (event.stage === 'step' || event.stage === undefined)) lastStep.set(`stream:${event.task_id}`, now())
+      // A quota line is about the agent, not the task whose finish crossed the limit: it
+      // keeps its own place, so that task's "done" line in the same read does not hide it.
+      if (event.kind === 'quota') {
+        latest.delete(`${event.task_id}#quota`)
+        latest.set(`${event.task_id}#quota`, line)
+        continue
+      }
       if (SETTLES.has(event.kind)) asks.delete(event.task_id)
       if (ASKS.test(line)) asks.set(event.task_id, line)
       latest.delete(event.task_id) // keep the map in event order
       latest.set(event.task_id, line)
-      if (FINAL_KINDS.has(event.kind)) finals.set(event.task_id, event)
+      // A pipeline stage that finished is one line; the pipeline's own end goes out whole.
+      if (FINAL_KINDS.has(event.kind) && (event.pipeline?.parent === undefined || event.kind === 'waiting_input')) finals.set(event.task_id, event)
       else finals.delete(event.task_id)
     }
     // The end of a run goes out whole (summary / question / reason, files), once per
@@ -536,7 +563,7 @@ export function createSync(deps) {
     for (const row of rows ?? []) {
       if (row?.status !== 'accepted' && row?.status !== 'running') continue
       const kind = typeof row.origin === 'string' ? row.origin : row.origin?.kind
-      if (kind === 'local') continue
+      if (kind === 'local' || kind === 'pipeline') continue // a pipeline is as quiet as its stages: they are checked
       if (!mine(row)) continue // someone else's task: their DSH tells them
       active.add(row.task_id)
       if (row.stage === 'blocked' || row.stage === 'needs_input') continue // already a question
