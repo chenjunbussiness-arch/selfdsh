@@ -57,6 +57,21 @@ ROLE_RULES = {
               "测试和提交由 DSH 另派给本机的 dsh worker。拿不准就 submit_result status partial，把问题写在 needs_input。"),
     "tester": "你在这个调度里的角色是 tester：只跑测试，不改业务代码，不碰 git。",
 }
+CAN_WORDS = {"plan": "出方案和验收标准", "code": "改代码", "test": "跑测试", "git": "提交和推送（git）",
+             "cmd": "执行其他命令", "review": "验收别人的改动"}
+
+
+def can_rules(can):
+    """The rule line of an agent that declared `can` (the hub's boundary in a task says the same)."""
+    if can is None:
+        return None
+    may = "、".join(CAN_WORDS[c] for c in can if c in CAN_WORDS) or "（无）"
+    never = "、".join(w for c, w in CAN_WORDS.items() if c not in can)
+    return (f"你在这个调度里能做的是：{may}" + (f"；不能{never}" if never else "") + "。"
+            "每个任务只做 task.needs 里写的那部分；流水线的段（task.pipeline）按 task.pipeline.required 交文件，"
+            "测试段和验收段把结论写在第一行。")
+
+
 GENERAL_RULES = ("在 task.local.workspace_path 指向的文件夹里工作，不要改它以外的文件。"
                  "做不了就调用 release_task 并写明原因。")
 
@@ -182,14 +197,21 @@ def workspace_patch(ws):
         return None, "工作区没有改动，没有生成 changes.patch"
     if len(patch) > MAX_PATCH_BYTES:
         return None, f"改动太大（{len(patch)} 字节），没有附 changes.patch，改动留在本机工作区"
-    return patch.decode("utf-8", "replace"), None
+    # Which commit the patch is against, so whoever tests or commits it starts from the same place
+    # (git apply skips text before the first diff).
+    head = (git(ws, "rev-parse", "HEAD") or b"").decode().strip()
+    branch = (git(ws, "rev-parse", "--abbrev-ref", "HEAD") or b"").decode().strip()
+    header = f"# base: {head} ({branch})\n" if head else ""
+    return header + patch.decode("utf-8", "replace"), None
 
 
 class Bridge:
-    def __init__(self, client, hub, workspaces, role, out, keepalive=KEEPALIVE_SECONDS, make_patch=True):
+    def __init__(self, client, hub, workspaces, role, out, keepalive=KEEPALIVE_SECONDS, make_patch=True, can=None, tasklog=None):
         self.client, self.hub = client, hub
         self.workspaces = dict(workspaces)  # name -> local path
         self.role = role or "worker"
+        self.can = can
+        self.tasklog = tasklog  # a headless runner reads which tasks this run took (for /v1/usage)
         self.out = out
         self.keepalive = keepalive
         self.make_patch = make_patch
@@ -229,8 +251,12 @@ class Bridge:
                 self.answers.setdefault(task_id, []).extend(answers)
 
     # --- MCP --------------------------------------------------------------------------
+    def rules(self):
+        own = can_rules(self.can) if self.can is not None else ROLE_RULES.get(self.role)
+        return " ".join(x for x in (own, GENERAL_RULES) if x)
+
     def instructions(self, hub_text):
-        rules = " ".join(x for x in (ROLE_RULES.get(self.role), GENERAL_RULES) if x)
+        rules = self.rules()
         return f"{hub_text or ''}\n{rules}".strip()
 
     def handle(self, message):
@@ -302,15 +328,22 @@ class Bridge:
         """A task the agent just got: keep it alive and tell the agent where to work."""
         ws_name = task.get("workspace")
         path = self.workspaces.get(ws_name) if ws_name else None
-        local = {"role": self.role, "rules": " ".join(x for x in (ROLE_RULES.get(self.role), GENERAL_RULES) if x)}
+        # The hub's boundary (what this agent may do, from its grant) comes first when the hub sends one.
+        boundary = task.get("boundary") if isinstance(task.get("boundary"), str) else None
+        local = {"role": self.role, "rules": " ".join(x for x in (boundary or self.rules(), GENERAL_RULES if boundary else None) if x)}
+        if self.can is not None:
+            local["can"] = list(self.can)
+        needs = task.get("needs") if isinstance(task.get("needs"), list) else None
+        coding = self.role == "coder" if needs is None else "code" in needs
         dirty = False
         if ws_name and path:
             local["workspace_path"] = path
             if task.get("ref"):
                 branch = git(path, "rev-parse", "--abbrev-ref", "HEAD")
                 local["current_branch"] = branch.decode().strip() if branch else None
-                local["ref_note"] = ("任务指定了 ref，coder 不切分支；当前分支不是它时用 release_task 退回。"
-                                     if self.role == "coder" else "任务指定了 ref，先确认工作区在这个分支上。")
+                no_git = self.role == "coder" if self.can is None else "git" not in self.can
+                local["ref_note"] = ("任务指定了 ref，你不碰 git、不切分支；当前分支不是它时用 release_task 退回。"
+                                     if no_git else "任务指定了 ref，先确认工作区在这个分支上。")
             status = git(path, "status", "--porcelain")
             dirty = bool(status and status.strip())
             if dirty:
@@ -318,26 +351,39 @@ class Bridge:
         elif ws_name:
             local["note"] = f"工作区 {ws_name} 不在这台机器上，用 release_task 退回。"
         with self.lock:
-            self.held[task["task_id"]] = {"attempt": task.get("attempt"), "workspace": ws_name, "dirty_before": dirty}
+            self.held[task["task_id"]] = {"attempt": task.get("attempt"), "workspace": ws_name, "dirty_before": dirty, "coding": coding}
+        if self.tasklog:
+            try:
+                with open(self.tasklog, "a", encoding="utf-8") as f:
+                    f.write(task["task_id"] + "\n")
+            except OSError as e:
+                log(f"could not write the task log: {e}")
         return local
 
     def with_patch(self, task_id, args):
         files = args.get("files") if isinstance(args.get("files"), list) else []
-        if args.get("status") != "completed" or any(isinstance(f, dict) and f.get("name") == PATCH_NAME for f in files):
+        if args.get("status") != "completed":
             return args
+        own = any(isinstance(f, dict) and f.get("name") == PATCH_NAME for f in files)
         with self.lock:
             h = self.held.get(task_id)
         path = self.workspaces.get(h["workspace"]) if h and h.get("workspace") else None
-        if not path:
+        # Only a task that edits code hands in its edit (a test or review stage leaves the workspace as it was).
+        if not path or not h.get("coding", True):
             return args
         patch, note = workspace_patch(path)
         summary = str(args.get("summary") or "")
         if patch is None:
+            # Nothing changed here: an agent that worked somewhere else keeps the patch it wrote.
+            if own:
+                return args
             log(f"{task_id}: {note}")
             return {**args, "summary": f"{summary}\n（{note}）".strip()}
-        log(f"{task_id}: attached {PATCH_NAME} ({len(patch.encode('utf-8'))} bytes)")
-        extra = f"\n（{PATCH_NAME} 由本机 mcp_bridge 从工作区 {h['workspace']} 生成；改动也留在这台机器的工作区里。）"
-        return {**args, "summary": summary + extra, "files": files + [{"name": PATCH_NAME, "text": patch}]}
+        # The workspace is the truth: a patch the agent wrote by hand may not apply, so ours replaces it.
+        log(f"{task_id}: attached {PATCH_NAME} ({len(patch.encode('utf-8'))} bytes){' in place of the agent' + chr(39) + 's own' if own else ''}")
+        extra = f"\n（{PATCH_NAME} 由本机 mcp_bridge 从工作区 {h['workspace']} 用 git 生成{'，替换了 agent 自己写的那份' if own else ''}；改动也留在这台机器的工作区里。）"
+        kept = [f for f in files if not (isinstance(f, dict) and f.get("name") == PATCH_NAME)]
+        return {**args, "summary": summary + extra, "files": kept + [{"name": PATCH_NAME, "text": patch}]}
 
     # --- stdio ------------------------------------------------------------------------
     def write(self, answer):
@@ -375,7 +421,7 @@ def load(agent=None, worker_dir=None, env=None):
     client = ac.HubClient(st["url"], token, False, st["cafile"], 60, agent_id=st["agent_id"] or None,
                           proxy=st["proxy"], no_proxy=st["no_proxy"], workspaces=wm.names(), runtime=st.get("runtime"),
                           role=st.get("role"), pull_every_seconds=st.get("pull_every_seconds"),
-                          dsh_profile=st.get("dsh_profile"))
+                          dsh_profile=st.get("dsh_profile"), can=st.get("can"))
     workspaces = {n: p for n, p in wm.workspaces.items() if n in wm.names()}
     return client, workspaces, st.get("role")
 
@@ -395,7 +441,7 @@ def main(argv=None):
         return 2
     hub = HubMcp(client)
     bridge = Bridge(client, hub, workspaces, role, sys.stdout.buffer, keepalive=max(10, min(60, a.keepalive_seconds)),
-                    make_patch=not a.no_patch)
+                    make_patch=not a.no_patch, can=client.can, tasklog=os.environ.get("DSH_BRIDGE_TASKLOG") or None)
     log(f"{client.agent_id} ({role}) -> {ac.mask_url(hub.root)}; workspaces: {', '.join(sorted(workspaces)) or '-'}")
     if a.check:
         try:

@@ -158,6 +158,9 @@ profile.json keys (all optional; unknown keys are ignored):
                  "agents": [{"name": "quick", "description": "..."}], "note": "..."}
               Default: the built-in runtime of DSH_PLATFORM (aws-quick has one; other
               platforms declare nothing). null = declare nothing.
+  can         what this agent may do: a list of plan, code, test, git, cmd, review
+              (["code", "test"] = edits and runs tests, never git). The hub routes by it;
+              approval only narrows it. To widen it later: agent_client.py regrant.
   capabilities, maxConcurrency, role, pullEverySeconds, platform, agentId
               what this machine's worker is, so each machine's own profile.json says it
               (fallbacks of the DSH_* settings of the same meaning). capabilities is a
@@ -207,6 +210,8 @@ BUSY_WAIT = 5  # `run`: longest poll while a task is being worked on here (its r
 # still read from the environment / .env for one release; `doctor` says where they belong now.
 ENV_KEYS = ("DSH_HUB_URL", "DSH_HUB_PROXY", "DSH_HUB_CAFILE", "DSH_AGENT")
 ROLES = ("worker", "coder", "tester", "dispatcher", "observer")
+# What an agent may do (agents/<id>.json "can"); approval only narrows it. Unset = its role decides.
+CAN = ("plan", "code", "test", "git", "cmd", "review")
 # The role a known platform gets when nothing names one (matches the hub's PLATFORM_ROLES).
 PLATFORM_ROLES = {"aws-quick": "coder"}
 PROXY_OFF = ("off", "direct", "none", "false", "no")
@@ -349,8 +354,9 @@ class HubClient:
 
     def __init__(self, url, token=None, insecure=False, cafile=None, timeout=60, *, agent_id=None,
                  proxy=None, no_proxy=False, workspaces=(), opener=None, ctx=None, runtime=None,
-                 role=None, pull_every_seconds=None, dsh_profile=None):
+                 role=None, pull_every_seconds=None, dsh_profile=None, can=None):
         self.url = hub_url(url)
+        self.can = can
         self.dsh_profile = dsh_profile
         self.runtime = runtime
         self.role = role
@@ -403,6 +409,8 @@ class HubClient:
             body["runtime"] = self.runtime
         if self.role is not None:
             body["role"] = self.role
+        if self.can is not None:
+            body["can"] = list(self.can)
         if self.pull_every_seconds is not None:
             body["pull_every_seconds"] = self.pull_every_seconds
         if self.dsh_profile is not None:
@@ -432,6 +440,28 @@ class HubClient:
     def me(self):
         """GET /v1/me: the hub's view of this worker (status, grants, held tasks, client_ip)."""
         return self._req("GET", "me")
+
+    def peek(self):
+        """GET /v1/peek: how many tasks next_task would give now (takes none)."""
+        return self._req("GET", "peek")
+
+    def report_usage(self, usage, task_ids=None):
+        """POST /v1/usage: what a run cost (token counts / cost_usd), split over `task_ids`."""
+        body = {"usage": usage}
+        if task_ids:
+            body["task_ids"] = list(task_ids)[:20]
+        return self._req("POST", "usage", body)
+
+    def regrant(self, can=None, role=None, reason=None):
+        """POST /v1/regrant: ask for another can / role. Narrower applies now; wider waits for a DSH."""
+        body = {}
+        if can is not None:
+            body["can"] = list(can)
+        if role is not None:
+            body["role"] = role
+        if reason:
+            body["reason"] = reason
+        return self._req("POST", "regrant", body)
 
     def leave(self, reason=None):
         """POST /v1/leave: offline now; the hub requeues the tasks this worker holds."""
@@ -1139,7 +1169,19 @@ def machine_settings(config, path, base=None):
         out[key] = v
     for key in ("role", "platform", "agentId"):
         out[key] = _opt_str(config, key, path)
+    out["can"] = parse_can(config.get("can"), f"{path}: can")
     return out
+
+
+def parse_can(value, where="can"):
+    """A "can" list (plan, code, test, git, cmd, review) -> sorted-by-CAN list, or None when unset."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [v.strip() for v in value.split(",") if v.strip()]
+    if not isinstance(value, list) or any(not isinstance(v, str) or v not in CAN for v in value):
+        raise ConfigError(f"{where} must be a list of {', '.join(CAN)}")
+    return [c for c in CAN if c in value]
 
 
 def check_runtime(rt, where="runtime"):
@@ -1311,6 +1353,7 @@ def resolve_settings(wm, url=None, token_file=None, proxy=None, no_proxy=False, 
     if role not in ROLES:
         raise ConfigError(f"DSH_ROLE / --role must be one of {', '.join(ROLES)} (from {sources['role']})")
     st["role"] = role
+    st["can"] = m.get("can")
     every = pick("pull_every_seconds", "DSH_PULL_EVERY_SECONDS", cli.get("pull_every_seconds"), m.get("pullEverySeconds"), None)
     st["pull_every_seconds"] = None if every is None else _int_setting(every, "DSH_PULL_EVERY_SECONDS", 60, 86400)
     return st
@@ -1328,7 +1371,7 @@ def settings_summary(st):
             "platform": st["platform"], "capabilities": st["capabilities"], "max_concurrency": st["max_concurrency"],
             "token_file": st["token_file"], "token_file_exists": bool(st["token_file"]) and os.path.isfile(st["token_file"]),
             "exchange": st["exchange"], "heartbeat_seconds": st["heartbeat_seconds"],
-            "role": st.get("role"), "pull_every_seconds": st.get("pull_every_seconds"),
+            "role": st.get("role"), "can": st.get("can"), "pull_every_seconds": st.get("pull_every_seconds"),
             "dsh_profile": st.get("dsh_profile"), "log_file": st.get("log_file"),
             "runtime": st.get("runtime")}
 
@@ -2033,7 +2076,8 @@ def _client(st, token, workspaces, a, agent_id=None):
         warn("plain http to a non-loopback hub: the token would cross the network in clear text")
     return HubClient(url, token, a.insecure, st["cafile"], a.timeout, agent_id=agent_id or st["agent_id"] or None,
                      proxy=st["proxy"], no_proxy=st["no_proxy"], workspaces=workspaces, runtime=st.get("runtime"),
-                     role=st.get("role"), pull_every_seconds=st.get("pull_every_seconds"), dsh_profile=st.get("dsh_profile"))
+                     role=st.get("role"), pull_every_seconds=st.get("pull_every_seconds"), dsh_profile=st.get("dsh_profile"),
+                     can=st.get("can"))
 
 
 def check_settings(st):
@@ -2705,6 +2749,10 @@ def build_parser():
     r.add_argument("--max", type=int, help="tasks held at once (default: DSH_MAX_CONCURRENCY)")
     r.add_argument("--wait", type=int, default=DEFAULT_WAIT, help=f"long-poll seconds (0..{MAX_WAIT}, default {DEFAULT_WAIT})")
     add("status", "local settings (no token) and the hub's view of this worker (GET /v1/me)")
+    rg = add("regrant", "ask the hub for another grant (can / role); narrower applies now, wider waits for a DSH to approve")
+    rg.add_argument("--can", help="comma separated: plan, code, test, git, cmd, review (default: can in agents/<id>.json)")
+    rg.add_argument("--role", choices=list(ROLES), help="default: the role in the agent config")
+    rg.add_argument("--reason", help="why, shown to whoever approves it")
     lv = add("leave", "go offline now; the hub requeues the tasks this worker holds")
     lv.add_argument("--reason", help="short note for the task history")
     b = add("bridge", "sync this worker's tasks with the exchange folder (--once for schedulers)")
@@ -2804,6 +2852,15 @@ def main(argv=None, env=None):
         client = make(read_token(st["token_file"]))
         if cmd == "leave":
             print(json.dumps(client.leave(a.reason), ensure_ascii=False, indent=2))
+            return 0
+        if cmd == "regrant":
+            can = parse_can(a.can, "--can") if a.can else st.get("can")
+            if can is None and a.role is None:
+                raise ConfigError("nothing to ask for: give --can / --role or put \"can\" in the agent config")
+            res = client.regrant(can=can, role=a.role, reason=a.reason)
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+            if res.get("status") == "pending":
+                print(f"等批准：在 DSH 里 agent_requests 能看到 {res.get('request_id')}，agent_approve 批准。", file=sys.stderr)
             return 0
     except ConfigError as err:
         print(f"error: {err}", file=sys.stderr)

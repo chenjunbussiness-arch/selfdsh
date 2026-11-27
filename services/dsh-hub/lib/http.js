@@ -376,6 +376,11 @@ export const ROUTES = {
   '/v1/event': { method: 'POST', auth: 'worker', body: 'event', run: ({ hub, id, body }) => hub.progress(id, body) },
   '/v1/result': { method: 'POST', auth: 'worker', body: 'result', run: ({ hub, id, body }) => hub.submitResult(id, body) },
   '/v1/release': { method: 'POST', auth: 'worker', body: 'event', run: ({ hub, id, body }) => hub.release(id, body) },
+  // headless runners: is there work for me (takes nothing), and what did my last run cost
+  '/v1/peek': { method: 'GET', auth: 'worker', run: ({ hub, id }) => hub.peek(id) },
+  '/v1/usage': { method: 'POST', auth: 'worker', body: 'small', run: ({ hub, id, body }) => hub.reportUsage(id, body) },
+  // ask for another grant (can / role) with the agent's own token; wider waits for a DSH's approval
+  '/v1/regrant': { method: 'POST', auth: 'worker', body: 'small', run: ({ hub, id, body }) => hub.requestChange(id, body) },
   // full session log of a task this worker holds or just finished (redacted on the hub)
   '/v1/session': { method: 'POST', auth: 'worker', body: 'result', run: ({ hub, id, body }) => hub.agentSession(id, body) },
   // dispatcher agents (role dispatcher, own worker token): create and follow their own tasks

@@ -50,10 +50,12 @@ export const ROLE_RANK = Object.freeze({ observer: 0, dispatcher: 1, tester: 2, 
 
 /**
  * What a task needs from its worker. `code` = edit files; `test` = run tests;
- * `git` = commit / push / open or merge a PR; `cmd` = run any other command or script.
+ * `git` = commit / push / open or merge a PR; `cmd` = run any other command or script;
+ * `plan` = write the plan and the acceptance criteria; `review` = accept or send back
+ * someone else's work. Only a dispatcher (or a pipeline stage) says plan / review.
  * A dispatcher may say it (`needs` on the task); otherwise {@link taskNeeds} reads the text.
  */
-export const NEEDS = ['code', 'test', 'git', 'cmd']
+export const NEEDS = ['code', 'test', 'git', 'cmd', 'plan', 'review']
 
 /** What only a worker may do (a coder never): everything but editing. */
 export const RUN_NEEDS = ['test', 'git', 'cmd']
@@ -114,7 +116,7 @@ export function taskNeeds(task) {
 }
 
 /** Words for each need, in the refusal and the duties. */
-const NEED_WORDS = { code: '改代码', test: '跑测试', git: 'git（提交、推送、开 PR）', cmd: '执行命令或脚本' }
+const NEED_WORDS = { code: '改代码', test: '跑测试', git: 'git（提交、推送、开 PR）', cmd: '执行命令或脚本', plan: '出方案和验收标准', review: '验收别人的改动' }
 
 /**
  * What each role may and may not do, in the words the dispatcher and the worker read
@@ -247,4 +249,118 @@ export function roleWidening(requested, granted) {
 /** True when the role is stored (so `publicAgent` can always report it). */
 export function hasRole(agent) {
   return isRole(agent?.role)
+}
+
+// --- what an agent can do (`can`) ------------------------------------------------------
+//
+// A role is a fixed bundle. `can` says exactly what one agent may do, so "Gemini edits
+// and runs tests but never touches git" needs no new role. An agent that declared `can`
+// is routed by it alone: every need of the task must be in its `can`. An agent without
+// `can` keeps its role, read as the preset below (and the old role rules still apply).
+
+/** Everything an agent may be granted, in listing order. */
+export const CAN = ['plan', 'code', 'test', 'git', 'cmd', 'review']
+
+/** What each role means as a grant (an agent that never declared `can`). */
+export const ROLE_CAN = Object.freeze({
+  worker: Object.freeze(['plan', 'code', 'test', 'git', 'cmd']),
+  coder: Object.freeze(['code']),
+  tester: Object.freeze(['test']),
+  dispatcher: Object.freeze([]),
+  observer: Object.freeze([]),
+})
+
+/** A declared `can` in CAN order, or `undefined` when none was declared (or not a list). */
+export function canList(value) {
+  if (!Array.isArray(value)) return undefined
+  return CAN.filter(c => value.includes(c))
+}
+
+/** `bad-can` refusal, or `undefined` when absent or valid. */
+export function canProblem(value, role) {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value) || value.length > CAN.length || value.some(c => !CAN.includes(c))) {
+    return { code: 'bad-can', message: `can must be a list of ${CAN.join(', ')}` }
+  }
+  if (value.length > 0 && !roleTakesWork(agentRole({ role }))) return { code: 'bad-can', message: `a ${role} takes no work: leave can out` }
+  return undefined
+}
+
+/** What this agent may do: its declared `can`, else its role read as a grant. */
+export function canOf(agent) {
+  const declared = canList(agent?.can)
+  return declared ?? [...ROLE_CAN[agentRole(agent)]]
+}
+
+/** True when the agent declared `can` (then only `can` decides what it takes). */
+export function declaresCan(agent) {
+  return Array.isArray(agent?.can)
+}
+
+/** Why `granted` adds something to `asked` (each a stored agent shape); `undefined` when it only narrows. */
+export function canWidening(asked, granted) {
+  const before = canOf(asked)
+  const extra = canOf(granted).filter(c => !before.includes(c))
+  if (extra.length === 0) return undefined
+  return { code: 'can-widened', message: `can can only be narrowed at approval (adds ${extra.join(', ')})` }
+}
+
+/**
+ * The needs a routing decision goes by. A pipeline stage says what it needs and nothing
+ * else counts: its instruction quotes the whole goal, which may well mention the tests
+ * or the commit that are other stages' work.
+ */
+export function needsFor(task) {
+  if (task?.pipe !== undefined && Array.isArray(task?.needs)) return needsOf(task.needs)
+  return taskNeeds(task)
+}
+
+/** True when this agent (`{ role, can }`) may take this task. */
+export function agentAccepts(agent, task) {
+  const role = agentRole(agent)
+  if (!roleTakesWork(role)) return false
+  const can = canOf(agent)
+  const needs = needsFor(task)
+  if (declaresCan(agent) || task?.pipe !== undefined) return can.length > 0 && needs.every(n => can.includes(n))
+  // Old agents: the role rules as before, and plan / review only where the role covers them.
+  if (needs.some(n => (n === 'plan' || n === 'review') && !can.includes(n))) return false
+  return roleAccepts(role, task)
+}
+
+/** Why `agent` (`{ role, can }`, called `target`) may not take `task`; `undefined` when it may. */
+export function agentRefusal(task, agent, target) {
+  const role = agentRole(agent)
+  if (!declaresCan(agent) && task?.pipe === undefined) {
+    const byRole = roleRefusal(task, role, target)
+    if (byRole !== undefined) return byRole
+  }
+  if (!roleTakesWork(role)) return roleRefusal(task, role, target)
+  const can = canOf(agent)
+  const missing = needsFor(task).filter(n => !can.includes(n))
+  if (missing.length === 0) return undefined
+  const who = target === undefined ? 'this agent' : String(target)
+  return {
+    code: 'can-missing',
+    message: `${who} 只能${can.map(n => NEED_WORDS[n]).join('、') || '（什么都不能做）'}，这个任务还要${missing.map(n => NEED_WORDS[n]).join('、')}。`
+      + '把这部分拆给能做的 agent（agent_list 看每个的 can），用 depends_on 接上；或者派一条流水线（pipeline），由 hub 按段分给能做的人。',
+  }
+}
+
+/** The duties of an agent: from `can` when it declared one, else from its role. */
+export function agentDuties(agent) {
+  if (!declaresCan(agent)) return { ...roleDuties(agentRole(agent)), grants: canOf(agent) }
+  const can = canOf(agent)
+  return {
+    role: agentRole(agent), can: can.map(n => NEED_WORDS[n]), cannot: CAN.filter(n => !can.includes(n)).map(n => NEED_WORDS[n]),
+    handoff: '只做你能做的那部分；别的部分交结果时写清楚，由调度方或流水线另派。任务要求越界时不做那部分，用 needs_input 交回并说明。',
+    grants: can,
+  }
+}
+
+/** One line a worker reads first in its task: what it may do here. */
+export function agentBoundary(agent) {
+  if (!declaresCan(agent)) return roleBoundary(agentRole(agent))
+  const d = agentDuties(agent)
+  const cannot = d.cannot.length === 0 ? '' : `；不能${d.cannot.join('、')}`
+  return `你能做的是：${d.can.join('、') || '（无）'}${cannot}。${d.handoff}`
 }

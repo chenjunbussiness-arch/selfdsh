@@ -81,6 +81,9 @@ Content-Type 一律 `application/json`（下载产物除外）。错误统一 `{
 | `GET /v1/artifact?id=&task_id=&name=[&from_task=]` | 下载本任务输入或上游产出 |
 | `GET /v1/me?id=` | hub 眼里的自己：`status`、`last_seen`、`version`、授予的 `workspaces` / `capabilities`、`reported_workspaces`、`ignored_workspaces`、`running_tasks`、`offline_after_ms`、`client_ip` |
 | `POST /v1/leave?id=` | 主动下线：标为 `left`，它持有的任务立即重排 → `{ok, status:"left", requeued[]}` |
+| `GET /v1/peek?id=` | 只看不领：现在有几个它能领的任务 → `{available, tasks[{task_id, title, needs, workspace, stage}], over_quota?, quota?}`（第 13 节） |
+| `POST /v1/usage?id=` | 报一次运行的用量：`{usage:{input_tokens, output_tokens, cache_creation_input_tokens?, cache_read_input_tokens?, total_tokens?, cost_usd?}, task_ids?[]}` → `{ok, tasks, today, over_quota?}`（第 13 节） |
+| `POST /v1/regrant?id=` | 改自己的授权：`{can?[], role?, reason?}`。收窄立刻生效；放宽变成一条 `kind: "change"` 的待批请求，DSH `agent_approve` 后生效（第 13 节） |
 
 ### 5.2 控制方
 | 方法 路径 | 说明 |
@@ -305,3 +308,28 @@ worker 客户端在 `task.json` 里写 `effort_resolved`：任务自己的 effor
 - `minutes` 按 `capability`、再按 `type`、再按 `default` 取；`local` 管 DSH 本地分区 worker 的任务。不配就不计时。
 - 从创建算起，等人回答的时间不算。到时只标一次 `overdue`，并给发布方信箱发一条事件。
 - `onOverdue: "notify"`（默认）只提醒；`"reassign"` 把任务从当前 worker 手里收回重排（这个 worker 不再领它，不扣尝试次数），没人持有的照样只提醒。
+
+## 13. 能力授权、流水线和每日额度
+
+完整设计、真机测试和接入步骤见 `docs/AGENT-PIPELINE.md`，这里只列协议上的变化。
+
+**`can`**：注册（`enroll`）和批准（`/v1/ctl/approve`）多一个 `can`（`plan`、`code`、`test`、`git`、`cmd`、`review` 的子集），批准只能收窄。任务的 `needs` 要全部落在领活人的 `can` 里。没写 `can` 的按 `role` 预设：`coder` = code，`tester` = test，`worker` = plan + code + test + git + cmd。`/v1/ctl/agents` 每个 agent 带 `can`、`can_declared`、`usage_today`、`quota`。
+
+**流水线**：`/v1/ctl/dispatch` 带 `pipeline`（模板名）、可选 `verify`、`max_bounces`（0..10，默认 2），不带 `agent`。hub 建一个 `agent: "pipeline"` 的父任务（`origin.kind: "pipeline"`，不派给任何人），每段到了才建一个子任务（`<父>.<段>[-r<轮>]`，`agent: "pool:*"`，带 `pipe`），上一段的产出是它的输入。
+
+- 子任务交结果时缺 `required` 文件，或测试 / 验收段第一行没有结论，`/v1/result` 回 400（`missing-output` / `missing-verdict`）。结论：测试段"通过 / 不通过"，验收段"通过 / 退回"（也认 pass / fail / approved / rejected 等）。
+- 不通过就从干活段开新一轮，最多 `max_bounces` 次；用完、或某段没人能接，父任务进 `waiting_input`，用 `/v1/ctl/answer` 回答：`再来一轮`、`换人`、`跳过这一段`、`重做这一段`、`到此为止`，别的话当修改意见带给下一轮。
+- 验收段排除这条流水线里所有写过代码的 agent。
+- 取消或收起父任务会取消它没做完的段。全部通过后父任务 `completed`，各段最新的产出复制到父任务上，摘要里有每段的执行人和结论、分支名。
+- 任务和事件多出：`pipeline`（父任务：`方案 ✓ → 干活 ✱ …` 这样一行）、`pipeline_stage`（子任务：父任务号、段、轮次）、`verdict`、`usage`。信箱事件多一种 `quota`，另有 `stage`、`stage_done`、`bounced` 写进父任务历史。
+
+**额度**：`hub.json` 的 `quota`：
+
+```json
+{ "quota": { "utcOffsetMinutes": 480, "warnAt": 0.8,
+  "agents": { "agy-mydesk": { "tokensPerDay": 3000000, "costPerDay": 5, "tasksPerDay": 60, "minutesPerDay": 480 } } } }
+```
+
+- 用量来自 `/v1/result` 的 `usage`、MCP `submit_result` 的 `usage`，或 `/v1/usage`。token = 输入 + 输出 + 写缓存（给了 `total_tokens` 就用它）。任务数和时长由 hub 自己算（每次交结果计一次，时长从领到交）。
+- 任一项到上限，这个 agent 当天不再被派新任务（`poll` / `next_task` 不给，`peek` 回 `over_quota`），段换下一个能做的人。到 `warnAt` 和到 100% 各给发布方信箱发一条 `quota` 事件。
+- 按 agent、按天存在 state 的 `usage` 里，保留 8 天。
