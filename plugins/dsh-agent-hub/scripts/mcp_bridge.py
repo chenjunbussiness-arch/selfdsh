@@ -362,8 +362,9 @@ class Bridge:
 
     def with_patch(self, task_id, args):
         files = args.get("files") if isinstance(args.get("files"), list) else []
-        if args.get("status") != "completed" or any(isinstance(f, dict) and f.get("name") == PATCH_NAME for f in files):
+        if args.get("status") != "completed":
             return args
+        own = any(isinstance(f, dict) and f.get("name") == PATCH_NAME for f in files)
         with self.lock:
             h = self.held.get(task_id)
         path = self.workspaces.get(h["workspace"]) if h and h.get("workspace") else None
@@ -373,11 +374,16 @@ class Bridge:
         patch, note = workspace_patch(path)
         summary = str(args.get("summary") or "")
         if patch is None:
+            # Nothing changed here: an agent that worked somewhere else keeps the patch it wrote.
+            if own:
+                return args
             log(f"{task_id}: {note}")
             return {**args, "summary": f"{summary}\n（{note}）".strip()}
-        log(f"{task_id}: attached {PATCH_NAME} ({len(patch.encode('utf-8'))} bytes)")
-        extra = f"\n（{PATCH_NAME} 由本机 mcp_bridge 从工作区 {h['workspace']} 生成；改动也留在这台机器的工作区里。）"
-        return {**args, "summary": summary + extra, "files": files + [{"name": PATCH_NAME, "text": patch}]}
+        # The workspace is the truth: a patch the agent wrote by hand may not apply, so ours replaces it.
+        log(f"{task_id}: attached {PATCH_NAME} ({len(patch.encode('utf-8'))} bytes){' in place of the agent' + chr(39) + 's own' if own else ''}")
+        extra = f"\n（{PATCH_NAME} 由本机 mcp_bridge 从工作区 {h['workspace']} 用 git 生成{'，替换了 agent 自己写的那份' if own else ''}；改动也留在这台机器的工作区里。）"
+        kept = [f for f in files if not (isinstance(f, dict) and f.get("name") == PATCH_NAME)]
+        return {**args, "summary": summary + extra, "files": kept + [{"name": PATCH_NAME, "text": patch}]}
 
     # --- stdio ------------------------------------------------------------------------
     def write(self, answer):

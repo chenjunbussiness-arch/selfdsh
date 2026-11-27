@@ -61,7 +61,7 @@ import { basename, join } from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
 
 import { metricsOf, phaseOf, timelineOf } from './lifecycle.js'
-import { ANY_TARGET, DEFAULT_MAX_BOUNCES, PIPELINE_AGENT, PIPELINE_NAME_RE, branchOf, finalSummary, pipelineView, pipelinesOf, stageInstruction, verdictHint, verdictOf } from './pipeline.js'
+import { ANY_TARGET, DEFAULT_MAX_BOUNCES, PIPELINE_AGENT, PIPELINE_NAME_RE, branchOf, finalSummary, gist, pipelineView, pipelinesOf, stageInstruction, verdictHint, verdictOf } from './pipeline.js'
 import { USAGE_DAYS, quotaOf, quotaState, usageDay, usageOf } from './quota.js'
 import { DEFAULT_ROLE, ROLES, agentAccepts, agentBoundary, agentDuties, agentRefusal, agentRole, canList, canOf, canProblem, canWidening, declaresCan, needsOf, needsProblem, roleOf, roleRefusal, roleTakesWork, roleWidening } from './roles.js'
 
@@ -2949,13 +2949,13 @@ export class AgentHub {
     const p = parent.pipeline
     const limit = stage.maxBounces ?? p.max_bounces
     const what = stage.verdict === 'test' ? '测试不通过' : '验收退回'
-    const first = String(entry.summary ?? '').split(/\r?\n/).find(l => l.trim() !== '') ?? ''
+    const first = gist(entry.summary, 300)
     if (stage.bounceTo === undefined) {
-      this.askPipeline(state, parent, 'bounce', `「${stage.label}」段${what}，这条流水线没有可以退回的“干活”段。回答：到此为止，或者写清要怎么改。${first ? `\n${first.slice(0, 300)}` : ''}`)
+      this.askPipeline(state, parent, 'bounce', `「${stage.label}」段${what}，这条流水线没有可以退回的“干活”段。回答：到此为止，或者写清要怎么改。${first ? `\n${first}` : ''}`)
       return
     }
     if (p.bounces >= limit) {
-      this.askPipeline(state, parent, 'bounce', `「${stage.label}」段${what}，已经退回 ${p.bounces} 次（上限 ${limit}）。回答：再来一轮 / 换人 / 到此为止；也可以直接写要怎么改，会带给下一轮干活的人。${first ? `\n${first.slice(0, 300)}` : ''}`)
+      this.askPipeline(state, parent, 'bounce', `「${stage.label}」段${what}，已经退回 ${p.bounces} 次（上限 ${limit}）。回答：再来一轮 / 换人 / 到此为止；也可以直接写要怎么改，会带给下一轮干活的人。${first ? `\n${first}` : ''}`)
       return
     }
     p.bounces += 1

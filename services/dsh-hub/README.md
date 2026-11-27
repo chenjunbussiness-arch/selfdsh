@@ -84,6 +84,8 @@ curl -s https://127.0.0.1:7891/v1/health            # {"ok":true,"version":"2.0.
 | `sticky` | 对象 `{holdSeconds, ttlSeconds}` | `{"holdSeconds": 120, "ttlSeconds": 86400}` | 粘性路由（见第 6.3 节）。`holdSeconds`（0..3600）：别的 worker 让给首选 worker 多久，0 = 只排序不让；`ttlSeconds`（60..2592000）：记住「谁做过」多久 | `{"holdSeconds": 60}` |
 | `mcp` | 对象 `{enabled}` | `{"enabled": true}` | 是否开放 `/mcp` 和 `/oauth/token`（见第 5.4 节）。只用 REST 的部署可以关掉 | `{"enabled": false}` |
 | `due` | 对象 `{minutes, onOverdue}` | `{"minutes": {}, "onOverdue": "notify"}`（不计时） | 超时规则（见 docs/DSH-HUB-PROTOCOL-v2.md 第 12 节）。`minutes` 的键是 `default`、某个 `capability`、某个 `type` 或 `local`（DSH 本地分区 worker 的任务），值 1..43200 分钟，从创建算起、不含等人回答的时间；`onOverdue` 是 `notify`（只提醒发布方）或 `reassign`（从当前 worker 收回重排）。派任务时的 `due_minutes` / `on_overdue` 优先 | `{"minutes": {"default": 120, "code": 60}, "onOverdue": "notify"}` |
+| `pipelines` | 对象 `{名字: [段]}` | 内置 `feature`、`small`、`tiny` | 流水线模板，按名字加或覆盖内置的。一段是名字（`plan`、`code`、`test`、`commit`、`review`、`self`）或对象 `{stage, needs, prefer, required, verdict, bounceTo, maxBounces, excludeAuthors, label, guide}`（见 docs/AGENT-PIPELINE.md 第 2 节） | `{"feature": ["plan", {"stage": "code", "prefer": ["agy-mydesk"]}, "test", "commit", "review"]}` |
+| `quota` | 对象 `{utcOffsetMinutes, warnAt, agents}` | 不限 | 每个 agent 每天的上限：`tokensPerDay`、`costPerDay`、`tasksPerDay`、`minutesPerDay`。超了当天不再派给它；到 `warnAt`（默认 0.8）和用满各提醒一次（见 docs/AGENT-PIPELINE.md 第 6 节） | `{"utcOffsetMinutes": 480, "agents": {"agy-mydesk": {"tokensPerDay": 3000000}}}` |
 
 其他请求体上限是固定的：`enroll`、`enroll/status`、`heartbeat` 16 KiB；`event` 和其他控制方 POST（cancel、retry、approve、reject、revoke、provision）64 KiB。
 
@@ -141,6 +143,9 @@ node server.mjs controller revoke <id>   # 吊销，立即生效
 | `GET /v1/me?id=` | 只读，不算“出现过” | `{agent_id, status, online, last_seen, left_at, version, node, workspaces, reported_workspaces, ignored_workspaces, capabilities, running_tasks, offline_after_ms, server_time, client_ip}` |
 | `POST /v1/leave?id=` | `{reason?}` | `{ok, agent_id, status:"left", requeued, server_time}`；持有的任务立即重排 |
 | `POST /v1/release?id=` | `{task_id, reason?}`：领到了但发现做不了，交还给队列。**不计入尝试次数**，这个 worker 之后不会再领到同一个任务 | `{ok, task_status:"pending"}` |
+| `GET /v1/peek?id=` | 只看不领 | `{available, tasks[{task_id, title, needs, workspace, stage}], over_quota?, quota?}` |
+| `POST /v1/usage?id=` | `{usage:{input_tokens, output_tokens, …, cost_usd?}, task_ids?[]}`：一次运行的用量 | `{ok, tasks, today, over_quota?}` |
+| `POST /v1/regrant?id=` | `{can?[], role?, reason?}`：收窄立刻生效，放宽等控制方批准 | `{ok, status:"applied"}` 或 `{ok, status:"pending", request_id}` |
 
 ### 5.2 控制方
 
@@ -292,6 +297,7 @@ node --test tests/*.test.mjs
 | `tests/http.test.mjs` | IP 和 CIDR、`::ffff:` 地址、X-Forwarded-For、URL 和 query 解析、路由表、监听地址检查；handler：health、id 与令牌不一致 401、worker 令牌调 `/ctl` 403、白名单、trustProxy、enroll、body 上限 413、415、400、完整流程、控制方隔离、管理接口、HTTP 长轮询及断开、500 不泄露细节；`e2e:` 开头的用例会启动真实的 node:http 服务 |
 | `tests/config.test.mjs` | hub.json 默认值（端口 7891、offlineAfterMs 90000）和校验、`DSH_HUB_PORT`、没有 TLS 时拒绝非回环地址、TLS 路径、私钥权限检查、CLI |
 | `tests/lifecycle.test.mjs` | 阶段和时间线（含旧历史推断）、提问 → `waiting_input` → 回答回到原 worker（领任务时带 `answers`）、边做边问时回答在进度 / 心跳回复里只交一次、收起等人回答的任务即取消、送达标记、审计文件、归档后查时间线、指标（失败率、问人比例、兜底、p50 / p90）、超时提醒和改派、`due` 配置校验 |
+| `tests/pipeline.test.mjs` | 结论识别和模板、按 `can` 派、feature 整条（测试不过退回再过、提交、换人验收）、验收排除作者和「跳过这一段」、退回上限后「再来一轮」/「到此为止」、取消连带、token 额度（超了换人、提醒）、`/v1/usage`、regrant（收窄立刻生效、放宽待批） |
 | `tests/presence.test.mjs` | 状态 pending→offline→online→offline→left→online→revoked、`agent_counts`、`client_version` 校验、心跳 `running` 对账（`abort`、`worker-lost` 重排、30 秒宽限、不带 running 不对账）、leave 立即重排并唤醒别的 worker、offline 持有者被 sweep 重排（进度事件算在线）、dispatch 404/409/`warnings`/`require_online`（具体 agent 和 pool）、`me()`、HTTP `/v1/me`、`/v1/leave`、health 的 `client_ip`（含 trustProxy）、白名单 403 只回调用方自己的 `client_ip` |
 
 开发机（Windows，不能运行 node）上的验证方式：把 `lib/*` 和测试改写成 CommonJS 后，在云端 JS 沙箱里执行。沙箱没有 `node:http`，所以除了唯一的 `e2e:` 用例，其余 112 个用例全部通过（含 `presence.test.mjs` 的 13 个）。另外做过变异测试，每一处都至少有一个用例失败：早先的 8 处（去掉"当前上报"条件、去掉创建者检查、去掉 id 与令牌一致的检查、去掉角色检查、X-Forwarded-For 取最左边一段、dispatch 不唤醒、心跳不截断、dispatch 内不复查控制方），以及这次的 6 处（去掉心跳对账、去掉 30 秒宽限、去掉 offline 重排、忽略 `require_online`、403 不带 `client_ip`、进度事件不算在线）。**在真实 Node 22 上执行 `node --test` 和 e2e 用例，需要在服务器上进行。**

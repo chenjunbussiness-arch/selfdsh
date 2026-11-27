@@ -221,6 +221,17 @@ export function branchOf(parent, round) {
 }
 
 /** The parent's closing summary: one line per stage of the last round, who did it and what came out. */
+/**
+ * The gist of a stage's summary: its first non-empty line, plus the lines after it when
+ * that line only leads into a list ("改了两个文件："), at most `max` characters.
+ */
+export function gist(text, max = 200) {
+  const lines = String(text ?? '').split(/\r?\n/).map(l => l.trim()).filter(l => l !== '')
+  let line = lines[0] ?? ''
+  if (/[:：]$/.test(line)) for (let i = 1; i < lines.length && line.length < max; i++) line = `${line} ${lines[i]}`
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
 export function finalSummary(parent, children, outcome) {
   const p = parent.pipeline
   const last = new Map()
@@ -228,8 +239,7 @@ export function finalSummary(parent, children, outcome) {
   const rows = p.stages.map((s) => {
     const c = last.get(s.stage)
     if (c === undefined) return `- ${s.label}：没做到这一段`
-    const first = String(c.summary ?? '').split(/\r?\n/).find(l => l.trim() !== '') ?? ''
-    return `- ${s.label}（${c.by ?? '?'}）：${first.slice(0, 200)}`
+    return `- ${s.label}（${c.by ?? '?'}）：${gist(c.summary)}`
   })
   const head = outcome === 'completed'
     ? `流水线 ${p.name} 跑完${p.round > 1 ? `，第 ${p.round} 轮通过` : ''}。`

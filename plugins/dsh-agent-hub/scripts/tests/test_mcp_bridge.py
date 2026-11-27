@@ -261,7 +261,20 @@ class PatchTests(BridgeTests):
         self.br.handle(call("next_task"))
         self.br.handle(call("submit_result", {"task_id": "T1", "status": "completed", "summary": "s",
                                               "files": [{"name": "changes.patch", "text": "mine"}]}))
-        self.assertEqual(self.hub.files, [{"name": "changes.patch", "text": "mine"}])
+        self.assertEqual(self.hub.files, [{"name": "changes.patch", "text": "mine"}], "no change here: the agent's patch stays")
+        self.hub.files = None
+        self.br.handle(call("next_task"))
+        with open(os.path.join(self.ws, "calc.py"), "a") as f:
+            f.write("# real edit\n")
+        self.br.handle(call("submit_result", {"task_id": "T1", "status": "completed", "summary": "s",
+                                              "files": [{"name": "notes.md", "text": "n"}, {"name": "changes.patch", "text": "hand-written"}]}))
+        self.assertEqual([f["name"] for f in self.hub.files], ["notes.md", "changes.patch"])
+        self.assertIn("+# real edit", self.hub.files[1]["text"], "the workspace's own diff replaces a hand-written one")
+        self.assertIn("替换了 agent 自己写的那份", self.hub.calls[-1]["params"]["arguments"]["summary"])
+        with open(os.path.join(self.ws, "calc.py")) as f:
+            body = f.read().replace("# real edit\n", "")
+        with open(os.path.join(self.ws, "calc.py"), "w") as f:
+            f.write(body)
         self.hub.files = None
         self.br.handle(call("next_task"))
         self.br.handle(call("submit_result", {"task_id": "T1", "status": "failed", "summary": "s"}))

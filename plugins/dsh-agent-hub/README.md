@@ -253,6 +253,8 @@ v1 的 11 个工具名称不变，另加 3 个兜底工具。每个工具对应�
 
 `task_dispatch` 还可以带 `due_minutes`（1..43200）和 `on_overdue`（`notify` 只提醒，`reassign` 收回重排），覆盖 hub.json 的 `due`（协议第 12 节）。
 
+**流水线**：`task_dispatch` 带 `pipeline`（`feature` / `small` / `tiny` 或 hub.json 里定义的名字）时不用写 `agent`，hub 按段派给能做的 agent（方案 → 干活 → 测试 → 提交 → 验收），可选 `verify`（测试命令）和 `max_bounces`（默认 2）。作战室每段一行，测试不过或验收退回自动重做，用完次数用 `task_answer` 回答（再来一轮 / 换人 / 到此为止 / 修改意见）。`agent_approve` 多一个 `can` 参数（只能收窄）；`agent_list` 每个 agent 带 `can`、今日用量 `usage_today` 和额度 `quota`。详见 `docs/AGENT-PIPELINE.md`。
+
 出错时工具抛出 `HubError`，消息格式为 `[code] 说明`，例如 `[hub-token-missing] DSH_HUB_TOKEN is not set (neither in the environment nor in /root/.dsh/agent-hub/controller.env): …`。hub 返回的错误（`404 task-not-found`、`403 not-creator`、`400 bad-task` 等）会保留原来的状态码和 code。
 
 ## 5. 调度面板
@@ -387,10 +389,10 @@ worker 目录固定是 `<DSH home>/worker/`（DSH home = `$DSH_HOME` 或 `~/.dsh
 
 - **连接**：读 `<DSH home>/worker/` 里的 `.env`（`DSH_HUB_URL`、`DSH_HUB_PROXY`、`DSH_HUB_CAFILE`）、`agents/<id>.json` 和 `tokens/<id>.token`，和 `agent_client.py` 同一套配置（两个脚本放在同一个文件夹）。
 - **令牌**：自己找 hub 的 `/oauth/token` 换 15 分钟的 bearer，快到期或 hub 重启后自动重换；agent 看不到 worker 令牌。
-- **工具**：原样转发 hub 的 5 个工具（`next_task`、`get_input`、`report_progress`、`submit_result`、`release_task`），并在说明里加上这个角色的规矩（coder：不跑测试、不执行命令、不碰 git）。
+- **工具**：原样转发 hub 的 5 个工具（`next_task`、`get_input`、`report_progress`、`submit_result`、`release_task`），并在说明里按这个 agent 的 `can` 写上规矩（例如 `can: [code, test]`：能改代码、跑测试，不能碰 git）。
 - **保活**：领到任务后每 30 秒替它续一次租约，直到它交结果或退回；模型埋头改 20 分钟也不会被判离线、任务被收回。手上没任务时什么都不发，IDE 开着但没人叫它干活时，不会假装在线。
 - **本机信息**：`next_task` 前先报一次心跳（工作区名、角色、DSH profile），绑定本机工作区的任务才派得到它；任务里多一个 `local`：要改的文件夹 `workspace_path`、这个角色的规矩。
-- **coder 交 patch**：角色是 coder、任务有本机工作区、交 `completed` 时没带 `changes.patch`，桥用只读的 `git diff`（含未跟踪的新文件）生成一份附上，后面跑测试和提交的 worker 会收到它当输入。桥不碰 git 索引、不提交。`--no-patch` 关掉。
+- **交 patch**：要改代码的任务（`needs` 含 `code`）有本机工作区、交 `completed` 时，桥用只读的 `git diff`（含未跟踪的新文件）生成 `changes.patch` 附上，开头写着 base 提交；agent 自己手写了一份也换成工作区的真改动（工作区没改动时才留它的）。后面跑测试和提交的 worker 会收到它当输入。测试、验收段不附。桥不碰 git 索引、不提交。`--no-patch` 关掉。
 
 接入一个新 agent（以 Antigravity 为例，身份 `agy-mydesk`）：
 
@@ -403,6 +405,27 @@ worker 目录固定是 `<DSH home>/worker/`（DSH home = `$DSH_HOME` 或 `~/.dsh
 
 每家 agent 各注册一个身份，不共用令牌，信箱投递、指标和审计才分得清是谁干的。
 
-**无人值守**：桥只在 agent 调用时才去 hub 领活，没人叫 agent，它就不会领；这期间派给它的任务会照常提示「没人接」。Antigravity CLI 有无界面模式（`agy -p "<提示>" --output-format json`，用交互登录后缓存的凭据），可以由定时任务叫醒；headless 下没放行的 MCP 工具调用会被拒，要在它的权限设置里放行 `mcp(dsh-hub/*)`。这部分还没做，见 `docs/AGENT-PIPELINE.md`。
+**能做什么 `can`**：`agents/<id>.json` 写 `"can": ["code", "test"]`（可选 `plan`、`code`、`test`、`git`、`cmd`、`review`），注册时带上。已批准的要改：`python agent_client.py regrant --agent <id> --can code,test`，收窄立刻生效，放宽等 DSH 在 `agent_requests` / `agent_approve` 里批。
 
-测试：`python -m unittest plugins/dsh-agent-hub/scripts/tests/test_mcp_bridge.py`（假 hub，不联网；patch 部分要装 git）。
+### 8.2 无人值守：`agent_runner.py`
+
+桥只在 agent 被叫起来时才领活。要无人值守，就让 `scripts/agent_runner.py` 定时叫它：
+
+```json
+"runner": {
+  "every": 120,
+  "timeout": 3600,
+  "command": ["claude", "-p", "{prompt}", "--output-format", "json",
+              "--mcp-config", "<路径>/mcp.json", "--permission-mode", "acceptEdits",
+              "--allowedTools", "mcp__dsh-hub,Read,Glob,Grep,Edit,Write"],
+  "cwd": "{workspace_path}"
+}
+```
+
+- 写进 `agents/<id>.json`，运行 `python agent_runner.py --agent <id>`（常驻；`--once` 只跑一次）。
+- 每 `every` 秒心跳一次，再问 hub 有没有它能领的活（`GET /v1/peek`，只看不领）；没有、或今天超额度，就什么都不启动，不花模型额度。有活才启动 `command`，提示词固定（`{prompt}`）。
+- 跑完从 CLI 的 JSON 输出里读 token（Claude Code 的 `usage` / `total_cost_usd`、Gemini CLI 的 `stats`、Codex 的 `turn.completed`），报给 hub（`POST /v1/usage`），记到这次领的任务上，算进它当天的额度。
+- 占位符：`{prompt}`、`{workspace_path}`、`{agent_id}`、`{tasklog}`。换一家只改 `command`。CLI 要先交互登录一次；headless 下要放行 dsh-hub 的 MCP 工具（Claude Code 用 `--allowedTools`，Antigravity 在权限设置里放行 `mcp(dsh-hub/*)`）。
+- 在 IDE 里由人叫起来的 agent 报不了 token，额度只能靠 hub.json 的 `tasksPerDay` / `minutesPerDay` 管。
+
+测试：`python -m unittest plugins/dsh-agent-hub/scripts/tests/test_mcp_bridge.py plugins/dsh-agent-hub/scripts/tests/test_agent_runner.py`（假 hub，不联网；patch 部分要装 git）。

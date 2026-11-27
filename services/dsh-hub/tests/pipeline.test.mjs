@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
-import { verdictOf, pipelinesOf } from '../lib/pipeline.js'
+import { gist, verdictOf, pipelinesOf } from '../lib/pipeline.js'
 import { quotaOf, usageOf } from '../lib/quota.js'
 import { CTL, b64, expectHubError, makeHub, provision } from './helpers.mjs'
 
@@ -32,6 +32,8 @@ function feature(hub, extra = {}) {
 }
 
 test('verdicts and templates', () => {
+  assert.equal(gist('改了两个文件：\n1. calc.py\n\n2. test_calc.py\n别的没动'), '改了两个文件： 1. calc.py 2. test_calc.py 别的没动')
+  assert.equal(gist('\n通过\n细节'), '通过')
   assert.equal(verdictOf('test', '通过 12 条'), 'pass')
   assert.equal(verdictOf('test', '不通过：1 条失败'), 'fail')
   assert.equal(verdictOf('review', '# 退回\n- 少了测试'), 'fail')

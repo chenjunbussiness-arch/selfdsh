@@ -455,9 +455,23 @@ test('stream: a decision line is not hidden by later news in the same read; an a
   assert.deepEqual(s.client.of('delivered'), [['delivered', ['o1'], 'web']])
 })
 
+test('stream: a quota line is not hidden by the done line of the task that crossed the limit', async (t) => {
+  const s = await setup(t)
+  s.client.feed = { events: [], next: 1, latest: 1, reset: false }
+  await s.sync.streamOnce(0)
+  const stage = { task_id: 'p1.code', title: 'x · 干活', agent: 'agy', pipeline: { parent: 'p1', stage: 'code', label: '干活', round: 1 } }
+  s.client.feed = { next: 3, latest: 3, reset: false, events: [
+    mail({ ...stage, seq: 2, kind: 'quota', message: 'agy 今天的token额度用完了（34431 / 20000）' }),
+    mail({ ...stage, seq: 3, kind: 'completed', message: '改了 calc.py' }),
+  ] }
+  await s.sync.streamOnce(0)
+  assert.deepEqual(s.notices, ['额度提醒：agy 今天的token额度用完了（34431 / 20000）', '流水线 p1 的「干活」段完成（agy）：改了 calc.py'])
+})
+
 test('pipeline notices: a stage done is one line, the pipeline says when it starts, bounces and stops', () => {
   const stage = { task_id: 'p1.code', title: 'x · 干活', agent: 'agy', message: '改了 settings.tsx', pipeline: { parent: 'p1', stage: 'code', label: '干活', round: 2 } }
   assert.equal(noticeOf({ ...stage, kind: 'completed' }), '流水线 p1 的「干活」段（第 2 轮）完成（agy）：改了 settings.tsx')
+  assert.equal(noticeOf({ ...stage, kind: 'completed', message: '改了两个文件：\n1. calc.py\n2. test_calc.py' }), '流水线 p1 的「干活」段（第 2 轮）完成（agy）：改了两个文件： 1. calc.py 2. test_calc.py', 'a lead-in line takes its list')
   assert.equal(noticeOf({ ...stage, kind: 'created' }), undefined)
   assert.equal(noticeOf({ ...stage, kind: 'failed' }), undefined, 'the pipeline asks instead')
   const parent = { task_id: 'p1', title: '加开关', agent: 'pipeline', pipeline: { name: 'feature', round: 1 } }

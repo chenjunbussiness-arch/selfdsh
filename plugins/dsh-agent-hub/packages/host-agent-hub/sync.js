@@ -134,9 +134,14 @@ export function isOffline(error) {
   return error?.status === undefined || error.status >= 500 || ['hub-unreachable', 'hub-timeout'].includes(error.code)
 }
 
-/** First non-empty line of a text, at most `max` characters. */
+/**
+ * First non-empty line of a text, at most `max` characters. A line that only leads into
+ * a list ("改了两个文件：") takes the lines after it too, so the gist is not cut off.
+ */
 function oneLine(text, max) {
-  const line = String(text ?? '').split(/\r?\n/).map(part => part.trim()).find(part => part !== '') ?? ''
+  const lines = String(text ?? '').split(/\r?\n/).map(part => part.trim()).filter(part => part !== '')
+  let line = lines[0] ?? ''
+  if (/[:：]$/.test(line)) for (let i = 1; i < lines.length && line.length < max; i++) line = `${line} ${lines[i]}`
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
@@ -470,6 +475,13 @@ export function createSync(deps) {
       const line = noticeOf(event)
       if (line === undefined) continue
       if (event.kind === 'progress' && (event.stage === 'step' || event.stage === undefined)) lastStep.set(`stream:${event.task_id}`, now())
+      // A quota line is about the agent, not the task whose finish crossed the limit: it
+      // keeps its own place, so that task's "done" line in the same read does not hide it.
+      if (event.kind === 'quota') {
+        latest.delete(`${event.task_id}#quota`)
+        latest.set(`${event.task_id}#quota`, line)
+        continue
+      }
       if (SETTLES.has(event.kind)) asks.delete(event.task_id)
       if (ASKS.test(line)) asks.set(event.task_id, line)
       latest.delete(event.task_id) // keep the map in event order
