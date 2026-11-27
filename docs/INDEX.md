@@ -32,6 +32,7 @@
 ## 协议与设计
 
 - [DSH-HUB-PROTOCOL-v2.md](DSH-HUB-PROTOCOL-v2.md)：dsh-hub 协议 `dsh-agent/2.0`，包括角色、令牌、接口、工作区路由、网络与代理、worker 状态机
+- [AGENT-PIPELINE.md](AGENT-PIPELINE.md)：多家 agent 串起来干活的流水线设计（草案，待确认）：按能力授权、方案 / 干活 / 测试 / 提交 / 验收、退回上限、额度、接入方式
 - [UI-STYLE.md](UI-STYLE.md)：所有 client-ui 插件统一遵守的 UI 规范（DeepSeek 原生风格）
 - [plugins/dsh-secrets/DESIGN.md](../plugins/dsh-secrets/DESIGN.md)：密钥库的威胁模型、文件格式，以及为什么不提供 `secret_get`
 - [plugins/dsh-secrets/docs/DASHBOARD.md](../plugins/dsh-secrets/docs/DASHBOARD.md)：只读密钥看板的接口与字段白名单

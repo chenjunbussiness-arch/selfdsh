@@ -1,0 +1,11 @@
+{
+  "agentId": "agy-mydesk",
+  "dshProfile": "web",
+  "node": "mydesk",
+  "platform": "antigravity",
+  "role": "coder",
+  "capabilities": ["code"],
+  "maxConcurrency": 1,
+  "description": "Antigravity (Gemini) via mcp_bridge.py: edits code only",
+  "workspaces": {}
+}

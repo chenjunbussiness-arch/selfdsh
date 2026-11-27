@@ -338,3 +338,23 @@ routing（route_task）──► manager（每个工作区一个，默认最强�
 | 调度台界面 | jsdom 里连真 DSH 渲染：等你回答的任务详情有回答框和生命周期块（排队 / 执行 / 等你回答 / 总耗时 / 期限 / 已送达） |
 
 实测里找到并修了两处：同一次读取里后面的进度会盖掉前面「需要你决定」的提醒（现在问题和决定先发，被回答 / 完成 / 取消后才不再发）；超时改派时作战室只看到「退回队列」（现在写明是超时收回）。
+
+## 十六、带 MCP 的编程 agent 接入：本机 MCP 桥（DSH 0.2.2-rc.5，2026-11-27）
+
+`plugins/dsh-agent-hub/scripts/mcp_bridge.py`：一个本机 stdio MCP 服务器，Antigravity、Claude Code、Codex、opencode 这类能当 MCP 客户端的 agent 都指向它。它读 `<DSH home>/worker/` 的连接设置和令牌，向 hub 换 bearer 并自动续期，转发 hub 的五个工具；领到任务后替 agent 续租约，coder 交结果时附上只读 `git diff` 生成的 `changes.patch`。接入步骤见插件 README 第 8.1 节，后续的多 agent 流水线设计见 `docs/AGENT-PIPELINE.md`。
+
+**真机实测**（hub 用自签 CA 的 https，DSH 经 `DSH_HUB_CAFILE` 连它；新身份 `agy-mydesk`，`role: coder`、`capabilities: ["code"]`，`platform: antigravity`；Antigravity 本身不能在开发机上跑，用同样走 stdio MCP 的 Claude Code CLI 代替）：
+
+| 场景 | 结果 |
+|---|---|
+| 注册 | `agent_client.py register --agent agy-mydesk` → DSH `agent_approve` → 令牌写进 `tokens/agy-mydesk.token`；`mcp_bridge.py --check` 经自签证书换到 bearer，列出 5 个工具和工作区 `demo` |
+| 真 agent 领活 | DSH 派 `pool:code`「给 calc.py 加减法」（`needs: ["code"]`，工作区 `demo`）；Claude Code 经桥调 `next_task`，在 `task.local.workspace_path` 里加了 `sub(a, b)`，`submit_result` 完成；它说明里写着没跑测试、没碰 git |
+| hub 侧 | 任务 `completed`，执行人 `agy-mydesk`，输出 `changes.patch`（桥生成，摘要里注明）；时间线 `created / accepted / completed` 的 `by` 都对 |
+| 交接 | 依赖它的「跑测试并提交」任务由一个 `worker` 领到，输入里有上游的 `changes.patch`，内容就是那段 diff |
+| 保活 | 桥领到任务后 100 秒不发任何调用（hub 判离线是 60 秒），任务仍是 `running`、仍归 `agy-mydesk`、尝试次数 1 |
+| hub 重启 | 重启后 bearer 全失效，下一次 `report_progress` 由桥自动重换令牌，成功；随后交结果 `completed` |
+| 单测 | `test_mcp_bridge.py` 28 个通过（令牌复用与提前续期、401 重换一次、说明加角色规矩、心跳不带 running、保活与丢任务、回答不丢、hub 连不上时回 JSON-RPC 错误且不带令牌、patch 含新文件且不动索引） |
+
+没测到：Antigravity 本身（在用户机器上配 `mcp_config.json` 后才算真测）；经 Clash 代理连 hub（桥用的是 `agent_client.py` 同一套代理设置）。
+
+看到的一个现象：IDE 里的 agent 没人叫它时不会来领活，派给 `pool:code` 的任务在作战室会先提示「没人接」。这是预期行为，无人值守要靠定时叫醒 `agy -p`，放到流水线设计里。

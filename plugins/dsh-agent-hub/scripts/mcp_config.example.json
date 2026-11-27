@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "dsh-hub": {
+      "command": "python",
+      "args": ["C:/Users/<you>/.dsh/worker/bin/mcp_bridge.py", "--agent", "agy-mydesk"],
+      "timeoutSeconds": 120
+    }
+  }
+}
